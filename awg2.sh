@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="v0.8.33"
+VERSION="v0.8.34"
 SCRIPT_PATH="/usr/local/bin/awg2"
 
 # ── Канал обновлений ───────────────────────────────────────
@@ -19466,6 +19466,7 @@ EOF
 
   _wgobf_write_linux_installer "$name" "$dir"
   _wgobf_write_readme "$name" "$dir"
+  _wgobf_write_phobos "$name" "$dir"
   _wgobf_write_keenetic "$name" "$dir"
   chmod 600 "$dir"/*
   chmod 700 "$dir/install-linux.sh"
@@ -19600,6 +19601,8 @@ _wgobf_write_readme() {
     echo "  obfuscator.conf  — конфиг wg-obfuscator $WGOBF_VERSION"
     echo "  install-linux.sh — установка всего на Debian/Ubuntu одной командой"
     echo "  keenetic.txt     — поля и конфиг для AWG Manager на Keenetic"
+    echo "  phobos.conf      — формат Phobos (wg.conf + [instance])"
+    echo "  phobos-link.txt  — то же ссылкой phobos:// (одна строка)"
     [[ "$clean" == "1" ]] && \
       echo "  wg-direct.conf   — БЕЗ обфускатора (телефоны); виден DPI как WireGuard"
     echo ""
@@ -19611,8 +19614,11 @@ _wgobf_write_readme() {
     echo "  2. Запустить: wg-obfuscator -c obfuscator.conf  (окно не закрывать)"
     echo "  3. Импортировать wg.conf в приложение WireGuard и подключиться"
     echo ""
-    echo "Keenetic (AWG Manager): Новый туннель → вкладка «ClusterM» (не «Phobos»),"
-    echo "  все поля и конфиг — в keenetic.txt"
+    echo "Keenetic (AWG Manager): вкладка «Phobos» — ссылка из phobos-link.txt,"
+    echo "  или вкладка «ClusterM» — поля руками. Всё расписано в keenetic.txt"
+    echo ""
+    echo "Клиенты Phobos: phobos.conf / phobos-link.txt. Совместимо с этим сервером,"
+    echo "  пока у клиента выключены obfuscate-bytes и маскировка MEDIA."
     echo ""
     echo "OpenWrt: пакет wg-obfuscator с LuCI —"
     echo "  https://github.com/ClusterM/wg-obfuscator/blob/master/docs/OPENWRT.md"
@@ -19626,17 +19632,50 @@ _wgobf_write_readme() {
   } > "$dir/README.txt"
 }
 
-# Keenetic + AWG Manager (github.com/hoaxisr/awg-manager): вкладка «ClusterM»
-# при создании туннеля. Именно ClusterM, а не Phobos: вкладка Phobos ставит
-# обфускатор из форка Phobos, а у нас на сервере оригинал ClusterM (менеджер
-# держит ту же версию 1.6). Поля обфускатора вводятся руками — конфиг с
-# [instance] менеджер считает конфигом Phobos, поэтому его не делаем.
+# Формат Phobos: клиентский .conf с секцией [instance] и ссылка
+# phobos://<base64url(conf)>#<имя>. Их понимают клиенты Phobos, в том числе
+# вкладка «Phobos» AWG Manager на Keenetic.
+#
+# На роутере тогда работает обфускатор из форка Phobos, а у нас на сервере —
+# оригинал ClusterM. Проверено вживую: они совместимы, пока у клиента нет
+# двух расширений Phobos — obfuscate-bytes (частичная обфускация) и маскировки
+# MEDIA. Поэтому здесь ни того, ни другого нет; менять их у клиента нельзя.
+_wgobf_write_phobos() {
+  local name="$1" dir="$2"
+  {
+    cat "$dir/wg.conf"
+    echo ""
+    echo "[instance]"
+    echo "target = $(_wgobf_get ENDPOINT):$(_wgobf_get PORT)"
+    echo "key = $(_wgobf_get KEY)"
+    echo "masking = $(_wgobf_get MASKING)"
+    echo "max-dummy = 4"
+  } > "$dir/phobos.conf"
+  python3 - "$dir/phobos.conf" "$name" > "$dir/phobos-link.txt" <<'PY_LINK'
+import base64, sys, urllib.parse
+conf = open(sys.argv[1], "rb").read()
+print("phobos://" + base64.urlsafe_b64encode(conf).decode().rstrip("=")
+      + "#" + urllib.parse.quote(sys.argv[2]))
+PY_LINK
+}
+
+# Keenetic + AWG Manager (github.com/hoaxisr/awg-manager). Два пути:
+#   • вкладка «Phobos» — ссылка phobos:// одной вставкой (см. _wgobf_write_phobos);
+#   • вкладка «ClusterM» — поля руками; обфускатор на роутере тогда тот же
+#     оригинал ClusterM 1.6, что и на сервере.
 _wgobf_write_keenetic() {
   local name="$1" dir="$2"
   {
     echo "Keenetic + AWG Manager — клиент $name"
     echo ""
-    echo "AWG Manager → Новый туннель → вкладка «ClusterM» (НЕ «Phobos»)"
+    echo "Способ 1 — вкладка «Phobos», одной вставкой."
+    echo "AWG Manager → Новый туннель → «Phobos» → поле «Или конфиг .conf с секцией"
+    echo "[instance] / ссылка phobos://» → вставить ссылку из phobos-link.txt"
+    echo "(или содержимое phobos.conf). Поле «Ссылка установки Phobos» — пустым."
+    echo "Во вкладке «Обфускатор» потом НЕ включать obfuscate-bytes и MEDIA:"
+    echo "сервер их не понимает, связь пропадёт."
+    echo ""
+    echo "Способ 2 — вкладка «ClusterM», поля руками:"
     echo ""
     echo "Сервер (host:port) обфускатора: $(_wgobf_get ENDPOINT):$(_wgobf_get PORT)"
     echo "Ключ:                          $(_wgobf_get KEY)"
@@ -19653,8 +19692,12 @@ _wgobf_write_keenetic() {
 _wgobf_show_bundle() {
   local name="$1" dir="$WGOBF_CLIENTS/$1"
   [[ -f "$dir/wg.conf" ]] || { err "Комплект $name не найден ($dir)"; return 1; }
-  # Комплекты до v0.8.33 выпущены без keenetic.txt — дописываем на лету
-  [[ -f "$dir/keenetic.txt" ]] || { _wgobf_write_keenetic "$name" "$dir"; chmod 600 "$dir/keenetic.txt"; }
+  # Комплекты до v0.8.34 выпущены без файлов Phobos/Keenetic — дописываем на лету
+  if [[ ! -f "$dir/phobos-link.txt" || ! -f "$dir/keenetic.txt" ]]; then
+    _wgobf_write_phobos "$name" "$dir"
+    _wgobf_write_keenetic "$name" "$dir"
+    chmod 600 "$dir/phobos.conf" "$dir/phobos-link.txt" "$dir/keenetic.txt"
+  fi
   echo ""
   hdr "Клиент $name"
   echo -e "  ${W}Папка:${N} $dir"
@@ -19676,7 +19719,12 @@ _wgobf_show_bundle() {
     fi
   fi
   echo ""
-  echo -e "${Y}  ── Keenetic, AWG Manager → вкладка «ClusterM» (не «Phobos») ──${N}"
+  echo -e "${Y}  ── Keenetic, AWG Manager → вкладка «Phobos» (одной вставкой) ──${N}"
+  echo -e "  В поле «Или конфиг .conf с секцией [instance] / ссылка phobos://»:"
+  cat "$dir/phobos-link.txt"
+  echo -e "  ${D}То же файлом: $dir/phobos.conf. obfuscate-bytes и MEDIA не включать.${N}"
+  echo ""
+  echo -e "${Y}  ── или вкладка «ClusterM», поля руками ──${N}"
   echo -e "  Сервер (host:port) : ${W}$(_wgobf_get ENDPOINT):$(_wgobf_get PORT)${N}"
   echo -e "  Ключ               : ${W}$(_wgobf_get KEY)${N}"
   echo -e "  Маскировка         : ${W}$(_wgobf_get MASKING)${N}"

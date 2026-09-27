@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-ffffff?style=flat-square&labelColor=000000)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Ubuntu%2024%20%2F%20Debian%2012%2B-E95420?style=flat-square&logo=ubuntu&logoColor=white)](https://ubuntu.com/)
 [![Protocol](https://img.shields.io/badge/AWG-2.0%20%2F%203.0%20%2F%203.1-00d4ff?style=flat-square)](#)
-[![Version](https://img.shields.io/badge/version-v0.8.33-ff6b00?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v0.8.34-ff6b00?style=flat-square)](#)
 
 <br>
 
@@ -200,7 +200,10 @@ XOR-обфусцируется. Снаружи виден только порт 
   `obfuscator.conf`, `install-linux.sh` (Debian/Ubuntu одной командой) и
   памятка для Windows / macOS / OpenWrt / Android.
 - Keenetic с [AWG Manager](https://github.com/hoaxisr/awg-manager): вкладка
-  «ClusterM» (не «Phobos»), все поля и конфиг — в `keenetic.txt` комплекта.
+  «Phobos» — ссылка `phobos://` одной вставкой (`phobos-link.txt`), или вкладка
+  «ClusterM» — поля руками. Всё расписано в `keenetic.txt` комплекта.
+- Клиенты Phobos совместимы, пока у них выключены `obfuscate-bytes` и
+  маскировка `MEDIA` (проверено).
 - Клиенту нужен обфускатор на устройстве: роутер, Linux, Windows, macOS.
   Для iOS и телефонов без обфускатора есть опция «пускать клиентов без
   обфускатора» — такие подключаются обычным WireGuard (`wg-direct.conf`),
@@ -277,6 +280,6 @@ sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/pumbaX/awg-multi-scri
 
 *Сообщество [AWG-Toolza](https://t.me/awgToolza)*
 
-**AWG Toolza v0.8.33** · MIT License
+**AWG Toolza v0.8.34** · MIT License
 
 </div>
