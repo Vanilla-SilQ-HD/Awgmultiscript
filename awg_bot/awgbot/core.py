@@ -1872,3 +1872,176 @@ def xray_set_balancer(strategy: str) -> tuple[bool, str]:
     if strategy not in XRAY_STRATEGIES:
         return False, "Неизвестная стратегия"
     return _awg2_cli(["--xray-balancer", strategy])
+
+
+# ───────────────────────── WG + обфускатор (awg2, пункт 9) ─────────────────────────
+# Второй сервер рядом с AWG: WireGuard (wgobf0) за wg-obfuscator. Состояние и
+# комплекты клиентов читаем из файлов awg2; всё, что меняет сервер (клиенты,
+# ключ, перезапуск), — только через `awg2 --wgobf` (с v0.8.35), чтобы логика
+# жила в одном месте.
+WGOBF_STATE = os.environ.get("AWG_WGOBF_STATE", "/etc/awg-wgobf/state")
+WGOBF_WG_CONF = os.environ.get("AWG_WGOBF_WG_CONF", "/etc/wireguard/wgobf0.conf")
+WGOBF_CLIENTS = os.environ.get("AWG_WGOBF_CLIENTS", "/root/wgobf")
+WGOBF_IFACE = "wgobf0"
+WGOBF_UNIT = "awg-wgobf.service"
+# Как _wgobf_valid_name в awg2: имя идёт в путь /root/wgobf/<имя> и в callback.
+WGOBF_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+# Файлы комплекта, которые отдаём документами (по порядку; чего нет — пропуск).
+WGOBF_BUNDLE_FILES = ("phobos.conf", "keenetic.txt", "wg.conf", "obfuscator.conf",
+                      "install-linux.sh", "wg-direct.conf", "README.txt")
+
+
+def wgobf_installed() -> bool:
+    return os.path.isfile(WGOBF_STATE) and os.path.isfile(WGOBF_WG_CONF)
+
+
+def wgobf_state() -> dict[str, str]:
+    st: dict[str, str] = {}
+    try:
+        for line in Path(WGOBF_STATE).read_text().splitlines():
+            k, sep, v = line.partition("=")
+            if sep:
+                st.setdefault(k.strip(), v.strip())
+    except OSError:
+        pass
+    return st
+
+
+def wgobf_clients() -> list[dict]:
+    """Клиенты из конфига сервера (+ handshake/трафик из `wg show`)."""
+    try:
+        text = Path(WGOBF_WG_CONF).read_text()
+    except OSError:
+        return []
+    clients: list[dict] = []
+    cur: dict | None = None
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("["):
+            cur = None
+            continue
+        if s.startswith("# client="):
+            cur = {"name": s[len("# client="):], "ip": "", "pub": "",
+                   "handshake": 0, "rx": 0, "tx": 0}
+            clients.append(cur)
+        elif cur is not None and s.startswith("PublicKey"):
+            cur["pub"] = s.split("=", 1)[1].strip()
+        elif cur is not None and s.startswith("AllowedIPs"):
+            cur["ip"] = s.split("=", 1)[1].strip().split("/")[0]
+    if clients and have("wg"):
+        rc, out, _ = run(["wg", "show", WGOBF_IFACE, "dump"])
+        if rc == 0:
+            by_pub = {c["pub"]: c for c in clients}
+            for row in out.splitlines()[1:]:
+                f = row.split("\t")
+                if len(f) >= 7 and f[0] in by_pub:
+                    c = by_pub[f[0]]
+                    c["handshake"] = int(f[4]) if f[4].isdigit() else 0
+                    c["rx"] = int(f[5]) if f[5].isdigit() else 0
+                    c["tx"] = int(f[6]) if f[6].isdigit() else 0
+    return clients
+
+
+def wgobf_client(name: str) -> dict | None:
+    return next((c for c in wgobf_clients() if c["name"] == name), None)
+
+
+def wgobf_running() -> bool:
+    return _iface_up(WGOBF_IFACE) and _unit_active(WGOBF_UNIT)
+
+
+def _ago(ts: int) -> str:
+    if not ts:
+        return "не подключался"
+    return fmt_uptime(max(0, int(time.time()) - ts)) + " назад"
+
+
+def wgobf_overview() -> str:
+    """Сводка раздела (HTML)."""
+    if not wgobf_installed():
+        return ("Не установлен.\n\nУстановка — в консоли:\n"
+                "<code>sudo awg2</code> → пункт 9 → 1")
+    st = wgobf_state()
+    clients = wgobf_clients()
+    online = sum(1 for c in clients
+                 if c["handshake"] and time.time() - c["handshake"] < 180)
+    state = "🟢 работает" if wgobf_running() else "🔴 не работает"
+    clean = "да (виден DPI как WireGuard)" if st.get("ALLOW_CLEAN") == "1" else "нет"
+    return (
+        f"{state}\n"
+        f"🌍 вход: <code>{html.escape(st.get('ENDPOINT', '?'))}:"
+        f"{html.escape(st.get('PORT', '?'))}</code>/udp\n"
+        f"🎭 маскировка клиентов: <b>{html.escape(st.get('MASKING', '?'))}</b>\n"
+        f"📵 клиенты без обфускатора: {clean}\n"
+        f"👥 клиентов: <b>{len(clients)}</b> · 🟢 {online}"
+    )
+
+
+def wgobf_client_text(c: dict) -> str:
+    return (
+        f"<b>🧅 {html.escape(c['name'])}</b>\n\n"
+        f"IP: <code>{html.escape(c['ip'] or '—')}</code>\n"
+        f"handshake: {_ago(c['handshake'])}\n"
+        f"трафик: ↓{fmt_bytes(c['rx'])} ↑{fmt_bytes(c['tx'])}"
+    )
+
+
+def wgobf_bundle_dir(name: str) -> Path | None:
+    """Папка комплекта. Недостающие файлы (старые версии awg2) дописывает awg2."""
+    if not WGOBF_NAME_RE.match(name):
+        return None
+    d = Path(WGOBF_CLIENTS) / name
+    if not (d / "phobos-link.txt").is_file() or not (d / "keenetic.txt").is_file():
+        _awg2_cli(["--wgobf", "bundle", name], timeout=60)
+    return d if (d / "wg.conf").is_file() else None
+
+
+def wgobf_bundle_files(name: str) -> list[tuple[str, bytes]]:
+    d = wgobf_bundle_dir(name)
+    if d is None:
+        return []
+    files = []
+    for fn in WGOBF_BUNDLE_FILES:
+        p = d / fn
+        if p.is_file():
+            files.append((fn, p.read_bytes()))
+    return files
+
+
+def wgobf_phobos_link(name: str) -> str:
+    d = wgobf_bundle_dir(name)
+    try:
+        return (d / "phobos-link.txt").read_text().strip() if d else ""
+    except OSError:
+        return ""
+
+
+def wgobf_direct_conf(name: str) -> str:
+    """wg-direct.conf (если сервер пускает клиентов без обфускатора)."""
+    d = wgobf_bundle_dir(name)
+    try:
+        return (d / "wg-direct.conf").read_text() if d else ""
+    except OSError:
+        return ""
+
+
+def wgobf_add(name: str) -> tuple[bool, str]:
+    if not WGOBF_NAME_RE.match(name):
+        return False, "Имя: латиница, цифры, _ и -, до 32 символов"
+    if wgobf_client(name):
+        return False, f"Клиент {name} уже есть"
+    return _awg2_cli(["--wgobf", "add", name], timeout=60)
+
+
+def wgobf_delete(name: str) -> tuple[bool, str]:
+    if not WGOBF_NAME_RE.match(name):
+        return False, "Некорректное имя"
+    return _awg2_cli(["--wgobf", "del", name], timeout=60)
+
+
+def wgobf_rotate_key() -> tuple[bool, str]:
+    return _awg2_cli(["--wgobf", "rotate-key"], timeout=120)
+
+
+def wgobf_restart() -> tuple[bool, str]:
+    return _awg2_cli(["--wgobf", "restart"], timeout=120)

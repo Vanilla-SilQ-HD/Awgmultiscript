@@ -185,6 +185,7 @@ class Flow(StatesGroup):
     note_text = State()
     await_backup = State()
     add_admin_id = State()
+    wgobf_name = State()
 
 
 # ───────────────────────── auth ─────────────────────────
@@ -408,7 +409,7 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandObject) -> 
         return
     await state.clear()
     info = core.get_server_info()
-    await msg.answer(menu_text(), reply_markup=kb.main_menu(info.installed))
+    await msg.answer(menu_text(), reply_markup=kb.main_menu(info.installed, core.wgobf_installed()))
 
 
 # ───────────────────────── навигация ─────────────────────────
@@ -416,7 +417,7 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandObject) -> 
 async def cb_menu(cq: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     info = core.get_server_info()
-    await safe_edit(cq, menu_text(), kb.main_menu(info.installed))
+    await safe_edit(cq, menu_text(), kb.main_menu(info.installed, core.wgobf_installed()))
     await cq.answer()
 
 
@@ -951,6 +952,198 @@ async def cb_restart_ok(cq: CallbackQuery) -> None:
     ok, msg = await asyncio.to_thread(core.restart_iface)
     await safe_edit(cq, ("✅ " if ok else "❌ ") + esc(msg), kb.back_button("menu"))
 
+
+
+# ───────────────────────── WG + обфускатор (awg2, пункт 9) ─────────────────────────
+# Меняет сервер только через `awg2 --wgobf` (core.wgobf_*): логика — в скрипте.
+WGOBF_TITLE = "<b>🧅 WG + обфускатор</b>"
+
+
+async def _wgobf_home(cq: CallbackQuery, note: str = "") -> None:
+    txt = await asyncio.to_thread(core.wgobf_overview)
+    markup = kb.wgobf_menu() if core.wgobf_installed() else kb.back_button("menu")
+    await safe_edit(cq, f"{WGOBF_TITLE}\n\n{txt}{note}", markup)
+
+
+def _wgobf_name(cq: CallbackQuery) -> str | None:
+    name = cq.data.split(":", 1)[1] if ":" in cq.data else ""
+    return name if core.WGOBF_NAME_RE.match(name) else None
+
+
+@router.callback_query(F.data == "wgobf")
+async def cb_wgobf(cq: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _wgobf_home(cq)
+    await cq.answer()
+
+
+@router.callback_query(F.data == "wgo_list")
+async def cb_wgobf_list(cq: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _wgobf_list(cq)
+    await cq.answer()
+
+
+async def _wgobf_list(cq: CallbackQuery) -> None:
+    clients = await asyncio.to_thread(core.wgobf_clients)
+    now = time.time()
+    lines = []
+    for c in clients:
+        dot = "🟢" if c["handshake"] and now - c["handshake"] < 180 else "⚪️"
+        lines.append(f"{dot} <code>{esc(c['name'])}</code> · {esc(c['ip'])}")
+    body = "\n".join(lines) or "Клиентов пока нет."
+    await safe_edit(cq, f"{WGOBF_TITLE} — клиенты ({len(clients)})\n\n{body}",
+                    kb.wgobf_clients_menu([c["name"] for c in clients]))
+
+
+async def _wgobf_card(cq: CallbackQuery, name: str, note: str = "") -> None:
+    c = await asyncio.to_thread(core.wgobf_client, name)
+    if not c:
+        await cq.answer("Клиент не найден", show_alert=True)
+        return
+    direct = bool(await asyncio.to_thread(core.wgobf_direct_conf, name))
+    await safe_edit(cq, core.wgobf_client_text(c) + note, kb.wgobf_client_card(name, direct))
+
+
+@router.callback_query(F.data.startswith("wgo_c:"))
+async def cb_wgobf_client(cq: CallbackQuery) -> None:
+    name = _wgobf_name(cq)
+    if not name:
+        return await cq.answer("Некорректное имя", show_alert=True)
+    await _wgobf_card(cq, name)
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("wgo_link:"))
+async def cb_wgobf_link(cq: CallbackQuery) -> None:
+    name = _wgobf_name(cq)
+    link = await asyncio.to_thread(core.wgobf_phobos_link, name) if name else ""
+    if not link:
+        return await cq.answer("Ссылка не найдена", show_alert=True)
+    await cq.message.answer(
+        f"🔗 <b>{esc(name)}</b> — ссылка Phobos\n\n<code>{esc(link)}</code>\n\n"
+        "Keenetic, AWG Manager → Новый туннель → вкладка «Phobos» → поле "
+        "«Или конфиг .conf с секцией [instance] / ссылка phobos://». "
+        "Поле «Ссылка установки» — пустым. obfuscate-bytes и MEDIA не включать.\n\n"
+        "⚠️ В ссылке ключи клиента — не пересылай её посторонним.")
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("wgo_files:"))
+async def cb_wgobf_files(cq: CallbackQuery) -> None:
+    name = _wgobf_name(cq)
+    files = await asyncio.to_thread(core.wgobf_bundle_files, name) if name else []
+    if not files:
+        return await cq.answer("Комплект не найден", show_alert=True)
+    await cq.answer("Отправляю файлы…")
+    for fn, data in files:
+        await cq.message.answer_document(BufferedInputFile(data, filename=f"{name}_{fn}"))
+    await cq.message.answer(
+        f"📦 Комплект <b>{esc(name)}</b>: {len(files)} файл(ов).\n"
+        "phobos.conf — Phobos/Keenetic · keenetic.txt — поля для AWG Manager · "
+        "wg.conf + obfuscator.conf — Windows/macOS/OpenWrt · install-linux.sh — "
+        "Debian/Ubuntu одной командой. Подробности — в README.txt.")
+
+
+@router.callback_query(F.data.startswith("wgo_qr:"))
+async def cb_wgobf_qr(cq: CallbackQuery) -> None:
+    name = _wgobf_name(cq)
+    conf = await asyncio.to_thread(core.wgobf_direct_conf, name) if name else ""
+    if not conf:
+        return await cq.answer("Сервер не пускает клиентов без обфускатора", show_alert=True)
+    png = make_qr_png(conf)
+    caption = (f"📱 <b>{esc(name)}</b> без обфускатора — для приложения WireGuard "
+               "(iOS/Android). Трафик виден DPI как WireGuard.")
+    if png:
+        await cq.message.answer_photo(BufferedInputFile(png, filename=f"{name}_direct.png"),
+                                      caption=caption)
+    else:
+        await cq.message.answer_document(
+            BufferedInputFile(conf.encode(), filename=f"{name}_direct.conf"), caption=caption)
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("wgo_del:"))
+async def cb_wgobf_del(cq: CallbackQuery) -> None:
+    name = _wgobf_name(cq)
+    if not name:
+        return await cq.answer("Некорректное имя", show_alert=True)
+    await safe_edit(cq, f"Удалить клиента <b>{esc(name)}</b> из WG + обфускатора?\n"
+                        "Его комплект перестанет работать.",
+                    kb.confirm(yes_cb=f"wgo_delok:{name}", no_cb=f"wgo_c:{name}"))
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("wgo_delok:"))
+async def cb_wgobf_delok(cq: CallbackQuery) -> None:
+    name = _wgobf_name(cq)
+    if not name:
+        return await cq.answer("Некорректное имя", show_alert=True)
+    await cq.answer("Удаляю…")
+    ok, out = await asyncio.to_thread(core.wgobf_delete, name)
+    if not ok:
+        await safe_edit(cq, f"❌ Не удалось удалить {esc(name)}\n<pre>{esc(out[-800:])}</pre>",
+                        kb.back_button("wgo_list"))
+        return
+    await _wgobf_list(cq)
+
+
+@router.callback_query(F.data == "wgo_add")
+async def cb_wgobf_add(cq: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Flow.wgobf_name)
+    await safe_edit(cq, "Имя нового клиента WG + обфускатора (латиница, цифры, "
+                        "<code>_</code>, <code>-</code>, до 32 символов).\n"
+                        "Например: <code>keenetic_home</code>.",
+                    kb.back_button("wgobf"))
+    await cq.answer()
+
+
+@router.message(Flow.wgobf_name)
+async def msg_wgobf_name(msg: Message, state: FSMContext) -> None:
+    name = (msg.text or "").strip()
+    if not core.WGOBF_NAME_RE.match(name):
+        await msg.answer("❌ Имя: латиница, цифры, <code>_</code> и <code>-</code>, до 32 символов. "
+                         "Попробуй ещё раз.")
+        return
+    await state.clear()
+    wait = await msg.answer("⏳ Создаю клиента…")
+    ok, out = await asyncio.to_thread(core.wgobf_add, name)
+    if not ok:
+        await wait.edit_text(f"❌ Не удалось создать <b>{esc(name)}</b>\n<pre>{esc(out[-800:])}</pre>",
+                             reply_markup=kb.back_button("wgobf"))
+        return
+    c = await asyncio.to_thread(core.wgobf_client, name)
+    direct = bool(await asyncio.to_thread(core.wgobf_direct_conf, name))
+    await wait.edit_text("✅ Клиент создан.\n\n" + (core.wgobf_client_text(c) if c else esc(name)),
+                         reply_markup=kb.wgobf_client_card(name, direct))
+
+
+@router.callback_query(F.data == "wgo_key")
+async def cb_wgobf_key(cq: CallbackQuery) -> None:
+    await safe_edit(cq, "🔑 <b>Сменить ключ обфускатора?</b>\n\n"
+                        "Ключ общий для сервера и всех клиентов: после смены <b>все</b> "
+                        "клиенты отключатся, пока не получат новую ссылку phobos:// "
+                        "или obfuscator.conf. Ключи WireGuard не меняются — комплекты "
+                        "перевыпускаются автоматически.",
+                    kb.confirm(yes_cb="wgo_keyok", no_cb="wgobf", danger=False))
+    await cq.answer()
+
+
+@router.callback_query(F.data == "wgo_keyok")
+async def cb_wgobf_keyok(cq: CallbackQuery) -> None:
+    await cq.answer("Меняю ключ…")
+    ok, out = await asyncio.to_thread(core.wgobf_rotate_key)
+    note = ("\n\n✅ <b>Ключ заменён.</b> Раздай клиентам новые ссылки: Клиенты → клиент → 🔗"
+            if ok else f"\n\n❌ <b>Ключ не заменён</b>\n<pre>{esc(out[-800:])}</pre>")
+    await _wgobf_home(cq, note)
+
+
+@router.callback_query(F.data == "wgo_restart")
+async def cb_wgobf_restart(cq: CallbackQuery) -> None:
+    await cq.answer("Перезапускаю…")
+    ok, out = await asyncio.to_thread(core.wgobf_restart)
+    note = "\n\n✅ Перезапущено" if ok else f"\n\n❌ Ошибка\n<pre>{esc(out[-800:])}</pre>"
+    await _wgobf_home(cq, note)
 
 # ───────────────────────── туннели / обслуживание (через awg2) ─────────────────────────
 @router.callback_query(F.data == "tunnels")

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="v0.8.34"
+VERSION="v0.8.35"
 SCRIPT_PATH="/usr/local/bin/awg2"
 
 # ── Канал обновлений ───────────────────────────────────────
@@ -20096,6 +20096,43 @@ _wgobf_status() {
   journalctl -u "$WGOBF_UNIT" -n 12 --no-pager 2>/dev/null | sed 's/^/  /' || true
 }
 
+# Перевыпуск комплектов всех клиентов (ключи клиентов не меняются).
+# Печатает число перевыпущенных.
+_wgobf_regen_bundles() {
+  local name n=0
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    _wgobf_write_bundle "$name" && n=$((n + 1))
+  done < <(_wgobf_client_names)
+  echo "$n"
+}
+
+# Новый ключ обфускатора. Ключ общий для сервера и всех клиентов, поэтому
+# после смены ВСЕ клиенты отваливаются, пока не получат новый комплект —
+# сервер со старым ключом их пакеты не расшифрует. WireGuard-ключи клиентов
+# остаются прежними: меняется только obfuscator.conf / [instance].
+_wgobf_rotate_key() {
+  local old new n
+  old=$(_wgobf_get KEY)
+  new=$(_wgobf_gen_key) || { err "Не удалось сгенерировать ключ"; return 1; }
+  [[ -n "$new" && "$new" != "$old" ]] || { err "Не удалось сгенерировать новый ключ"; return 1; }
+  _wgobf_set KEY "$new" || { err "Не удалось записать ключ"; return 1; }
+  _wgobf_write_obf_conf
+  if ! systemctl restart "$WGOBF_UNIT" 2>/dev/null; then
+    # Обфускатор с новым ключом не поднялся — возвращаем старый, иначе
+    # сервер останется вообще без входа
+    _wgobf_set KEY "$old"; _wgobf_write_obf_conf
+    systemctl restart "$WGOBF_UNIT" 2>/dev/null || true
+    err "Обфускатор не перезапустился — ключ оставлен прежним"
+    return 1
+  fi
+  n=$(_wgobf_regen_bundles)
+  ok "Ключ обфускатора заменён. Комплекты перевыпущены: $n"
+  warn "Старые конфиги клиентов больше не работают — раздай новые (obfuscator.conf / phobos-link.txt)"
+  log_info "wgobf: ключ обфускатора заменён, перевыпущено комплектов: $n"
+  return 0
+}
+
 _wgobf_settings() {
   echo ""
   hdr "WG + обфускатор: настройки"
@@ -20103,9 +20140,20 @@ _wgobf_settings() {
   cur_mask=$(_wgobf_get MASKING); cur_clean=$(_wgobf_get ALLOW_CLEAN)
   echo -e "  ${C}1)${N} Маскировка клиентов: ${W}${cur_mask}${N} → $([[ "$cur_mask" == STUN ]] && echo NONE || echo STUN)"
   echo -e "  ${C}2)${N} Клиенты без обфускатора: ${W}$([[ "$cur_clean" == 1 ]] && echo да || echo нет)${N} → $([[ "$cur_clean" == 1 ]] && echo нет || echo да)"
+  echo -e "  ${C}3)${N} Сменить ключ обфускатора ${D}— все клиенты получат новые комплекты${N}"
   echo -e "  ${W}0)${N} ← Назад"
-  read_choice choice "$(echo -e "${C}  Выбор [0-2]: ${N}")" 0 2 0
+  read_choice choice "$(echo -e "${C}  Выбор [0-3]: ${N}")" 0 3 0
   case "$choice" in
+    3)
+      warn "Ключ общий для всех клиентов: после смены ВСЕ отключатся, пока не получат"
+      warn "новый obfuscator.conf или phobos://-ссылку. Ключи WireGuard не меняются."
+      if read_confirm "$(echo -e "${R}  Сменить ключ? (введи yes): ${N}")"; then
+        _wgobf_rotate_key || true
+      else
+        warn "Отменено"
+      fi
+      return 0
+      ;;
     1)
       _wgobf_set MASKING "$([[ "$cur_mask" == STUN ]] && echo NONE || echo STUN)"
       ;;
@@ -20116,11 +20164,8 @@ _wgobf_settings() {
       ;;
     *) return 0 ;;
   esac
-  local name n=0
-  while IFS= read -r name; do
-    [[ -n "$name" ]] || continue
-    _wgobf_write_bundle "$name" && n=$((n + 1))
-  done < <(_wgobf_client_names)
+  local n
+  n=$(_wgobf_regen_bundles)
   ok "Сохранено. Комплекты клиентов перевыпущены: $n"
   [[ "$choice" == "1" ]] && info "Раздай клиентам новый obfuscator.conf — старый продолжит работать (сервер в режиме AUTO)"
   return 0
@@ -20157,7 +20202,7 @@ show_submenu_9() {
       echo -e "  ${C}4)${N} Удалить клиента"
       echo -e "  ${C}5)${N} Статус и журнал"
       echo -e "  ${C}6)${N} Перезапустить"
-      echo -e "  ${C}7)${N} Настройки ${D}— маскировка, клиенты без обфускатора${N}"
+      echo -e "  ${C}7)${N} Настройки ${D}— маскировка, клиенты без обфускатора, ключ${N}"
       echo -e "  ${R}8)${N} Удалить WG + обфускатор"
       echo ""
       echo -e "  ${W}0)${N} ← Назад"
@@ -20228,6 +20273,34 @@ _tunnel_cli() {
   esac
 }
 
+# Неинтерактивное управление WG + обфускатором (для бота):
+#   awg2 --wgobf add ИМЯ | del ИМЯ | bundle ИМЯ | rotate-key | restart
+# Состояние бот читает сам из файлов; сюда — только то, что меняет сервер.
+_wgobf_cli() {
+  local cmd="${1:-}" name="${2:-}"
+  _wgobf_installed || { err "WG + обфускатор не установлен (awg2 → пункт 9)"; return 1; }
+  case "$cmd" in
+    add)
+      [[ -n "$name" ]] || { err "Использование: awg2 --wgobf add ИМЯ"; return 1; }
+      _wgobf_add_client "$name" ;;
+    del)
+      [[ -n "$name" ]] || { err "Использование: awg2 --wgobf del ИМЯ"; return 1; }
+      _wgobf_delete_client "$name" ;;
+    bundle)
+      # Дописывает недостающие файлы комплекта (выпущенные старыми версиями)
+      _wgobf_client_names | grep -qxF "$name" || { err "Клиента ${name:-?} нет"; return 1; }
+      _wgobf_write_bundle "$name" && ok "$WGOBF_CLIENTS/$name" ;;
+    rotate-key)
+      _wgobf_rotate_key ;;
+    restart)
+      _wgobf_write_fw; _wgobf_write_obf_conf; _wgobf_write_unit
+      _wgobf_start && ok "Перезапущено" ;;
+    *)
+      err "Команда: add ИМЯ | del ИМЯ | bundle ИМЯ | rotate-key | restart"
+      return 1 ;;
+  esac
+}
+
 # tun2socks — с сохранённым прокси.
 _tunnel_cli_t2s_up() {
   [[ -s "$TUN2SOCKS_CONF" ]] || { err "tun2socks: прокси не задан — настрой в консоли"; return 1; }
@@ -20265,6 +20338,9 @@ awg2 $VERSION
                               Т: warp | xray | tun2socks | exits | dns
   awg2 --xray-balancer С      С: random | roundRobin | leastPing | leastLoad | off
   awg2 --xray-ru-update       обновить РФ-базы Xray (geoip_RU / geosite_RU)
+  awg2 --wgobf add|del|bundle ИМЯ
+  awg2 --wgobf rotate-key|restart
+                              WG + обфускатор (пункт 9) без меню
   awg2 --help                 эта справка
 
 Переменные окружения:
@@ -20298,6 +20374,10 @@ EOF
       _xray_up || exit 1
     fi
     exit 0
+    ;;
+  --wgobf)
+    AUTO_MODE=1
+    _wgobf_cli "${2:-}" "${3:-}" && exit 0 || exit 1
     ;;
   --xray-ru-update)
     # Из таймера: правила выключены — качать нечего.

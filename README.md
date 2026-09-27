@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-ffffff?style=flat-square&labelColor=000000)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Ubuntu%2024%20%2F%20Debian%2012%2B-E95420?style=flat-square&logo=ubuntu&logoColor=white)](https://ubuntu.com/)
 [![Protocol](https://img.shields.io/badge/AWG-2.0%20%2F%203.0%20%2F%203.1-00d4ff?style=flat-square)](#)
-[![Version](https://img.shields.io/badge/version-v0.8.34-ff6b00?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v0.8.35-ff6b00?style=flat-square)](#)
 
 <br>
 
@@ -208,6 +208,10 @@ XOR-обфусцируется. Снаружи виден только порт 
   Для iOS и телефонов без обфускатора есть опция «пускать клиентов без
   обфускатора» — такие подключаются обычным WireGuard (`wg-direct.conf`),
   но их трафик DPI видит как WireGuard.
+- Смена ключа обфускатора — 9 → 7 → 3 (комплекты перевыпускаются сами).
+- В Telegram-боте — кнопка «🧅 WG + обфускатор»: клиенты, ссылка `phobos://`,
+  файлы комплекта, добавление/удаление, смена ключа.
+- Без меню: `awg2 --wgobf add|del|bundle ИМЯ`, `awg2 --wgobf rotate-key|restart`.
 - Бэкап/рестор (пункт 4) и «Удалить всё» (пункт 7) режим учитывают.
 
 ---
@@ -280,6 +284,6 @@ sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/pumbaX/awg-multi-scri
 
 *Сообщество [AWG-Toolza](https://t.me/awgToolza)*
 
-**AWG Toolza v0.8.34** · MIT License
+**AWG Toolza v0.8.35** · MIT License
 
 </div>

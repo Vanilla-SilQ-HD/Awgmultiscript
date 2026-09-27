@@ -59,7 +59,7 @@ def mimicry_choices(idx: int) -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def main_menu(installed: bool) -> InlineKeyboardMarkup:
+def main_menu(installed: bool, wgobf: bool = False) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     if installed:
         b.button(text="👥 Клиенты", callback_data="clients")
@@ -70,11 +70,56 @@ def main_menu(installed: bool) -> InlineKeyboardMarkup:
         b.button(text="↻ Перезапуск awg0", callback_data="restart_confirm")
         b.button(text="🔧 Обслуживание", callback_data="maint")
         b.button(text="❤️ Поддержать", url="https://t.me/awgToolza/156/157")
-        b.adjust(2, 2, 2, 2)
+        if wgobf:
+            b.button(text="🧅 WG + обфускатор", callback_data="wgobf")
+            b.adjust(2, 2, 2, 2, 1)
+        else:
+            b.adjust(2, 2, 2, 2)
     else:
         b.button(text="⚙️ Сервер не установлен — открыть консоль awg2",
                  callback_data="not_installed")
+        # WG + обфускатор живёт и без AWG — не прячем его
+        if wgobf:
+            b.button(text="🧅 WG + обфускатор", callback_data="wgobf")
         b.adjust(1)
+    return b.as_markup()
+
+
+# ── WG + обфускатор (awg2, пункт 9) ──
+# В callback — имя клиента, а не индекс: список меняется при добавлении и
+# удалении, а имя (≤32 символа, [A-Za-z0-9_-]) влезает в лимит 64 байта.
+def wgobf_menu() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="👥 Клиенты", callback_data="wgo_list")
+    b.button(text="➕ Добавить", callback_data="wgo_add")
+    b.button(text="🔑 Сменить ключ", callback_data="wgo_key")
+    b.button(text="↻ Перезапуск", callback_data="wgo_restart")
+    b.button(text="🔄 Обновить", callback_data="wgobf")
+    b.button(text="‹ В меню", callback_data="menu")
+    b.adjust(2, 2, 2)
+    return b.as_markup()
+
+
+def wgobf_clients_menu(names: list[str]) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for n in names:
+        b.button(text=f"🧅 {n}", callback_data=f"wgo_c:{n}")
+    b.button(text="➕ Добавить", callback_data="wgo_add")
+    b.button(text="‹ Назад", callback_data="wgobf")
+    # клиенты по 2 в ряд (нечётный — один в последнем ряду), затем 2 кнопки
+    b.adjust(*([2] * (len(names) // 2)), *([1] if len(names) % 2 else []), 2)
+    return b.as_markup()
+
+
+def wgobf_client_card(name: str, direct: bool) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="🔗 Ссылка phobos://", callback_data=f"wgo_link:{name}")
+    b.button(text="📦 Файлы комплекта", callback_data=f"wgo_files:{name}")
+    if direct:
+        b.button(text="📱 QR без обфускатора", callback_data=f"wgo_qr:{name}")
+    b.button(text="🗑 Удалить", callback_data=f"wgo_del:{name}")
+    b.button(text="‹ К списку", callback_data="wgo_list")
+    b.adjust(2, *([1] if direct else []), 2)
     return b.as_markup()
 
 
