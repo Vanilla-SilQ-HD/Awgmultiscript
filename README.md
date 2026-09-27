@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-ffffff?style=flat-square&labelColor=000000)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Ubuntu%2024%20%2F%20Debian%2012%2B-E95420?style=flat-square&logo=ubuntu&logoColor=white)](https://ubuntu.com/)
 [![Protocol](https://img.shields.io/badge/AWG-2.0%20%2F%203.0%20%2F%203.1-00d4ff?style=flat-square)](#)
-[![Version](https://img.shields.io/badge/version-v0.8.30-ff6b00?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v0.8.31-ff6b00?style=flat-square)](#)
 
 <br>
 
@@ -103,6 +103,9 @@ sudo awg-mod-update --latest     # обновить до последнего т
 - **Xray** — outbounds из ссылок `vless://` / `vmess://` / `hysteria2://`,
   балансировка (random / roundRobin / leastPing / leastLoad), выбор того, кто
   из клиентов идёт в туннель. Трафик уходит через интерфейс `xray0`.
+  **РФ-сайты напрямую** (5 → 4 → 10): `.ru/.su/.рф`, сервисы «только из РФ»
+  и РФ-IP идут с сервера мимо туннеля — для сервера в РФ с выходом за границу.
+  Базы runetfreedom обновляются раз в неделю.
 - **tun2socks** — весь трафик AWG-клиентов в готовый SOCKS5
   (`awg-tun2socks.service`)
 - **AWG exit-ноды** — каскад через другие AWG-серверы, ECMP-балансировка,
@@ -249,6 +252,6 @@ sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/pumbaX/awg-multi-scri
 
 *Сообщество [AWG-Toolza](https://t.me/awgToolza)*
 
-**AWG Toolza v0.8.30** · MIT License
+**AWG Toolza v0.8.31** · MIT License
 
 </div>

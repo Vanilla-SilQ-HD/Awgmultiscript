@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="v0.8.30"
+VERSION="v0.8.31"
 SCRIPT_PATH="/usr/local/bin/awg2"
 
 # ── Канал обновлений ───────────────────────────────────────
@@ -15647,9 +15647,14 @@ do_xray_menu() {
     echo -e "  7) Перезапустить туннель"
     echo -e "  ${C}8) Управление клиентами в Xray${N}"
     echo -e "  9) Проверить конфиг (диагностика)"
+    if _xray_ru_direct_enabled; then
+      echo -e "  10) РФ-сайты напрямую ${G}● вкл${N}"
+    else
+      echo -e "  10) РФ-сайты напрямую ${D}○ выкл${N}"
+    fi
     echo -e "  0) Назад в главное меню"
     echo ""
-    XRAY_CHOICE=0; safe_read XRAY_CHOICE "$(echo -e "${C}  Выбор [0-9]: ${N}")"
+    XRAY_CHOICE=0; safe_read XRAY_CHOICE "$(echo -e "${C}  Выбор [0-10]: ${N}")"
 
     case "${XRAY_CHOICE:-}" in
       1) _xray_install; read -rp "Enter..." ;;
@@ -15661,6 +15666,7 @@ do_xray_menu() {
       7) _xray_down 2>/dev/null; _xray_up; read -rp "Enter..." ;;
       8) do_xray_peers_menu; set +e ;;
       9) _xray_diagnose; read -rp "Enter..." ;;
+      10) _xray_ru_direct_toggle; read -rp "Enter..." ;;
       0) break ;;
       *) warn "Неверный выбор" ;;
     esac
@@ -15674,6 +15680,8 @@ _xray_status() {
   else
     echo -e "  Интерфейс  : ${D}○ xray0 выключен${N}"
   fi
+  _xray_ru_direct_enabled && echo -e "  РФ-сайты   : ${G}напрямую${N}"
+  return 0
 }
 
 # ── Общая качалка релизных бинарей с GitHub ────────────────
@@ -16365,6 +16373,155 @@ PY
   else
     err "Ошибка настройки балансировщика."
     return 1
+  fi
+}
+
+# ── Xray: РФ-сайты напрямую ────────────────────────────
+# .ru/.su/.рф, «только из РФ» (geosite) и РФ-IP (geoip) идут в direct, мимо туннеля.
+# Базы — runetfreedom/russia-v2ray-rules-dat, рядом с xray: ext:geo*_RU.dat.
+XRAY_ASSET_DIR="/usr/local/bin"
+RU_GEO_URL="https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download"
+RU_GEO_SERVICE="/etc/systemd/system/awg-xray-rugeo.service"
+RU_GEO_TIMER="/etc/systemd/system/awg-xray-rugeo.timer"
+
+_xray_ru_direct_enabled() {
+  [[ -f "$XRAY_CONF" ]] && grep -q '"ruleTag": "ru-direct"' "$XRAY_CONF" 2>/dev/null
+}
+
+# Скачивает базы; ставит их, только если обе скачались и сошлись суммы.
+# Если правила включены — проверяет конфиг Xray и при ошибке откатывает базы.
+_xray_ru_geo_update() {
+  local tmpd f exp vrc bak=""
+  tmpd=$(mktemp -d) || return 1
+  for f in geoip geosite; do
+    if ! _gh_fetch "$RU_GEO_URL/$f.dat" "$tmpd/$f.dat" 100000 any; then
+      err "Не удалось скачать $f.dat"; rm -rf "$tmpd"; return 1
+    fi
+    exp=""
+    _gh_fetch "$RU_GEO_URL/$f.dat.sha256sum" "$tmpd/$f.sha" 64 any >/dev/null 2>&1 && \
+      exp=$(awk '{print $1; exit}' "$tmpd/$f.sha")
+    _verify_sha256_value "$tmpd/$f.dat" "$exp"; vrc=$?
+    case $vrc in
+      0) ok "$f.dat: контрольная сумма совпала" ;;
+      1) err "$f.dat: контрольная сумма НЕ совпала"; rm -rf "$tmpd"; return 1 ;;
+      *) warn "$f.dat: суммы нет — ставлю без проверки" ;;
+    esac
+  done
+  if [[ -f "$XRAY_ASSET_DIR/geoip_RU.dat" ]]; then
+    bak="$tmpd/bak"; mkdir -p "$bak"
+    cp -a "$XRAY_ASSET_DIR"/geo{ip,site}_RU.dat "$bak/" 2>/dev/null || true
+  fi
+  install -m 0644 "$tmpd/geoip.dat"   "$XRAY_ASSET_DIR/geoip_RU.dat"
+  install -m 0644 "$tmpd/geosite.dat" "$XRAY_ASSET_DIR/geosite_RU.dat"
+  if _xray_ru_direct_enabled && command -v xray &>/dev/null; then
+    local why
+    if ! why=$(_xray_test_conf); then
+      err "Xray не принял новые базы: $why"
+      if [[ -n "$bak" ]]; then cp -a "$bak"/* "$XRAY_ASSET_DIR/" && warn "Вернул прежние базы"; fi
+      rm -rf "$tmpd"; return 1
+    fi
+  fi
+  rm -rf "$tmpd"
+  ok "РФ-базы обновлены"
+}
+
+# Правила в routing: on — вставить над правилами туннеля, off — убрать.
+_xray_ru_rules() {
+  python3 - "$XRAY_CONF" "$1" <<'PY'
+import json, os, sys
+path, mode = sys.argv[1], sys.argv[2]
+conf = json.load(open(path))
+routing = conf.setdefault('routing', {})
+rules = [r for r in routing.get('rules', []) if r.get('ruleTag') != 'ru-direct']
+if mode == 'on':
+    outs = conf.setdefault('outbounds', [])
+    if not any(o.get('tag') == 'direct' for o in outs):
+        outs.append({'protocol': 'freedom', 'tag': 'direct'})
+    proxy = {o['tag'] for o in outs if o.get('tag')
+             and o.get('protocol') not in ('freedom', 'blackhole', 'dns')}
+    # Над первым правилом, которое ведёт в туннель; блокировки выше остаются выше.
+    at = next((i for i, r in enumerate(rules)
+               if r.get('balancerTag') or r.get('outboundTag') in proxy
+               or r.get('outboundTag') == 'proxy'), len(rules))
+    rules[at:at] = [
+        {'type': 'field', 'ruleTag': 'ru-direct', 'outboundTag': 'direct',
+         'domain': ['domain:ru', 'domain:su', 'domain:xn--p1ai',
+                    'ext:geosite_RU.dat:ru-available-only-inside']},
+        {'type': 'field', 'ruleTag': 'ru-direct', 'outboundTag': 'direct',
+         'ip': ['ext:geoip_RU.dat:ru']},
+    ]
+routing['rules'] = rules
+tmp = path + '.tmp'
+with open(tmp, 'w') as f:
+    json.dump(conf, f, indent=2, ensure_ascii=False)
+os.replace(tmp, path)
+PY
+}
+
+_xray_ru_timer() {
+  if [[ "$1" == on ]]; then
+    cat > "$RU_GEO_SERVICE" <<UNIT
+[Unit]
+Description=awg2: обновление РФ-баз Xray
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${SCRIPT_PATH} --xray-ru-update
+UNIT
+    cat > "$RU_GEO_TIMER" <<'UNIT'
+[Unit]
+Description=awg2: обновление РФ-баз Xray раз в неделю
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable --now awg-xray-rugeo.timer >/dev/null 2>&1 || \
+      warn "Таймер обновления баз не включился: systemctl status awg-xray-rugeo.timer"
+  else
+    systemctl disable --now awg-xray-rugeo.timer >/dev/null 2>&1 || true
+    rm -f "$RU_GEO_SERVICE" "$RU_GEO_TIMER"
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+}
+
+_xray_ru_direct_toggle() {
+  [[ -f "$XRAY_CONF" ]] || { err "Xray не установлен (пункт 1)"; return 1; }
+  echo ""
+  if _xray_ru_direct_enabled; then
+    _xray_ru_rules off || { err "Не удалось изменить конфиг"; return 1; }
+    _xray_ru_timer off
+    ok "РФ-сайты снова идут через туннель"
+  else
+    echo -e "  ${D}.ru/.su/.рф, сервисы «только из РФ» и РФ-IP пойдут с сервера напрямую.${N}"
+    echo -e "  ${D}Имеет смысл, если этот сервер в РФ, а Xray ведёт за границу.${N}"
+    echo ""
+    if [[ ! -f "$XRAY_ASSET_DIR/geoip_RU.dat" || ! -f "$XRAY_ASSET_DIR/geosite_RU.dat" ]]; then
+      info "Качаю РФ-базы (runetfreedom)..."
+      _xray_ru_geo_update || return 1
+    fi
+    local bak="${XRAY_CONF}.bak.ru" why
+    cp -a "$XRAY_CONF" "$bak"
+    _xray_ru_rules on || { err "Не удалось изменить конфиг"; return 1; }
+    if command -v xray &>/dev/null && ! why=$(_xray_test_conf); then
+      mv -f "$bak" "$XRAY_CONF"
+      err "Xray отверг правила — конфиг возвращён: $why"
+      return 1
+    fi
+    rm -f "$bak"
+    _xray_ru_timer on
+    ok "РФ-сайты идут напрямую; базы обновляются раз в неделю"
+  fi
+  if ip link show xray0 &>/dev/null || systemctl is-active --quiet awg-xray.service 2>/dev/null; then
+    local _yn
+    read_yesno _yn "$(echo -e "${C}  Туннель активен — перезапустить сейчас? [Y/n]: ${N}")" "y"
+    if [[ "$_yn" == y ]]; then _xray_down 2>/dev/null || true; _xray_up; fi
   fi
 }
 
@@ -18884,6 +19041,7 @@ awg2 $VERSION
   awg2 --tunnel Т up|down|restart
                               Т: warp | xray | tun2socks | exits | dns
   awg2 --xray-balancer С      С: random | roundRobin | leastPing | leastLoad | off
+  awg2 --xray-ru-update       обновить РФ-базы Xray (geoip_RU / geosite_RU)
   awg2 --help                 эта справка
 
 Переменные окружения:
@@ -18916,6 +19074,13 @@ EOF
       _xray_down 2>/dev/null || true
       _xray_up || exit 1
     fi
+    exit 0
+    ;;
+  --xray-ru-update)
+    # Из таймера: правила выключены — качать нечего.
+    _xray_ru_direct_enabled || { info "РФ-правила Xray выключены — пропускаю"; exit 0; }
+    _xray_ru_geo_update || exit 1
+    info "Новые базы подхватятся при перезапуске туннеля Xray"
     exit 0
     ;;
   -auto|--auto)
