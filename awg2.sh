@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="v0.8.31"
+VERSION="v0.8.32"
 SCRIPT_PATH="/usr/local/bin/awg2"
 
 # ── Канал обновлений ───────────────────────────────────────
@@ -3459,7 +3459,7 @@ check_deps() {
 # Интерфейсы, которые скрипт поднимает сам. Их адрес не должен попасть в
 # Endpoint клиентского конфига: после включения Warp/Xray/tun2socks/каскада
 # дефолтный маршрут уезжает в туннель, и «внешний IP» стал бы адресом туннеля.
-PUBIP_TUNNEL_IFACES=" awg0 warp0 xray0 tun0 wgcf "
+PUBIP_TUNNEL_IFACES=" awg0 warp0 xray0 tun0 wgcf wgobf0 "
 
 # Диапазоны, непригодные как Endpoint: 10/8, 172.16/12, 192.168/16, 127/8,
 # 169.254/16 (link-local) и 100.64/10 (CGNAT — частый случай у дешёвых VPS).
@@ -4941,12 +4941,17 @@ show_menu() {
   else
     echo -e "  ${M}8)${N}  Обновить скрипт  ${D}— загрузить с GitHub${N}"
   fi
+  if _wgobf_installed; then
+    echo -e "  ${C}9)${N}  WG + обфускатор  ${D}— второй сервер, установлен${N}"
+  else
+    echo -e "  ${C}9)${N}  WG + обфускатор  ${D}— второй сервер (как Phobos)${N}"
+  fi
   echo ""
   echo -e "  ${W}0)${N}  Выход"
   echo ""
   # Без DEFAULT: пустой Enter переспрашивает, а не выходит из скрипта.
   # Ctrl+D отдаёт 0 → штатный выход.
-  read_choice CHOICE "$(echo -e "${C}  Выбор [0-8]: ${N}")" 0 8
+  read_choice CHOICE "$(echo -e "${C}  Выбор [0-9]: ${N}")" 0 9
 }
 
 # ── Подменю 1: Сервер ──────────────────────────────────
@@ -7165,6 +7170,7 @@ do_autoinstall() {
   for _try in $(seq 1 20); do
     local _p
     _p=$(rand_range 30001 65535)
+    _wgobf_owns_port "$_p" && continue
     if command -v ss &>/dev/null; then
       ss -lunH "sport = :$_p" 2>/dev/null | grep -q . && continue
     elif command -v netstat &>/dev/null; then
@@ -7620,11 +7626,15 @@ do_gen() {
   while true; do
     read -rp "$(echo -e "${C}  Порт [Enter = случайный / 51820 = стандартный / свой]: ${N}")" PORT
     if [[ -z "${PORT:-}" || "${PORT:-}" == "r" || "${PORT:-}" == "R" ]]; then
-      PORT=$(rand_range 30001 65535)
+      PORT=$(_wgobf_pick_port) || PORT=$(rand_range 30001 65535)
       ok "случайный порт: $PORT"
       break
     fi
     if [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1024 && PORT <= 65535 )); then
+      if _wgobf_owns_port "$PORT"; then
+        warn "Порт $PORT занят WG + обфускатором (пункт 9). Выбери другой."
+        continue
+      fi
       break
     fi
     warn "Порт должен быть числом 1024-65535. Попробуй ещё раз."
@@ -13223,6 +13233,7 @@ do_uninstall() {
   echo -e "  ${R}—${N} Автозапуск awg-quick@awg0"
   echo -e "  ${R}—${N} NAT-персистентность (hook / awg-nat.service)"
   $bot_present && echo -e "  ${R}—${N} Telegram-бот целиком (спрошу отдельно)"
+  _wgobf_installed && echo -e "  ${R}—${N} WG + обфускатор (пункт 9, спрошу отдельно)"
   echo -e "  ${R}—${N} Сам скрипт ${W}${SCRIPT_PATH}${N} — команда awg2 (спрошу отдельно)"
   echo ""
   echo -e "  ${D}Бэкапы в ${BACKUP_DIR} остаются — их удаляй руками.${N}"
@@ -13235,6 +13246,13 @@ do_uninstall() {
   if $bot_present; then
     echo ""
     read_yesno _del_bot "$(echo -e "${R}  Удалить и Telegram-бота (сервис, код, venv, токен)? [Y/n]: ${N}")" "y"
+  fi
+
+  # WG + обфускатор — отдельный сервер: без спроса не трогаем
+  local _del_wgobf="n"
+  if _wgobf_installed; then
+    echo ""
+    read_yesno _del_wgobf "$(echo -e "${R}  Удалить и WG + обфускатор (${WGOBF_IFACE}, его клиентов)? [Y/n]: ${N}")" "y"
   fi
 
   # Сам скрипт: после удаления команды awg2 больше не будет
@@ -13297,6 +13315,15 @@ do_uninstall() {
     for num in $rule_nums; do
       echo "y" | ufw --force delete "$num" 2>/dev/null || true
     done
+  fi
+
+  if [[ "$_del_wgobf" == "y" ]]; then
+    trash "Удаляем WG + обфускатор..."
+    do_wgobf_remove quiet || warn "WG + обфускатор удалён не полностью"
+  elif _wgobf_installed && [[ "$_del_self" == "y" ]]; then
+    # Сервер остаётся работать сам по себе (systemd), но без awg2 им не
+    # управлять — предупреждаем, а не молчим
+    warn "WG + обфускатор оставлен: ${WGOBF_IFACE} и ${WGOBF_UNIT} продолжат работать"
   fi
 
   if [[ "$_del_bot" == "y" ]]; then
@@ -13672,6 +13699,18 @@ do_backup() {
   fi
   rmdir "$backup_path/warp" 2>/dev/null || true
 
+  # ── WG + обфускатор ──
+  if _wgobf_installed; then
+    mkdir -p "$backup_path/wgobf"
+    cp -a "$WGOBF_DIR" "$backup_path/wgobf/etc" 2>/dev/null && \
+      cp "$WGOBF_WG_CONF" "$backup_path/wgobf/${WGOBF_IFACE}.conf" 2>/dev/null && \
+      { ok "WG + обфускатор: сервер и настройки"; backed_up=$((backed_up + 1)); }
+    if [[ -d "$WGOBF_CLIENTS" ]]; then
+      cp -a "$WGOBF_CLIENTS" "$backup_path/wgobf/clients" 2>/dev/null && \
+        ok "WG + обфускатор: комплекты клиентов"
+    fi
+  fi
+
   # Лог
   [[ -f "$LOG_FILE" ]] && cp "$LOG_FILE" "$backup_path/awg-manager.log" || true
 
@@ -13800,6 +13839,15 @@ do_restore() {
       warp_backend_set "$saved_be" && info "Активный бэкенд WARP: $saved_be"
     fi
     info "Туннель WARP не поднимается автоматически — включи его в меню Туннели"
+  fi
+
+  # ── WG + обфускатор ──
+  if [[ -f "$chosen_backup/wgobf/${WGOBF_IFACE}.conf" && -d "$chosen_backup/wgobf/etc" ]]; then
+    local _rs_wgobf="n"
+    read_yesno _rs_wgobf "$(echo -e "${C}  В бекапе есть WG + обфускатор — восстановить? [Y/n]: ${N}")" "y"
+    if [[ "$_rs_wgobf" == "y" ]]; then
+      _wgobf_restore "$chosen_backup/wgobf" && restored=$((restored + 1))
+    fi
   fi
 
   # Поднимаем интерфейс
@@ -14526,6 +14574,11 @@ _cascade_add_rule_flow() {
 
   local p added=0 skipped=0 failed=0
   for p in "${protos[@]}"; do
+    if [[ "$p" == "udp" ]] && _wgobf_owns_port "$in_port"; then
+      err "UDP ${in_port} занят WG + обфускатором (пункт 9) — выбери другой порт"
+      failed=$((failed + 1))
+      continue
+    fi
     if _cascade_has_inport "$p" "$in_port"; then
       warn "${p^^} ${in_port} → уже есть в файле, пропускаю"
       skipped=$((skipped + 1))
@@ -18973,6 +19026,1089 @@ do_awg_exits_menu() {
 }
 
 
+# ═══════════════════════════════════════════════════════════════════
+# WG + ОБФУСКАТОР (режим «как Phobos») — главное меню, пункт 9
+# ═══════════════════════════════════════════════════════════════════
+# Второй сервер рядом с AWG, от него независимый: обычный WireGuard
+# (интерфейс wgobf0) за wg-obfuscator — github.com/ClusterM/wg-obfuscator,
+# GPL-3.0. Обфускатор собирается из исходников закреплённого тега отдельной
+# программой, его код в скрипт не копируется.
+#
+# Схема: клиент → [wg-obfuscator клиента] → интернет → порт обфускатора
+# на сервере → 127.0.0.1:<порт WG> → wgobf0. Снаружи виден только порт
+# обфускатора. Порт самого WireGuard привязать к 127.0.0.1 нельзя (WireGuard
+# слушает все адреса), поэтому PostUp закрывает его для всего, кроме lo.
+#
+# С AWG и туннелями тулзы не пересекается:
+#   • свой интерфейс и своя подсеть /24 (обычно 10.[60-99].x, AWG берёт
+#     10.10-55), проверяется на пересечение со всеми адресами и маршрутами;
+#   • WARP / Xray / tun2socks / Exit-ноды маршрутизируют только подсеть awg0
+#     (ip rule from <подсеть awg0>) — клиенты wgobf0 всегда идут напрямую;
+#   • iptables-правила помечены комментарием awg-wgobf и снимаются только по
+#     нему; правило ufw — с тем же комментарием, «AmneziaWG» в нём нет, и
+#     удаление AWG его не тронет;
+#   • файлы клиентов — /root/wgobf/<имя>/: маска *_awg[23].conf (меню AWG,
+#     бот, бэкапы AWG) их не видит;
+#   • порты сверяются со всеми слушающими сокетами, портом AWG и правилами
+#     каскада; каскад и AWG, в свою очередь, не отдают порты обфускатора.
+
+WGOBF_VERSION="v1.6"
+# Коммит тега v1.6. Тег можно перевесить, коммит — нет: сверяем после клона.
+WGOBF_COMMIT="6440304054a27158b6d373545925880f0e51bafb"
+WGOBF_REPO="https://github.com/ClusterM/wg-obfuscator.git"
+WGOBF_IFACE="wgobf0"
+WGOBF_DIR="/etc/awg-wgobf"
+WGOBF_STATE="$WGOBF_DIR/state"
+WGOBF_OBF_CONF="$WGOBF_DIR/obfuscator.conf"
+WGOBF_WG_CONF="/etc/wireguard/${WGOBF_IFACE}.conf"
+WGOBF_LIB="/usr/local/lib/awg2"
+WGOBF_BIN="$WGOBF_LIB/wg-obfuscator"
+WGOBF_FW="$WGOBF_LIB/wgobf-fw.sh"
+WGOBF_UNIT="awg-wgobf.service"
+WGOBF_UNIT_FILE="/etc/systemd/system/$WGOBF_UNIT"
+WGOBF_CLIENTS="/root/wgobf"
+WGOBF_TAG="awg-wgobf"
+WGOBF_DEFAULT_MTU=1380   # 1420 минус 24 байта STUN-обёртки и запас
+
+_wgobf_installed() { [[ -f "$WGOBF_STATE" && -f "$WGOBF_WG_CONF" ]]; }
+
+# Значение ключа из state. Пусто, если ключа нет.
+_wgobf_get() {
+  [[ -f "$WGOBF_STATE" ]] || return 0
+  sed -n "s/^${1}=//p" "$WGOBF_STATE" | head -n1
+}
+
+# Записывает ключ в state (атомарно, через временный файл рядом).
+_wgobf_set() {
+  local key="$1" val="$2" tmp
+  mkdir -p "$WGOBF_DIR" && chmod 700 "$WGOBF_DIR"
+  tmp=$(mktemp "$WGOBF_DIR/.state.XXXXXX") || return 1
+  { grep -v "^${key}=" "$WGOBF_STATE" 2>/dev/null || true
+    printf '%s=%s\n' "$key" "$val"; } > "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$WGOBF_STATE"
+}
+
+# Занят ли UDP-порт кем-то из режима WG + обфускатор (в том числе когда
+# службы остановлены — порт всё равно за ним закреплён).
+_wgobf_owns_port() {
+  local p="$1"
+  _wgobf_installed || return 1
+  [[ "$p" == "$(_wgobf_get PORT)" || "$p" == "$(_wgobf_get WG_PORT)" ]]
+}
+
+# Занят ли UDP-порт на сервере: слушающий сокет, порт AWG (даже при
+# лежащем awg0), правило каскада или порт WG + обфускатора.
+_udp_port_busy() {
+  local p="$1" awg_port
+  [[ "$p" =~ ^[0-9]+$ ]] || return 0
+  if command -v ss &>/dev/null; then
+    ss -lunH "sport = :$p" 2>/dev/null | grep -q . && return 0
+  fi
+  awg_port=$(grep -m1 '^ListenPort' "$SERVER_CONF" 2>/dev/null | tr -dc '0-9' || true)
+  [[ -n "$awg_port" && "$awg_port" == "$p" ]] && return 0
+  grep -qE "^udp\|${p}\|" "$CASCADE_RULES" 2>/dev/null && return 0
+  _wgobf_owns_port "$p" && return 0
+  return 1
+}
+
+# Случайный свободный UDP-порт 30001-65535. $1 — порт, который тоже нельзя.
+_wgobf_pick_port() {
+  local avoid="${1:-}" p i
+  for i in $(seq 1 40); do
+    p=$(rand_range 30001 65535)
+    [[ -n "$avoid" && "$p" == "$avoid" ]] && continue
+    _udp_port_busy "$p" && continue
+    echo "$p"
+    return 0
+  done
+  return 1
+}
+
+# Свободная /24: не пересекается ни с одним адресом и маршрутом сервера (все
+# таблицы), ни с подсетью AWG, ни с tun2socks. Сначала 10.[60-99].x (AWG
+# берёт 10.10-55), если там всё занято (у хостера маршрут на весь 10/8) —
+# 172.16-31.x, затем 192.168.x.
+_wgobf_pick_net() {
+  local taken
+  taken=$( { ip -4 -o addr show 2>/dev/null; ip -4 route show table all 2>/dev/null
+             grep -m1 '^Address' "$SERVER_CONF" 2>/dev/null
+             # tun2socks, WARP, Xray-TUN — их адреса есть, только пока туннель поднят
+             echo "10.30.1.0/24 172.16.0.0/24 172.16.250.0/24"; } || true)
+  python3 - "$taken" <<'PY'
+import ipaddress, random, re, sys
+taken = []
+for tok in re.findall(r'(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?(?![\d.])', sys.argv[1]):
+    try:
+        n = ipaddress.ip_network(tok, strict=False)
+    except ValueError:
+        continue
+    if n.prefixlen == 0:
+        continue
+    taken.append(n)
+pools = [
+    lambda: f"10.{random.randint(60, 99)}.{random.randint(1, 254)}.0/24",
+    lambda: f"172.{random.randint(16, 31)}.{random.randint(1, 254)}.0/24",
+    lambda: f"192.168.{random.randint(100, 250)}.0/24",
+]
+for pick in pools:
+    for _ in range(300):
+        net = ipaddress.ip_network(pick())
+        if not any(net.overlaps(t) for t in taken):
+            print(net)
+            sys.exit(0)
+sys.exit(1)
+PY
+}
+
+# AllowedIPs «всё, кроме сервера». Обфускатор клиента шлёт пакеты на реальный
+# IP сервера; с 0.0.0.0/0 они ушли бы в сам туннель (петля). Список работает
+# на любой платформе, в отличие от FwMark (только Linux).
+_wgobf_allowed_ips() {
+  python3 - "$1" <<'PY'
+import ipaddress, sys
+srv = ipaddress.ip_network(sys.argv[1] + "/32")
+nets = sorted(ipaddress.ip_network("0.0.0.0/0").address_exclude(srv))
+print(", ".join(str(n) for n in nets) + ", ::/0")
+PY
+}
+
+_wgobf_gen_key() {
+  python3 -c "import secrets,string; a=string.ascii_letters+string.digits; print(''.join(secrets.choice(a) for _ in range(32)))"
+}
+
+# Версия собранного обфускатора (v1.6) или пусто.
+_wgobf_bin_version() {
+  [[ -x "$WGOBF_BIN" ]] || return 0
+  "$WGOBF_BIN" --help 2>&1 | grep -oE 'Obfuscator v[0-9.]+' | head -n1 | awk '{print $2}' || true
+}
+
+# Сборка обфускатора из закреплённого тега. Вызывается через run_step.
+_wgobf_build() {
+  local src
+  src=$(mktemp -d /tmp/awg_tmp_wgobf.XXXXXX) || return 1
+  git -c advice.detachedHead=false clone -q --depth 1 --branch "$WGOBF_VERSION" "$WGOBF_REPO" "$src/src" \
+    || { rm -rf "$src"; return 1; }
+  local head
+  head=$(git -C "$src/src" rev-parse HEAD 2>/dev/null || true)
+  if [[ "$head" != "$WGOBF_COMMIT" ]]; then
+    echo "Коммит тега $WGOBF_VERSION не совпал: ждали $WGOBF_COMMIT, пришёл ${head:-пусто}"
+    rm -rf "$src"
+    return 1
+  fi
+  make -C "$src/src" RELEASE=1 || { rm -rf "$src"; return 1; }
+  install -D -m 755 "$src/src/wg-obfuscator" "$WGOBF_BIN" || { rm -rf "$src"; return 1; }
+  rm -rf "$src"
+}
+
+# Ядро умеет WireGuard? (модуль wireguard есть в ядрах 5.6+ почти везде)
+_wgobf_kernel_ok() {
+  modprobe wireguard 2>/dev/null || true
+  if ip link add dev wgobfchk type wireguard 2>/dev/null; then
+    ip link del dev wgobfchk 2>/dev/null || true
+    return 0
+  fi
+  # wg-quick сам возьмёт userspace-реализацию, если она есть
+  command -v wireguard-go &>/dev/null
+}
+
+_wgobf_ensure_deps() {
+  local missing=()
+  command -v wg        &>/dev/null || missing+=("wireguard-tools")
+  command -v wg-quick  &>/dev/null || missing+=("wireguard-tools")
+  command -v git       &>/dev/null || missing+=("git")
+  command -v make      &>/dev/null || missing+=("make")
+  command -v gcc       &>/dev/null || missing+=("gcc")
+  command -v iptables  &>/dev/null || missing+=("iptables")
+  command -v python3   &>/dev/null || missing+=("python3")
+  if (( ${#missing[@]} > 0 )); then
+    # wireguard-tools может попасть в список дважды — apt это не смущает,
+    # но строку для человека чистим
+    local uniq
+    uniq=$(printf '%s\n' "${missing[@]}" | sort -u | tr '\n' ' ')
+    info "Ставлю зависимости: $uniq"
+    # shellcheck disable=SC2086  # список пакетов — намеренно словами
+    if ! _apt_install $uniq >/dev/null 2>&1; then
+      err "Не удалось установить: $uniq"
+      _apt_last_errors
+      return 1
+    fi
+  fi
+  # QR — удобство, не требование: без qrencode конфиг покажется текстом
+  command -v qrencode &>/dev/null || _apt_install qrencode >/dev/null 2>&1 || true
+  local b
+  for b in wg wg-quick git make gcc iptables python3; do
+    command -v "$b" &>/dev/null || { err "Нет $b даже после установки пакетов"; return 1; }
+  done
+  mkdir -p /etc/wireguard && chmod 700 /etc/wireguard
+  return 0
+}
+
+# Скрипт правил для PostUp/PostDown. Отдельный файл, а не строка в конфиге:
+# up и down обязаны снимать ровно то, что ставили, — поэтому всё по тегу.
+# MASQUERADE — «! -o wgobf0» вместо имени аплинка: переименование интерфейса
+# у хостера после ребута ничего не ломает.
+_wgobf_write_fw() {
+  mkdir -p "$WGOBF_LIB"
+  cat > "$WGOBF_FW" <<EOF
+#!/bin/sh
+# AWG Toolza — правила iptables для ${WGOBF_IFACE} (WG + обфускатор).
+# Вызывается из PostUp/PostDown ${WGOBF_WG_CONF}. Не редактировать:
+# файл перезаписывается скриптом awg2.
+set -u
+STATE="${WGOBF_STATE}"
+TAG="${WGOBF_TAG}"
+IFACE="${WGOBF_IFACE}"
+
+get() { sed -n "s/^\$1=//p" "\$STATE" 2>/dev/null | head -n 1; }
+
+clear_rules() {
+  for t in filter nat; do
+    iptables-save -t "\$t" 2>/dev/null | grep -F -- "--comment \$TAG" | sed 's/^-A /-D /' |
+    while IFS= read -r rule; do
+      # shellcheck disable=SC2086  # правило из iptables-save — словами
+      iptables -t "\$t" \$rule 2>/dev/null || true
+    done
+  done
+}
+
+up() {
+  clear_rules
+  NET=\$(get NET); WG_PORT=\$(get WG_PORT)
+  if [ -z "\$NET" ] || [ -z "\$WG_PORT" ]; then
+    echo "wgobf-fw: в \$STATE нет NET/WG_PORT" >&2
+    exit 1
+  fi
+  sysctl -qw net.ipv4.ip_forward=1 >/dev/null 2>&1 || echo 1 > /proc/sys/net/ipv4/ip_forward
+  iptables -t nat -A POSTROUTING -s "\$NET" ! -o "\$IFACE" -j MASQUERADE -m comment --comment "\$TAG" || exit 1
+  iptables -I FORWARD 1 -i "\$IFACE" -j ACCEPT -m comment --comment "\$TAG" || exit 1
+  iptables -I FORWARD 1 -o "\$IFACE" -j ACCEPT -m comment --comment "\$TAG" || exit 1
+  # Порт WireGuard — только для обфускатора (он ходит через lo)
+  iptables -I INPUT 1 -p udp --dport "\$WG_PORT" ! -i lo -j DROP -m comment --comment "\$TAG" || exit 1
+}
+
+case "\${1:-}" in
+  up)   up ;;
+  down) clear_rules ;;
+  *)    echo "usage: \$0 up|down" >&2; exit 2 ;;
+esac
+exit 0
+EOF
+  chmod 755 "$WGOBF_FW"
+}
+
+_wgobf_write_obf_conf() {
+  local port wg_port key clean
+  port=$(_wgobf_get PORT); wg_port=$(_wgobf_get WG_PORT); key=$(_wgobf_get KEY)
+  clean=$(_wgobf_get ALLOW_CLEAN)
+  {
+    echo "# AWG Toolza — серверный wg-obfuscator для ${WGOBF_IFACE}."
+    echo "# Перезаписывается скриптом awg2 (пункт 9)."
+    echo "[main]"
+    echo "source-if = 0.0.0.0"
+    echo "source-lport = $port"
+    echo "target = 127.0.0.1:$wg_port"
+    echo "key = $key"
+    # AUTO: сервер понимает и STUN-маскировку, и голый XOR — режим выбирает клиент
+    echo "masking = AUTO"
+    [[ "$clean" == "1" ]] && echo "allow-clean = true"
+    echo "verbose = INFO"
+  } > "$WGOBF_OBF_CONF"
+  chmod 600 "$WGOBF_OBF_CONF"
+}
+
+_wgobf_write_unit() {
+  cat > "$WGOBF_UNIT_FILE" <<EOF
+[Unit]
+Description=AWG Toolza — wg-obfuscator для ${WGOBF_IFACE}
+After=network-online.target wg-quick@${WGOBF_IFACE}.service
+Wants=network-online.target
+
+[Service]
+ExecStart=${WGOBF_BIN} -c ${WGOBF_OBF_CONF}
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+# Поднять/перезапустить обе службы. Код возврата — всё ли живо.
+_wgobf_start() {
+  systemctl enable "wg-quick@${WGOBF_IFACE}" >/dev/null 2>&1 || true
+  systemctl enable "$WGOBF_UNIT" >/dev/null 2>&1 || true
+  local out rc=0
+  out=$(systemctl restart "wg-quick@${WGOBF_IFACE}" 2>&1) || rc=$?
+  if (( rc != 0 )) || ! ip link show "$WGOBF_IFACE" &>/dev/null; then
+    err "${WGOBF_IFACE} не поднялся"
+    [[ -n "$out" ]] && printf '%s\n' "$out" | sed 's/^/    /'
+    journalctl -u "wg-quick@${WGOBF_IFACE}" -n 15 --no-pager 2>/dev/null | sed 's/^/    /' || true
+    return 1
+  fi
+  if ! systemctl restart "$WGOBF_UNIT" 2>/dev/null; then
+    err "Служба $WGOBF_UNIT не запустилась"
+    journalctl -u "$WGOBF_UNIT" -n 15 --no-pager 2>/dev/null | sed 's/^/    /' || true
+    return 1
+  fi
+  sleep 1
+  if ! systemctl is-active --quiet "$WGOBF_UNIT"; then
+    err "Служба $WGOBF_UNIT упала сразу после старта"
+    journalctl -u "$WGOBF_UNIT" -n 15 --no-pager 2>/dev/null | sed 's/^/    /' || true
+    return 1
+  fi
+  return 0
+}
+
+# Применить изменения пиров без обрыва уже подключённых клиентов.
+_wgobf_sync() {
+  ip link show "$WGOBF_IFACE" &>/dev/null || return 0
+  local stripped rc=0
+  stripped=$(wg-quick strip "$WGOBF_IFACE" 2>/dev/null) || rc=$?
+  (( rc == 0 )) || { warn "wg-quick strip не сработал — перезапускаю ${WGOBF_IFACE}"; _wgobf_start; return; }
+  wg syncconf "$WGOBF_IFACE" <(printf '%s\n' "$stripped")
+}
+
+# Имена клиентов из серверного конфига (маркер «# client=имя» в [Peer]).
+_wgobf_client_names() {
+  sed -n 's/^# client=//p' "$WGOBF_WG_CONF" 2>/dev/null || true
+}
+
+_wgobf_valid_name() { [[ "$1" =~ ^[A-Za-z0-9_-]{1,32}$ ]]; }
+
+# Свободный адрес клиента в подсети /24.
+_wgobf_free_ip() {
+  local net base i
+  net=$(_wgobf_get NET)
+  base="${net%.*}"
+  for i in $(seq 2 254); do
+    grep -qE "^AllowedIPs = ${base//./\\.}\.${i}/32\$" "$WGOBF_WG_CONF" 2>/dev/null && continue
+    echo "${base}.${i}"
+    return 0
+  done
+  return 1
+}
+
+# Комплект клиента в /root/wgobf/<имя>/: конфиг WireGuard, конфиг
+# обфускатора, установщик для Linux и памятка. Ключи клиента берутся из уже
+# выпущенного wg.conf ($2/$3 при первом выпуске) — поэтому комплект можно
+# перевыпустить после смены настроек, не трогая ключи.
+_wgobf_write_bundle() {
+  local name="$1" priv="${2:-}" addr="${3:-}" psk="${4:-}"
+  local dir="$WGOBF_CLIENTS/$name"
+  if [[ -z "$priv" ]]; then
+    priv=$(sed -n 's/^PrivateKey = //p' "$dir/wg.conf" 2>/dev/null | head -n1)
+    addr=$(sed -n 's/^Address = //p' "$dir/wg.conf" 2>/dev/null | head -n1)
+    psk=$(sed -n 's/^PresharedKey = //p' "$dir/wg.conf" 2>/dev/null | head -n1)
+    [[ -n "$priv" && -n "$addr" ]] || { err "Нет ключей клиента $name в $dir/wg.conf"; return 1; }
+  fi
+  local srv_pub endpoint port key masking mtu dns allowed clean
+  srv_pub=$(_wgobf_get SERVER_PUB); endpoint=$(_wgobf_get ENDPOINT)
+  port=$(_wgobf_get PORT); key=$(_wgobf_get KEY); masking=$(_wgobf_get MASKING)
+  mtu=$(_wgobf_get MTU); dns=$(_wgobf_get DNS); clean=$(_wgobf_get ALLOW_CLEAN)
+  allowed=$(_wgobf_allowed_ips "$endpoint") || { err "Не удалось посчитать AllowedIPs"; return 1; }
+
+  mkdir -p "$dir" && chmod 700 "$WGOBF_CLIENTS" "$dir"
+
+  # Локальный порт обфускатора у клиента = порт сервера: у клиента с
+  # несколькими такими серверами порты не столкнутся.
+  cat > "$dir/wg.conf" <<EOF
+[Interface]
+PrivateKey = $priv
+Address = $addr
+DNS = $dns
+MTU = $mtu
+
+[Peer]
+PublicKey = $srv_pub
+PresharedKey = $psk
+Endpoint = 127.0.0.1:$port
+AllowedIPs = $allowed
+PersistentKeepalive = 25
+EOF
+
+  cat > "$dir/obfuscator.conf" <<EOF
+[main]
+source-if = 127.0.0.1
+source-lport = $port
+target = $endpoint:$port
+key = $key
+masking = $masking
+verbose = INFO
+EOF
+
+  # Прямой конфиг — только если сервер пускает клиентов без обфускатора
+  rm -f "$dir/wg-direct.conf"
+  if [[ "$clean" == "1" ]]; then
+    cat > "$dir/wg-direct.conf" <<EOF
+[Interface]
+PrivateKey = $priv
+Address = $addr
+DNS = $dns
+MTU = $mtu
+
+[Peer]
+PublicKey = $srv_pub
+PresharedKey = $psk
+Endpoint = $endpoint:$port
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+  fi
+
+  _wgobf_write_linux_installer "$name" "$dir"
+  _wgobf_write_readme "$name" "$dir"
+  chmod 600 "$dir"/*
+  chmod 700 "$dir/install-linux.sh"
+  return 0
+}
+
+# Самодостаточный установщик клиента для Debian/Ubuntu: собирает тот же тег
+# обфускатора, кладёт конфиги и включает автозапуск.
+_wgobf_write_linux_installer() {
+  local name="$1" dir="$2"
+  local tag="wgobf-${name}"
+  {
+    cat <<EOF
+#!/bin/bash
+# AWG Toolza — клиент «WG + обфускатор» ($name) для Debian/Ubuntu.
+# Запуск: sudo bash install-linux.sh        Удаление: sudo bash install-linux.sh --remove
+set -euo pipefail
+[[ \$EUID -eq 0 ]] || { echo "Запусти от root: sudo bash \$0"; exit 1; }
+
+TAG="$tag"
+OBF_VERSION="$WGOBF_VERSION"
+OBF_COMMIT="$WGOBF_COMMIT"
+OBF_REPO="$WGOBF_REPO"
+LIB="/usr/local/lib/\$TAG"
+CONF_DIR="/etc/\$TAG"
+UNIT="\$TAG-obfuscator.service"
+WG_IF="\$TAG"
+[[ \${#WG_IF} -le 15 ]] || WG_IF="wgobf-cli"
+
+if [[ "\${1:-}" == "--remove" ]]; then
+  systemctl disable --now "wg-quick@\$WG_IF" 2>/dev/null || true
+  systemctl disable --now "\$UNIT" 2>/dev/null || true
+  rm -f "/etc/systemd/system/\$UNIT" "/etc/wireguard/\$WG_IF.conf"
+  rm -rf "\$LIB" "\$CONF_DIR"
+  systemctl daemon-reload
+  echo "Клиент удалён"
+  exit 0
+fi
+
+command -v apt-get >/dev/null || { echo "Нужен Debian/Ubuntu (apt). На другой системе поставь wg-obfuscator и WireGuard вручную — см. README.txt"; exit 1; }
+need=()
+for b in wg:wireguard-tools wg-quick:wireguard-tools git:git make:make gcc:gcc; do
+  command -v "\${b%%:*}" >/dev/null || need+=("\${b#*:}")
+done
+if (( \${#need[@]} > 0 )); then
+  mapfile -t need < <(printf '%s\n' "\${need[@]}" | sort -u)
+  apt-get update -q
+  apt-get install -y -q "\${need[@]}"
+fi
+
+src=\$(mktemp -d)
+trap 'rm -rf "\$src"' EXIT
+git -c advice.detachedHead=false clone -q --depth 1 --branch "\$OBF_VERSION" "\$OBF_REPO" "\$src/src"
+[[ "\$(git -C "\$src/src" rev-parse HEAD)" == "\$OBF_COMMIT" ]] || { echo "Коммит тега \$OBF_VERSION не совпал — сборка остановлена"; exit 1; }
+make -C "\$src/src" RELEASE=1 >/dev/null
+install -D -m 755 "\$src/src/wg-obfuscator" "\$LIB/wg-obfuscator"
+
+mkdir -p "\$CONF_DIR" /etc/wireguard
+chmod 700 "\$CONF_DIR" /etc/wireguard
+cat > "\$CONF_DIR/obfuscator.conf" <<'OBF_EOF'
+EOF
+    cat "$dir/obfuscator.conf"
+    cat <<EOF
+OBF_EOF
+cat > "/etc/wireguard/\$WG_IF.conf" <<'WG_EOF'
+EOF
+    cat "$dir/wg.conf"
+    cat <<EOF
+WG_EOF
+chmod 600 "\$CONF_DIR/obfuscator.conf" "/etc/wireguard/\$WG_IF.conf"
+
+# DNS в конфиге wg-quick требует resolvconf. Нет его — убираем строку,
+# чтобы подключение не падало; DNS останется системный.
+if ! command -v resolvconf >/dev/null; then
+  sed -i '/^DNS = /d' "/etc/wireguard/\$WG_IF.conf"
+  echo "resolvconf не найден — строка DNS убрана, DNS останется системный"
+fi
+
+# ::/0 в AllowedIPs требует IPv6-маршрутизации. Где IPv6 выключен, wg-quick
+# падает на ней целиком (ip -6 rule / route) — убираем ::/0.
+if ! ip -6 rule show >/dev/null 2>&1 || \\
+   [[ "\$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" == "1" ]]; then
+  sed -i 's#, ::/0##' "/etc/wireguard/\$WG_IF.conf"
+  echo "IPv6 выключен — ::/0 убран из AllowedIPs"
+fi
+
+cat > "/etc/systemd/system/\$UNIT" <<UNIT_EOF
+[Unit]
+Description=wg-obfuscator (клиент \$TAG)
+After=network-online.target
+Wants=network-online.target
+Before=wg-quick@\$WG_IF.service
+
+[Service]
+ExecStart=\$LIB/wg-obfuscator -c \$CONF_DIR/obfuscator.conf
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+
+systemctl daemon-reload
+systemctl enable --now "\$UNIT"
+systemctl enable "wg-quick@\$WG_IF"
+if ! systemctl restart "wg-quick@\$WG_IF"; then
+  echo ""
+  echo "WireGuard не поднялся: journalctl -u wg-quick@\$WG_IF -n 20"
+  echo "Частая причина («File exists») — на устройстве уже поднят другой VPN на"
+  echo "весь трафик (другой клиент wgobf-*, wg-quick, AWG). Выключи его и повтори:"
+  echo "  systemctl restart wg-quick@\$WG_IF"
+  exit 1
+fi
+echo ""
+echo "Готово. Проверка: wg show \$WG_IF (строка latest handshake)"
+echo "Выключить: systemctl stop wg-quick@\$WG_IF"
+EOF
+  } > "$dir/install-linux.sh"
+}
+
+_wgobf_write_readme() {
+  local name="$1" dir="$2" endpoint port masking clean
+  endpoint=$(_wgobf_get ENDPOINT); port=$(_wgobf_get PORT)
+  masking=$(_wgobf_get MASKING); clean=$(_wgobf_get ALLOW_CLEAN)
+  {
+    echo "WG + обфускатор — клиент $name"
+    echo "Сервер: $endpoint:$port (UDP), маскировка: $masking"
+    echo ""
+    echo "Файлы:"
+    echo "  wg.conf          — конфиг WireGuard (Endpoint = 127.0.0.1:$port,"
+    echo "                     там слушает обфускатор на этом же устройстве)"
+    echo "  obfuscator.conf  — конфиг wg-obfuscator $WGOBF_VERSION"
+    echo "  install-linux.sh — установка всего на Debian/Ubuntu одной командой"
+    [[ "$clean" == "1" ]] && \
+      echo "  wg-direct.conf   — БЕЗ обфускатора (телефоны); виден DPI как WireGuard"
+    echo ""
+    echo "Linux (Debian/Ubuntu):  sudo bash install-linux.sh"
+    echo ""
+    echo "Windows / macOS:"
+    echo "  1. Скачать wg-obfuscator $WGOBF_VERSION:"
+    echo "     https://github.com/ClusterM/wg-obfuscator/releases/tag/$WGOBF_VERSION"
+    echo "  2. Запустить: wg-obfuscator -c obfuscator.conf  (окно не закрывать)"
+    echo "  3. Импортировать wg.conf в приложение WireGuard и подключиться"
+    echo ""
+    echo "OpenWrt: пакет wg-obfuscator с LuCI —"
+    echo "  https://github.com/ClusterM/wg-obfuscator/blob/master/docs/OPENWRT.md"
+    echo "  параметры из obfuscator.conf, WireGuard — из wg.conf"
+    echo ""
+    echo "Android: https://github.com/ClusterM/wg-obfuscator-android (ранняя версия)"
+    echo "  + приложение WireGuard с wg.conf. iOS обфускатор не поддерживает."
+    echo ""
+    echo "AllowedIPs в wg.conf — «весь интернет, кроме IP сервера»: иначе пакеты"
+    echo "обфускатора к серверу уйдут в сам туннель, и связь пропадёт."
+  } > "$dir/README.txt"
+}
+
+_wgobf_show_bundle() {
+  local name="$1" dir="$WGOBF_CLIENTS/$1"
+  [[ -f "$dir/wg.conf" ]] || { err "Комплект $name не найден ($dir)"; return 1; }
+  echo ""
+  hdr "Клиент $name"
+  echo -e "  ${W}Папка:${N} $dir"
+  echo -e "  ${D}$(find "$dir" -maxdepth 1 -type f -printf '%f ' | sort)${N}"
+  echo ""
+  echo -e "${Y}  ── obfuscator.conf ──${N}"
+  cat "$dir/obfuscator.conf"
+  echo ""
+  echo -e "${Y}  ── wg.conf ──${N}"
+  cat "$dir/wg.conf"
+  if [[ -f "$dir/wg-direct.conf" ]]; then
+    echo ""
+    echo -e "${Y}  ── wg-direct.conf (без обфускатора) ──${N}"
+    if command -v qrencode &>/dev/null; then
+      qrencode -t ansiutf8 -s 1 -m 1 < "$dir/wg-direct.conf"
+      echo -e "${D}  ↑ QR для приложения WireGuard (без обфускатора, виден DPI)${N}"
+    else
+      cat "$dir/wg-direct.conf"
+    fi
+  fi
+  echo ""
+  info "Инструкции по платформам: $dir/README.txt"
+  info "Linux-клиент: скопируй install-linux.sh на устройство и запусти через sudo"
+  info "Забрать папку: scp -r root@$(_wgobf_get ENDPOINT):$dir ."
+}
+
+_wgobf_add_client() {
+  local name="$1"
+  _wgobf_valid_name "$name" || { err "Имя: латиница, цифры, _ и -, до 32 символов"; return 1; }
+  if _wgobf_client_names | grep -qxF "$name"; then
+    err "Клиент $name уже есть"
+    return 1
+  fi
+  local ip priv pub psk
+  ip=$(_wgobf_free_ip) || { err "В подсети $(_wgobf_get NET) нет свободных адресов"; return 1; }
+  priv=$(wg genkey) || { err "wg genkey не сработал"; return 1; }
+  pub=$(printf '%s' "$priv" | wg pubkey)
+  psk=$(wg genpsk)
+
+  local bak="${WGOBF_WG_CONF}.bak"
+  cp -f "$WGOBF_WG_CONF" "$bak"
+  {
+    echo ""
+    echo "[Peer]"
+    echo "# client=$name"
+    echo "PublicKey = $pub"
+    echo "PresharedKey = $psk"
+    echo "AllowedIPs = ${ip}/32"
+  } >> "$WGOBF_WG_CONF"
+
+  if ! _wgobf_sync; then
+    mv -f "$bak" "$WGOBF_WG_CONF"
+    err "Не удалось применить клиента — конфиг возвращён"
+    return 1
+  fi
+  rm -f "$bak"
+  _wgobf_write_bundle "$name" "$priv" "${ip}/32" "$psk" || return 1
+  ok "Клиент $name: ${ip}"
+  log_info "wgobf: добавлен клиент $name ($ip)"
+  return 0
+}
+
+# Убирает блок [Peer] с маркером клиента.
+_wgobf_delete_client() {
+  local name="$1" tmp
+  _wgobf_client_names | grep -qxF "$name" || { err "Клиента $name нет"; return 1; }
+  tmp=$(mktemp "$WGOBF_DIR/.wg.XXXXXX") || return 1
+  awk -v target="# client=$name" '
+    function flush() { if (blk != "" && !drop) printf "%s", blk; blk=""; drop=0 }
+    /^\[/ { flush() }
+    { blk = blk $0 "\n"; if ($0 == target) drop = 1 }
+    END { flush() }
+  ' "$WGOBF_WG_CONF" | cat -s > "$tmp"
+  chmod 600 "$tmp"
+  cp -f "$WGOBF_WG_CONF" "${WGOBF_WG_CONF}.bak"
+  mv -f "$tmp" "$WGOBF_WG_CONF"
+  if ! _wgobf_sync; then
+    mv -f "${WGOBF_WG_CONF}.bak" "$WGOBF_WG_CONF"
+    err "Не удалось применить удаление — конфиг возвращён"
+    return 1
+  fi
+  rm -f "${WGOBF_WG_CONF}.bak"
+  rm -rf "${WGOBF_CLIENTS:?}/$name"
+  ok "Клиент $name удалён"
+  log_info "wgobf: удалён клиент $name"
+}
+
+_wgobf_list_clients() {
+  local names
+  names=$(_wgobf_client_names)
+  if [[ -z "$names" ]]; then
+    info "Клиентов пока нет"
+    return 0
+  fi
+  local hs_dump="" now
+  hs_dump=$(wg show "$WGOBF_IFACE" dump 2>/dev/null | tail -n +2 || true)
+  now=$(date +%s)
+  echo ""
+  # Шапка без printf-ширины: он считает байты, и кириллица сбивает колонки
+  echo -e "  ${W}#   Имя                  IP               Последний handshake${N}"
+  local i=1 name pub ip hs ago
+  while IFS= read -r name; do
+    pub=$(awk -v t="# client=$name" '$0==t{f=1;next} f&&/^PublicKey = /{print $3; exit}' "$WGOBF_WG_CONF")
+    ip=$(awk -v t="# client=$name" '$0==t{f=1;next} f&&/^AllowedIPs = /{print $3; exit}' "$WGOBF_WG_CONF")
+    hs=$(printf '%s\n' "$hs_dump" | awk -v k="$pub" '$1==k{print $5; exit}')
+    if [[ "$hs" =~ ^[0-9]+$ ]] && (( hs > 0 )); then
+      ago="$(_fmt_duration $((now - hs))) назад"
+    else
+      ago="—"
+    fi
+    printf "  %-3s %-20s %-16s %s\n" "$i" "$name" "${ip%/32}" "$ago"
+    i=$((i + 1))
+  done <<< "$names"
+}
+
+# Выбор клиента по номеру. Результат — в переменную $1.
+_wgobf_pick_client() {
+  local __var="$1" names count choice
+  names=$(_wgobf_client_names)
+  [[ -n "$names" ]] || { info "Клиентов нет"; return 1; }
+  _wgobf_list_clients
+  count=$(printf '%s\n' "$names" | wc -l)
+  echo ""
+  read_choice choice "$(echo -e "${C}  Номер клиента (0 = отмена): ${N}")" 0 "$count"
+  [[ "$choice" == "0" ]] && return 1
+  printf -v "$__var" '%s' "$(printf '%s\n' "$names" | sed -n "${choice}p")"
+}
+
+do_wgobf_install() {
+  echo ""
+  hdr "WG + обфускатор: установка"
+  if _wgobf_installed; then
+    warn "Уже установлен. Переустановка — удалить (пункт 9 этого меню) и поставить заново."
+    return 0
+  fi
+  echo -e "  ${D}Отдельный WireGuard-сервер (${WGOBF_IFACE}) за wg-obfuscator ${WGOBF_VERSION}.${N}"
+  echo -e "  ${D}AWG, его клиенты и туннели не затрагиваются. Клиентам нужен${N}"
+  echo -e "  ${D}обфускатор на устройстве: роутер, Linux, Windows, macOS.${N}"
+  echo ""
+
+  _wgobf_ensure_deps || return 1
+  if ! _wgobf_kernel_ok; then
+    err "Ядро $(uname -r) не умеет WireGuard, и wireguard-go не установлен"
+    info "Нужен модуль wireguard (ядро 5.6+) или: apt-get install wireguard-go"
+    return 1
+  fi
+
+  if [[ "$(_wgobf_bin_version)" != "$WGOBF_VERSION" ]]; then
+    run_step "Сборка wg-obfuscator $WGOBF_VERSION" _wgobf_build || return 1
+  else
+    ok "wg-obfuscator $WGOBF_VERSION уже собран"
+  fi
+
+  # ── Параметры ──
+  local endpoint
+  endpoint=$(get_public_ip)
+  if [[ -z "$endpoint" ]] || _ip_is_private "$endpoint"; then
+    warn "Публичный IP не определился (${endpoint:-пусто})"
+    while true; do
+      safe_read endpoint "$(echo -e "${C}  Публичный IPv4 сервера: ${N}")"
+      endpoint="${endpoint// /}"
+      [[ -z "$endpoint" ]] && { info "Отменено"; return 0; }
+      _cascade_valid_ip "$endpoint" && break
+      warn "Нужен IPv4, например 1.2.3.4 (обфускатор не умеет IPv6)"
+    done
+  fi
+  ok "IP сервера: $endpoint"
+
+  local port=""
+  while true; do
+    safe_read port "$(echo -e "${C}  UDP-порт обфускатора [Enter = случайный]: ${N}")"
+    port="${port// /}"
+    if [[ -z "$port" ]]; then
+      port=$(_wgobf_pick_port) || { err "Не нашёл свободный UDP-порт"; return 1; }
+      break
+    fi
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1024 || port > 65535 )); then
+      warn "Порт — число 1024-65535"; continue
+    fi
+    if _udp_port_busy "$port"; then
+      warn "UDP $port занят (сокет, AWG или каскад) — выбери другой"; continue
+    fi
+    break
+  done
+  ok "Порт обфускатора: $port/udp"
+
+  local mask_choice masking
+  echo ""
+  echo -e "  ${W}Маскировка трафика клиентов:${N}"
+  echo -e "  ${C}1)${N} STUN ${D}— под видеозвонок, рекомендуется${N}"
+  echo -e "  ${C}2)${N} Без маскировки ${D}— только XOR-обфускация${N}"
+  read_choice mask_choice "$(echo -e "${C}  Выбор [1-2] (Enter = 1): ${N}")" 1 2 1
+  [[ "$mask_choice" == "2" ]] && masking="NONE" || masking="STUN"
+
+  local clean="n"
+  echo ""
+  echo -e "  ${D}Клиенты без обфускатора (iOS, телефоны) могут подключаться обычным${N}"
+  echo -e "  ${D}WireGuard на тот же порт — но такой трафик DPI видит как WireGuard.${N}"
+  read_yesno clean "$(echo -e "${C}  Пускать клиентов без обфускатора? [y/N]: ${N}")" "n"
+
+  local dns_choice dns
+  echo ""
+  echo -e "  ${W}DNS для клиентов:${N}"
+  echo -e "  ${C}1)${N} Cloudflare 1.1.1.1  ${C}2)${N} Google 8.8.8.8  ${C}3)${N} Quad9 9.9.9.9"
+  read_choice dns_choice "$(echo -e "${C}  Выбор [1-3] (Enter = 1): ${N}")" 1 3 1
+  case "$dns_choice" in
+    2) dns="8.8.8.8, 8.8.4.4" ;;
+    3) dns="9.9.9.9, 149.112.112.112" ;;
+    *) dns="1.1.1.1, 1.0.0.1" ;;
+  esac
+
+  local wg_port net srv_priv srv_pub
+  wg_port=$(_wgobf_pick_port "$port") || { err "Не нашёл свободный UDP-порт для WireGuard"; return 1; }
+  net=$(_wgobf_pick_net) || { err "Не нашёл свободную /24 (10.x, 172.16-31.x, 192.168.x) — всё занято маршрутами"; return 1; }
+  srv_priv=$(wg genkey) || { err "wg genkey не сработал"; return 1; }
+  srv_pub=$(printf '%s' "$srv_priv" | wg pubkey)
+  ok "Подсеть клиентов: $net"
+
+  # ── Запись ──
+  mkdir -p "$WGOBF_DIR" && chmod 700 "$WGOBF_DIR"
+  rm -f "$WGOBF_STATE"
+  _wgobf_set PORT "$port"
+  _wgobf_set WG_PORT "$wg_port"
+  _wgobf_set KEY "$(_wgobf_gen_key)"
+  _wgobf_set MASKING "$masking"
+  _wgobf_set ALLOW_CLEAN "$([[ "$clean" == "y" ]] && echo 1 || echo 0)"
+  _wgobf_set NET "$net"
+  _wgobf_set MTU "$WGOBF_DEFAULT_MTU"
+  _wgobf_set DNS "$dns"
+  _wgobf_set ENDPOINT "$endpoint"
+  _wgobf_set SERVER_PUB "$srv_pub"
+
+  _wgobf_write_fw
+  {
+    echo "# AWG Toolza — WG + обфускатор. Снаружи порт закрыт, вход — через"
+    echo "# wg-obfuscator на $port/udp. Клиенты — блоки [Peer] с «# client=имя»."
+    echo "[Interface]"
+    echo "PrivateKey = $srv_priv"
+    echo "Address = ${net%.*}.1/24"
+    echo "ListenPort = $wg_port"
+    echo "MTU = $WGOBF_DEFAULT_MTU"
+    echo "PostUp = $WGOBF_FW up"
+    echo "PostDown = $WGOBF_FW down"
+  } > "$WGOBF_WG_CONF"
+  chmod 600 "$WGOBF_WG_CONF"
+  _wgobf_write_obf_conf
+  _wgobf_write_unit
+
+  if ! _wgobf_start; then
+    err "Запуск не удался — откатываю установку"
+    _wgobf_teardown
+    return 1
+  fi
+  ok "${WGOBF_IFACE} и wg-obfuscator запущены"
+
+  if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+    if ufw allow "${port}/udp" comment "$WGOBF_TAG" >/dev/null 2>&1; then
+      ok "UFW: открыт ${port}/udp"
+    else
+      warn "UFW: не удалось открыть ${port}/udp"
+    fi
+  fi
+  log_info "wgobf: установлен (порт $port, wg $wg_port, сеть $net, маскировка $masking)"
+
+  echo ""
+  local first=""
+  safe_read first "$(echo -e "${C}  Имя первого клиента [Enter = client1]: ${N}")"
+  first="${first// /}"
+  [[ -z "$first" ]] && first="client1"
+  if _wgobf_add_client "$first"; then _wgobf_show_bundle "$first" || true; fi
+
+  echo ""
+  success_box "WG + обфускатор установлен"
+  echo -e "${W}  Вход    : ${N}$endpoint:$port/udp (маскировка клиентов: $masking)"
+  echo -e "${W}  Сервер  : ${N}$WGOBF_WG_CONF"
+  echo -e "${W}  Клиенты : ${N}$WGOBF_CLIENTS/"
+}
+
+# Сносит всё, что поставил режим. Комплекты клиентов — по $1 (keep/drop).
+_wgobf_teardown() {
+  local clients="${1:-keep}" port
+  port=$(_wgobf_get PORT)
+  systemctl disable --now "$WGOBF_UNIT" >/dev/null 2>&1 || true
+  systemctl disable --now "wg-quick@${WGOBF_IFACE}" >/dev/null 2>&1 || true
+  ip link show "$WGOBF_IFACE" &>/dev/null && ip link del dev "$WGOBF_IFACE" 2>/dev/null
+  [[ -x "$WGOBF_FW" ]] && "$WGOBF_FW" down >/dev/null 2>&1
+  if [[ -n "$port" ]] && command -v ufw &>/dev/null; then
+    ufw delete allow "${port}/udp" >/dev/null 2>&1 || true
+  fi
+  rm -f "$WGOBF_UNIT_FILE" "$WGOBF_WG_CONF" "${WGOBF_WG_CONF}.bak" "$WGOBF_BIN" "$WGOBF_FW"
+  rmdir "$WGOBF_LIB" 2>/dev/null || true
+  rm -rf "$WGOBF_DIR"
+  [[ "$clients" == "drop" ]] && rm -rf "$WGOBF_CLIENTS"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  return 0
+}
+
+# Восстановление из папки бэкапа ($1 = <бэкап>/wgobf). Служебные файлы
+# (правила, юнит, конфиг обфускатора) пишутся заново текущим кодом — из
+# бэкапа берутся только ключи, настройки и клиенты.
+_wgobf_restore() {
+  local src="$1"
+  _wgobf_ensure_deps || return 1
+  if ! _wgobf_kernel_ok; then
+    err "Ядро не умеет WireGuard — WG + обфускатор не восстановлен"
+    return 1
+  fi
+  if [[ "$(_wgobf_bin_version)" != "$WGOBF_VERSION" ]]; then
+    run_step "Сборка wg-obfuscator $WGOBF_VERSION" _wgobf_build || return 1
+  fi
+  _wgobf_installed && _wgobf_teardown drop
+  mkdir -p "$WGOBF_DIR" && chmod 700 "$WGOBF_DIR"
+  cp -a "$src/etc/." "$WGOBF_DIR/" || { err "Не удалось скопировать настройки"; return 1; }
+  cp "$src/${WGOBF_IFACE}.conf" "$WGOBF_WG_CONF" && chmod 600 "$WGOBF_WG_CONF"
+  if [[ -d "$src/clients" ]]; then
+    mkdir -p "$WGOBF_CLIENTS"
+    cp -a "$src/clients/." "$WGOBF_CLIENTS/"
+    chmod 700 "$WGOBF_CLIENTS"
+  fi
+  local port
+  port=$(_wgobf_get PORT)
+  # Пока сервер лежал, его порт мог занять кто-то другой — скажем сразу
+  if [[ -n "$port" ]] && ss -lunH "sport = :$port" 2>/dev/null | grep -q .; then
+    warn "UDP $port сейчас кем-то занят — обфускатор может не подняться"
+  fi
+  _wgobf_write_fw
+  _wgobf_write_obf_conf
+  _wgobf_write_unit
+  if ! _wgobf_start; then
+    err "WG + обфускатор восстановлен, но не запустился — смотри пункт 9 → 5"
+    return 1
+  fi
+  if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow "${port}/udp" comment "$WGOBF_TAG" >/dev/null 2>&1 || true
+  fi
+  ok "WG + обфускатор восстановлен и запущен"
+  return 0
+}
+
+# $1 = quiet — без вопросов (из do_uninstall, где уже подтвердили).
+do_wgobf_remove() {
+  local mode="${1:-}"
+  _wgobf_installed || { info "WG + обфускатор не установлен"; return 0; }
+  if [[ "$mode" != "quiet" ]]; then
+    echo ""
+    hdr "Удаление WG + обфускатора"
+    warn "Будут удалены ${WGOBF_IFACE}, служба обфускатора, их правила и все клиенты режима."
+    info "AWG и его туннели не затрагиваются."
+    read_confirm "$(echo -e "${R}  Подтверди удаление (введи yes): ${N}")" || { warn "Отменено"; return 0; }
+  fi
+  # Последний шанс вернуть: архив в папку бэкапов
+  mkdir -p "$BACKUP_DIR" 2>/dev/null && chmod 700 "$BACKUP_DIR"
+  local arch
+  arch="${BACKUP_DIR}/auto_wgobf_remove_$(date +%Y%m%d_%H%M%S).tar.gz"
+  local -a items=("$WGOBF_DIR" "$WGOBF_WG_CONF")
+  [[ -d "$WGOBF_CLIENTS" ]] && items+=("$WGOBF_CLIENTS")
+  if tar -czf "$arch" "${items[@]}" 2>/dev/null; then
+    chmod 600 "$arch"
+    bkup "Авто-бэкап: $(basename "$arch")"
+  fi
+  _wgobf_teardown drop
+  ok "WG + обфускатор удалён"
+  log_info "wgobf: удалён"
+}
+
+_wgobf_status() {
+  echo ""
+  hdr "WG + обфускатор: статус"
+  local s
+  if ip link show "$WGOBF_IFACE" &>/dev/null; then s="${G}● поднят${N}"; else s="${R}○ лежит${N}"; fi
+  echo -e "  ${WGOBF_IFACE}         : $s"
+  if systemctl is-active --quiet "$WGOBF_UNIT"; then s="${G}● работает${N}"; else s="${R}○ не работает${N}"; fi
+  echo -e "  wg-obfuscator  : $s ${D}($(_wgobf_bin_version))${N}"
+  echo -e "  Вход           : ${W}$(_wgobf_get ENDPOINT):$(_wgobf_get PORT)/udp${N}"
+  echo -e "  Маскировка     : ${W}$(_wgobf_get MASKING)${N} ${D}(у клиентов; сервер понимает любую)${N}"
+  if [[ "$(_wgobf_get ALLOW_CLEAN)" == "1" ]]; then s="${Y}да${N}"; else s="нет"; fi
+  echo -e "  Без обфускатора: $s"
+  echo -e "  Подсеть        : $(_wgobf_get NET), MTU $(_wgobf_get MTU)"
+  echo -e "  Порт WireGuard : $(_wgobf_get WG_PORT) ${D}(снаружи закрыт)${N}"
+  echo -e "  Клиентов       : $(_wgobf_client_names | grep -c . || true)"
+  echo ""
+  echo -e "${D}  ── журнал обфускатора ──${N}"
+  journalctl -u "$WGOBF_UNIT" -n 12 --no-pager 2>/dev/null | sed 's/^/  /' || true
+}
+
+_wgobf_settings() {
+  echo ""
+  hdr "WG + обфускатор: настройки"
+  local cur_mask cur_clean choice
+  cur_mask=$(_wgobf_get MASKING); cur_clean=$(_wgobf_get ALLOW_CLEAN)
+  echo -e "  ${C}1)${N} Маскировка клиентов: ${W}${cur_mask}${N} → $([[ "$cur_mask" == STUN ]] && echo NONE || echo STUN)"
+  echo -e "  ${C}2)${N} Клиенты без обфускатора: ${W}$([[ "$cur_clean" == 1 ]] && echo да || echo нет)${N} → $([[ "$cur_clean" == 1 ]] && echo нет || echo да)"
+  echo -e "  ${W}0)${N} ← Назад"
+  read_choice choice "$(echo -e "${C}  Выбор [0-2]: ${N}")" 0 2 0
+  case "$choice" in
+    1)
+      _wgobf_set MASKING "$([[ "$cur_mask" == STUN ]] && echo NONE || echo STUN)"
+      ;;
+    2)
+      _wgobf_set ALLOW_CLEAN "$([[ "$cur_clean" == 1 ]] && echo 0 || echo 1)"
+      _wgobf_write_obf_conf
+      systemctl restart "$WGOBF_UNIT" 2>/dev/null || warn "Не удалось перезапустить $WGOBF_UNIT"
+      ;;
+    *) return 0 ;;
+  esac
+  local name n=0
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    _wgobf_write_bundle "$name" && n=$((n + 1))
+  done < <(_wgobf_client_names)
+  ok "Сохранено. Комплекты клиентов перевыпущены: $n"
+  [[ "$choice" == "1" ]] && info "Раздай клиентам новый obfuscator.conf — старый продолжит работать (сервер в режиме AUTO)"
+  return 0
+}
+
+show_submenu_9() {
+  while true; do
+    show_header
+    echo ""
+    hdr "WG + обфускатор ${D}(wg-obfuscator ${WGOBF_VERSION})${N}"
+    echo ""
+    if ! _wgobf_installed; then
+      echo -e "  ${C}1)${N} Установить ${D}— отдельный WireGuard за обфускатором, AWG не трогает${N}"
+      echo ""
+      echo -e "  ${W}0)${N} ← Назад"
+      echo ""
+      read_choice SUB_CHOICE "$(echo -e "${C}  Выбор [0-1]: ${N}")" 0 1 "0"
+      case "${SUB_CHOICE:-}" in
+        1) do_wgobf_install || true ;;
+        *) return 0 ;;
+      esac
+    else
+      local st
+      if systemctl is-active --quiet "$WGOBF_UNIT" && ip link show "$WGOBF_IFACE" &>/dev/null; then
+        st="${G}● работает${N}"
+      else
+        st="${R}○ не работает${N} ${D}— пункт 6${N}"
+      fi
+      echo -e "  Состояние: $st   ${D}вход $(_wgobf_get ENDPOINT):$(_wgobf_get PORT)/udp${N}"
+      echo ""
+      echo -e "  ${C}1)${N} Добавить клиента"
+      echo -e "  ${C}2)${N} Список клиентов"
+      echo -e "  ${C}3)${N} Комплект клиента ${D}— конфиги и инструкции${N}"
+      echo -e "  ${C}4)${N} Удалить клиента"
+      echo -e "  ${C}5)${N} Статус и журнал"
+      echo -e "  ${C}6)${N} Перезапустить"
+      echo -e "  ${C}7)${N} Настройки ${D}— маскировка, клиенты без обфускатора${N}"
+      echo -e "  ${R}8)${N} Удалить WG + обфускатор"
+      echo ""
+      echo -e "  ${W}0)${N} ← Назад"
+      echo ""
+      read_choice SUB_CHOICE "$(echo -e "${C}  Выбор [0-8]: ${N}")" 0 8 "0"
+      local name=""
+      case "${SUB_CHOICE:-}" in
+        1)
+          safe_read name "$(echo -e "${C}  Имя клиента: ${N}")"
+          name="${name// /}"
+          if [[ -n "$name" ]]; then
+            if _wgobf_add_client "$name"; then _wgobf_show_bundle "$name" || true; fi
+          fi
+          ;;
+        2) _wgobf_list_clients || true ;;
+        3) _wgobf_pick_client name && { _wgobf_show_bundle "$name" || true; } ;;
+        4)
+          if _wgobf_pick_client name; then
+            if read_confirm "$(echo -e "${R}  Удалить клиента $name? (введи yes): ${N}")"; then
+              _wgobf_delete_client "$name" || true
+            else
+              warn "Отменено"
+            fi
+          fi
+          ;;
+        5) _wgobf_status || true ;;
+        6) _wgobf_write_fw; _wgobf_write_obf_conf; _wgobf_write_unit
+           if _wgobf_start; then ok "Перезапущено"; fi ;;
+        7) _wgobf_settings || true ;;
+        8) do_wgobf_remove || true ;;
+        *) return 0 ;;
+      esac
+    fi
+    echo ""
+    read -rp "$(echo -e "${C}  Enter для продолжения...${N}")" || return 0
+  done
+}
+
 _global_cleanup() {
   rm -rf /tmp/awg_tmp_* /tmp/awg_ping_* 2>/dev/null || true
   # Кэш доменов оставляем (используется повторно в do_check_domains),
@@ -19137,13 +20273,14 @@ while true; do
     6) show_submenu_6 ;;
     7) show_submenu_7 ;;
     8) show_submenu_8 ;;
+    9) show_submenu_9 ;;
     0)
       log_info "Выход"
       echo -e "\n${G}  В путь! ${N}"
       echo -e "<< Подпишись на ТГ :) >>"
       echo -e "<< https://t.me/awgToolza >>\n"
       exit 0 ;;
-    # read_choice наружу ничего кроме 0-8 не выпускает: пустой Enter и мусор
+    # read_choice наружу ничего кроме 0-9 не выпускает: пустой Enter и мусор
     # переспрашиваются внутри него, Ctrl+D отдаёт 0. Ветка оставлена как
     # страховка на случай правок валидатора.
     *) warn "Неверный выбор" ;;

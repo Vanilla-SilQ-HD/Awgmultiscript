@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-ffffff?style=flat-square&labelColor=000000)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Ubuntu%2024%20%2F%20Debian%2012%2B-E95420?style=flat-square&logo=ubuntu&logoColor=white)](https://ubuntu.com/)
 [![Protocol](https://img.shields.io/badge/AWG-2.0%20%2F%203.0%20%2F%203.1-00d4ff?style=flat-square)](#)
-[![Version](https://img.shields.io/badge/version-v0.8.31-ff6b00?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v0.8.32-ff6b00?style=flat-square)](#)
 
 <br>
 
@@ -184,6 +184,29 @@ journalctl -u awg-bot -n 50 | grep 'Запасные адреса'
 
 ---
 
+## WG + обфускатор (как Phobos)
+
+Пункт **9** главного меню — второй сервер рядом с AWG: обычный WireGuard
+(`wgobf0`) за [wg-obfuscator](https://github.com/ClusterM/wg-obfuscator)
+v1.6. Весь трафик клиента маскируется под **STUN** (видеозвонок) или
+XOR-обфусцируется. Снаружи виден только порт обфускатора: порт WireGuard
+закрыт для всего, кроме самого обфускатора.
+
+- AWG, его клиенты и туннели (Warp / Xray / tun2socks / exit) не
+  затрагиваются: своя подсеть, свои правила iptables (метка `awg-wgobf`),
+  клиенты `wgobf0` всегда выходят напрямую через сервер.
+- Обфускатор собирается из исходников закреплённого тега (коммит сверяется).
+- Клиенту выдаётся комплект в `/root/wgobf/<имя>/`: `wg.conf`,
+  `obfuscator.conf`, `install-linux.sh` (Debian/Ubuntu одной командой) и
+  памятка для Windows / macOS / OpenWrt / Android.
+- Клиенту нужен обфускатор на устройстве: роутер, Linux, Windows, macOS.
+  Для iOS и телефонов без обфускатора есть опция «пускать клиентов без
+  обфускатора» — такие подключаются обычным WireGuard (`wg-direct.conf`),
+  но их трафик DPI видит как WireGuard.
+- Бэкап/рестор (пункт 4) и «Удалить всё» (пункт 7) режим учитывают.
+
+---
+
 ## 🤖 Telegram бот
 
 Опционально — Telegram бот для управления сервером со смартфона: inline-меню с теми же возможностями, что и в консоли.
@@ -252,6 +275,6 @@ sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/pumbaX/awg-multi-scri
 
 *Сообщество [AWG-Toolza](https://t.me/awgToolza)*
 
-**AWG Toolza v0.8.31** · MIT License
+**AWG Toolza v0.8.32** · MIT License
 
 </div>
