@@ -65,7 +65,7 @@ def main_menu(installed: bool) -> InlineKeyboardMarkup:
         b.button(text="👥 Клиенты", callback_data="clients")
         b.button(text="📊 Статус сервера", callback_data="status")
         b.button(text="⏳ Сроки действия", callback_data="expire")
-        b.button(text="🛡 Туннели (WARP/DNS)", callback_data="tunnels")
+        b.button(text="🛡 Туннели", callback_data="tunnels")
         b.button(text="💾 Бэкап / Рестор", callback_data="backup")
         b.button(text="↻ Перезапуск awg0", callback_data="restart_confirm")
         b.button(text="🔧 Обслуживание", callback_data="maint")
@@ -181,7 +181,7 @@ def dns_upstream_choices() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for key, (label, _servers, _nf) in core.DNS_UPSTREAMS.items():
         b.button(text=label, callback_data=f"dns_up:{key}")
-    b.button(text="‹ Назад", callback_data="tunnels")
+    b.button(text="‹ Назад", callback_data="tun:dns")
     b.adjust(1, 1, 1, 1, 1, 1)
     return b.as_markup()
 
@@ -215,21 +215,63 @@ def expire_menu() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
+TUNNEL_TITLES = {
+    "warp": "☁ WARP", "xray": "⚡ Xray", "exits": "🔗 AWG Exit-ноды",
+    "tun2socks": "🧦 tun2socks", "dns": "🌐 DNS",
+}
+
+
 def tunnels_menu() -> InlineKeyboardMarkup:
-    # Две колонки по 3 кнопки: слева DNS, справа WARP.
-    # adjust(2,2,2,1) даёт пары построчно: [DNS статус | WARP статус],
-    # [DNS установить | WARP установить], [DNS удалить | WARP удалить], [Назад].
+    """Сводка туннелей: по кнопке на каждый + обновить."""
     b = InlineKeyboardBuilder()
-    b.button(text="🌐 DNS: статус", callback_data="t_dns_status")
-    b.button(text="🛡 WARP: статус", callback_data="t_warp_status")
-    b.button(text="🌐 DNS: установить", callback_data="t_dns_install")
-    b.button(text="🛡 WARP: установить", callback_data="t_warp_install")
-    b.button(text="🌐 DNS: удалить", callback_data="t_dns_remove")
-    b.button(text="🛡 WARP: удалить", callback_data="t_warp_remove")
-    b.button(text="🔄 WARP Hard Restart", callback_data="t_warp_restart")
-    b.button(text="🔀 DNS: сменить резолверы", callback_data="dns_upstream")
+    for name, title in TUNNEL_TITLES.items():
+        b.button(text=title, callback_data=f"tun:{name}")
+    b.button(text="🔄 Обновить", callback_data="tunnels")
     b.button(text="‹ Назад", callback_data="menu")
-    b.adjust(2, 2, 2, 1, 1, 1)
+    b.adjust(2, 2, 1, 1, 1)
+    return b.as_markup()
+
+
+def tunnel_card(name: str) -> InlineKeyboardMarkup:
+    """Действия с одним туннелем."""
+    b = InlineKeyboardBuilder()
+    if name == "dns":
+        b.button(text="📋 Статус", callback_data="t_dns_status")
+        b.button(text="🔄 Перезапуск", callback_data="tun_do:dns:restart")
+        b.button(text="🔀 Сменить резолверы", callback_data="dns_upstream")
+        b.button(text="📥 Установить", callback_data="t_dns_install")
+        b.button(text="🗑 Удалить", callback_data="t_dns_remove")
+        b.button(text="‹ Туннели", callback_data="tunnels")
+        b.adjust(2, 1, 2, 1)
+        return b.as_markup()
+    b.button(text="▶ Включить", callback_data=f"tun_do:{name}:up")
+    b.button(text="⏹ Выключить", callback_data=f"tun_ask:{name}:down")
+    b.button(text="🔄 Перезапуск", callback_data=f"tun_do:{name}:restart")
+    rows = [3]
+    if name == "warp":
+        b.button(text="📋 Статус", callback_data="t_warp_status")
+        b.button(text="💥 Hard Restart", callback_data="t_warp_restart")
+        b.button(text="📥 Установить", callback_data="t_warp_install")
+        b.button(text="🗑 Удалить", callback_data="t_warp_remove")
+        rows += [2, 2]
+    elif name == "xray":
+        b.button(text="⚖ Балансировщик", callback_data="xbal")
+        rows += [1]
+    b.button(text="‹ Туннели", callback_data="tunnels")
+    b.adjust(*rows, 1)
+    return b.as_markup()
+
+
+def xray_balancer_choices(current: str) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    labels = {"random": "🎲 random", "roundRobin": "🔁 roundRobin",
+              "leastPing": "📶 leastPing", "leastLoad": "📉 leastLoad",
+              "off": "⛔ выключить"}
+    for key, label in labels.items():
+        mark = " ✓" if key == (current or "off") else ""
+        b.button(text=label + mark, callback_data=f"xbal_set:{key}")
+    b.button(text="‹ Xray", callback_data="tun:xray")
+    b.adjust(2, 2, 1, 1)
     return b.as_markup()
 
 

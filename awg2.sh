@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="v0.8.25"
+VERSION="v0.8.30"
 SCRIPT_PATH="/usr/local/bin/awg2"
 
 # ── Канал обновлений ───────────────────────────────────────
@@ -2638,14 +2638,10 @@ choose_awg_profile() {
   echo ""
   hdr "⚙  Профиль AmneziaWG"
   echo -e "  ${G}1${N}  ${W}AmneziaVPN${N} ${D}— параметры один в один с официальным клиентом${N} ${C}(рекомендуется)${N}"
-  echo -e "     ${D}Jc/Jmin/Jmax и S1-S4 как в конфигах Amnezia, MTU 1280,${N}"
-  echo -e "     ${D}цепочка I1-I5 по умолчанию не добавляется — конфиг короткий.${N}"
-  echo -e "     ${D}Ровно такой набор даёт полную скорость у официальной установки.${N}"
+  echo -e "     ${D}Короткий конфиг, MTU 1280, без I1-I5 — полная скорость.${N}"
   echo ""
   echo -e "  ${G}2${N}  ${W}Мощный${N} ${D}— широкие диапазоны Jc/S плюс цепочка I1-I5${N}"
-  echo -e "     ${D}Сильнее против анализа трафика. Конфиг длинный, и на части${N}"
-  echo -e "     ${D}маршрутов такой профиль заметно теряет в скорости —${N}"
-  echo -e "     ${D}если после него скорость просела в разы, вернись на профиль 1.${N}"
+  echo -e "     ${D}Сильнее против DPI, но длинный конфиг; просела скорость — профиль 1.${N}"
   echo -e "  ${D}0   Назад${N}"
   echo -e "${B}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
   local _choice
@@ -2715,18 +2711,11 @@ choose_obf_level() {
   echo ""
   hdr "⛊  Уровень обфускации"
   echo -e "  ${G}3${N}  + I1-I5 полный CPS chain ${C}(рекомендуется)${N}"
-  echo -e "     ${D}Максимум DPI bypass. Конфиг длинный — в QR может не влезть.${N}"
-  echo -e "  ${D}2   + I1 — добавляет 1 сигнатурный пакет${N}"
-  echo -e "     ${D}I1 = снимок реального TLS/QUIC/DTLS протокола${N}"
-  echo -e "  ${D}1   Базовый — H ranges + S1-S4 + Jc junk, без I1-I5${N}"
-  echo -e "     ${D}Максимальная совместимость со старыми клиентами.${N}"
+  echo -e "     ${D}Максимум против DPI; в QR может не влезть.${N}"
+  echo -e "  ${D}2   + I1 — один пакет-снимок TLS/QUIC/DTLS${N}"
+  echo -e "  ${D}1   Базовый — H/S1-S4/Jc без I1-I5, любые клиенты${N}"
   echo ""
-  echo -e "  ${Y}  Цепочку читают не все клиенты:${N}"
-  echo -e "  ${D}  • WireSock (Windows) не читает I1-I5 совсем — поля молча${N}"
-  echo -e "  ${D}    игнорируются, туннель поднимется без мимикрии и без ошибки.${N}"
-  echo -e "  ${D}    Ему подходит только уровень 1 (H/S/Jc работают полностью).${N}"
-  echo -e "  ${D}  • Keenetic: чем он разбирает цепочку — по исходникам неизвестно,${N}"
-  echo -e "  ${D}    длинная ненадёжна. Надёжнее уровень 2 (один I1).${N}"
+  echo -e "  ${Y}  WireSock не читает I1-I5 → уровень 1. Keenetic → уровень 2.${N}"
   echo -e "${B}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
   read_choice OBF_LEVEL "$(echo -e "${C}  Выбор [1-3] (Enter = ${_lvl_default}): ${N}")" 1 3 "$_lvl_default"
   local label
@@ -2788,17 +2777,11 @@ choose_cps_domain() {
   echo -e "  ${G}1${N}  ${W}Ввести свой${N} ${D}— сайт, к которому у вас и так идёт трафик${N} ${C}(рекомендуется)${N}"
   echo -e "  ${G}2${N}  ${W}Автоматически${N} ${D}— возьму из встроенного пула с проверкой доступности${N}"
   echo ""
-  echo -e "  ${Y}Свой домен почти всегда лучше встроенного: пул одинаков у всех,${N}"
-  echo -e "  ${Y}кто ставит эту тулзу, поэтому по нему DPI учится быстрее всего.${N}"
-  echo -e "  ${Y}Годится любой ЖИВОЙ сайт, куда вы реально ходите с этого${N}"
-  echo -e "  ${Y}устройства${N}${_dom_hint}${Y}. Мёртвый или заблокированный домен${N}"
-  echo -e "  ${Y}делает мимикрию недостоверной — соединение может не подняться.${N}"
+  echo -e "  ${Y}Свой домен лучше встроенного пула (он общий у всех пользователей).${N}"
+  echo -e "  ${Y}Нужен живой сайт, куда ходите с устройства${N}${_dom_hint}${Y}; мёртвый — не подключится.${N}"
   echo ""
-  echo -e "  ${D}Важно: автопроверка идёт С ЭТОГО СЕРВЕРА, а мимикрию разбирает DPI${N}"
-  echo -e "  ${D}у вашего провайдера. Живой отсюда домен может быть мёртвым или${N}"
-  echo -e "  ${D}блокируемым там. Проверить со стороны клиента можно, например,${N}"
-  echo -e "  ${D}github.com/Runnin4ik/dpi-detector — и вписать сюда домен, который${N}"
-  echo -e "  ${D}он показал рабочим.${N}"
+  echo -e "  ${D}Проверка идёт с сервера, а DPI — у провайдера клиента.${N}"
+  echo -e "  ${D}Точнее: github.com/Runnin4ik/dpi-detector на устройстве клиента.${N}"
   echo -e "${B}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
   local _dom_choice
   read_choice _dom_choice "$(echo -e "${C}  Выбор [1-2] (Enter = 1): ${N}")" 1 2 1
@@ -2921,8 +2904,7 @@ choose_cps_budget() {
   echo ""
   hdr "▭  Длина цепочки I1-I5"
   echo -e "  ${D}Профиль ${W}${profile}${N}${D}: один пакет ~${pkt} символов.${N}"
-  echo -e "  ${D}Бюджет режет цепочку ЦЕЛЫМИ пакетами — обрезанный пакет это не${N}"
-  echo -e "  ${D}снимок протокола, а обрубок. Поэтому в бюджет попадает столько:${N}"
+  echo -e "  ${D}Бюджет режет цепочку целыми пакетами — войдёт столько:${N}"
   echo ""
   # Уровень «полный CPS» человек уже выбрал на предыдущем экране. Если у
   # этого профиля пять пакетов в компактный бюджет не влезают, предлагать
@@ -2937,10 +2919,7 @@ choose_cps_budget() {
   echo -e "  ${G}3${N}  ${W}Максимум${N}    ${D}— ${CPS_HARD_LIMIT} симв, предел awg-tools${N}     → ${W}${fitmax} из 5${N}${_rec3}"
   echo -e "  ${D}0   Назад${N}"
   echo ""
-  echo -e "  ${D}Выше ${CPS_HARD_LIMIT} нельзя не из осторожности: в amneziawg-tools атрибуты${N}"
-  echo -e "  ${D}I1-I5 пишутся в буфер 4 КБ без проверки границ (issue #69). За${N}"
-  echo -e "  ${D}порогом awg show перестаёт читать интерфейс, а на нём держатся${N}"
-  echo -e "  ${D}выдача ключа новому клиенту, список пиров и статистика.${N}"
+  echo -e "  ${D}Выше ${CPS_HARD_LIMIT} — ломается awg show (буфер 4 КБ в awg-tools, issue #69).${N}"
   if (( fit1500 < 5 )); then
     echo ""
     echo -e "  ${Y}  Все пять в компактный бюджет укладывают только DNS, NTP и RTP.${N}"
@@ -3010,13 +2989,10 @@ choose_mimicry_profile() {
   local _mim_default=1
   if [[ "${OBF_LEVEL:-3}" == "3" ]]; then
     _mim_default=3
-    echo -e "  ${D}  Цепочка из пяти пакетов уходит залпом за микросекунды.${N}"
-    echo -e "  ${D}  Так бывает у DNS (3), RTP (8) и STUN (4). У QUIC — нет:${N}"
-    echo -e "  ${D}  браузер шлёт один Initial, а не пять сразу в одну точку.${N}"
-    echo -e "  ${D}  Нужен именно QUIC — берите уровень 2 (один I1).${N}"
+    echo -e "  ${D}  5 пакетов залпом естественны для DNS (3), RTP (8), STUN (4).${N}"
+    echo -e "  ${D}  QUIC так не шлёт — для него уровень 2 (один I1).${N}"
   else
-    echo -e "  ${D}  Один пакет: QUIC (1) достовернее всего — реальный клиент${N}"
-    echo -e "  ${D}  шлёт ровно один Initial на соединение.${N}"
+    echo -e "  ${D}  Один пакет: QUIC (1) — самый достоверный.${N}"
   fi
 
   # Второй критерий после «бывает ли такой всплеск» — порт. Сервер слушает
@@ -3026,12 +3002,8 @@ choose_mimicry_profile() {
   # цепочке ни было. STUN, WebRTC, DTLS и RTP, наоборот, в жизни ходят по
   # эфемерным портам: ICE и медиапотоки именно так и работают.
   echo ""
-  echo -e "  ${D}  И про порт: сервер слушает случайный высокий порт. На нём${N}"
-  echo -e "  ${D}  естественны STUN (4), WebRTC (5), RTP (8) — ICE и медиа и в${N}"
-  echo -e "  ${D}  жизни ходят по эфемерным портам. DNS (3), NTP (7), SSDP (9)${N}"
-  echo -e "  ${D}  привязаны к 53/123/1900: такой пакет на высоком порту сам по${N}"
-  echo -e "  ${D}  себе странность, сколько бы пакетов в цепочке ни было.${N}"
-  echo -e "  ${D}  На Keenetic надёжнее DNS (3): он чувствителен к длине I1.${N}"
+  echo -e "  ${D}  На высоком порту естественны STUN (4), WebRTC (5), RTP (8);${N}"
+  echo -e "  ${D}  DNS/NTP/SSDP там выглядят странно. Keenetic — DNS (3).${N}"
   echo ""
   read_choice PROFILE_CHOICE "$(echo -e "${C}  Выбор [0-9] (Enter = ${_mim_default}): ${N}")" 0 9 "$_mim_default"
 
@@ -3086,9 +3058,7 @@ choose_mimicry_profile() {
       if (( nonempty < 5 )) && [[ "${CPS_BUDGET:-0}" =~ ^[0-9]+$ ]] && (( CPS_BUDGET > 0 )); then
         echo ""
         warn "Выбран полный CPS, но в цепочке ${nonempty} из 5 пакетов"
-        info "Один пакет $MIMICRY_PROFILE занимает ~$(( ${#I1} )) символов, а бюджет — ${CPS_BUDGET}."
-        info "Бюджет режет цепочку целыми пакетами, поэтому больше не поместилось."
-        info "Первый пакет выдаётся всегда — иначе мимикрии не было бы вовсе."
+        info "Пакет $MIMICRY_PROFILE ~$(( ${#I1} )) симв при бюджете ${CPS_BUDGET}; I1 выдаётся всегда."
         echo ""
         local _regen
         read_choice _regen "$(echo -e "${C}  1 — оставить ${nonempty} (Enter), 2 — перегенерировать без лимита: ${N}")" 1 2 1
@@ -3331,7 +3301,7 @@ do_sniff_test() {
 
   declare -A pk_to_name pk_to_ip
   local cf
-  for cf in /root/*_awg2.conf; do
+  for cf in /root/*_awg[23].conf; do
     [[ -f "$cf" ]] || continue
     local cf_priv cf_pub cf_addr
     cf_priv=$(grep -E '^PrivateKey' "$cf" 2>/dev/null | awk -F'= ' '{print $2}' | tr -d ' \r' | head -1 || true)
@@ -3611,9 +3581,7 @@ ask_endpoint_domain() {
   echo ""
   hdr "◈  Endpoint для клиентов"
   echo ""
-  echo -e "  ${D}Что клиенты увидят в строке Endpoint: адрес сервера.${N}"
-  echo -e "  ${D}С доменом переезд на другой IP не требует новых конфигов —${N}"
-  echo -e "  ${D}достаточно поправить DNS-запись.${N}"
+  echo -e "  ${D}Адрес сервера в конфигах. Домен — переезд без перевыдачи конфигов.${N}"
   echo ""
   local _use
   read_yesno _use "$(echo -e "${C}  Использовать домен вместо IP? [y/N]: ${N}")" "n"
@@ -3654,8 +3622,7 @@ check_domain_resolves() {
   srv_ip=$(get_public_ip 2>/dev/null || true)
   if [[ -n "$srv_ip" ]] && ! grep -qw "$srv_ip" <<< "$ips"; then
     warn "Домен ведёт на ${ips% }, а публичный IP сервера — $srv_ip"
-    info "Так бывает за Cloudflare-прокси; для WireGuard/AWG проксирование UDP"
-    info "не работает — нужна A-запись прямо на IP сервера (DNS only)"
+    info "Похоже на прокси Cloudflare — нужна A-запись на IP сервера (DNS only)"
     return 1
   fi
   ok "Домен ведёт на этот сервер (${ips% })"
@@ -3745,7 +3712,7 @@ auto_backup() {
   # Архивируем серверный конфиг + все клиентские
   local files=("$SERVER_CONF")
   shopt -s nullglob
-  local clients=( /root/*_awg2.conf )
+  local clients=( /root/*_awg[23].conf )
   shopt -u nullglob
   [[ ${#clients[@]} -gt 0 ]] && files+=("${clients[@]}")
 
@@ -3872,8 +3839,7 @@ awg_warn_cps_oversize() {
     warn "Цепочка I1-I5 занимает ${n} символов — на грани предела awg-tools"
     info "${W}awg show${N} на таком конфиге может виснуть и отдавать EMSGSIZE"
   fi
-  info "Причина не у нас: атрибуты I1-I5 пишутся в буфер 4 КБ без проверки"
-  info "границ (amneziawg-tools issue #69). Безопасный предел — ${CPS_HARD_LIMIT:-3500}"
+  info "Буфер 4 КБ в amneziawg-tools (issue #69), предел — ${CPS_HARD_LIMIT:-3500}"
   info "Проверить сейчас: ${W}awg show awg0 public-key${N} — если молчит, задето"
   info "Пересоздать цепочку короче: ${W}Сервер (1) → п.5${N} (сменить профиль/бюджет)"
   echo ""
@@ -3890,9 +3856,7 @@ awg_warn_trailer_fix() {
 
   echo ""
   warn "Модуль ядра дописывает случайный хвост к пакетам мимикрии I1-I5"
-  info "Это ослабляет мимикрию: пакет перестаёт совпадать с настоящим"
-  info "протоколом по длине, а за его концом идут лишние байты"
-  info "Исправлено в модуле от 06.09.2026 (тег v3.1.20260906)"
+  info "Мимикрия слабее; исправлено в модуле v3.1.20260906"
   info "Обновить: ${W}Сервер (1) → п.1${N}, затем ${W}перезагрузка${N}"
   echo ""
   return 1
@@ -4059,11 +4023,8 @@ awg_diagnose_up_failure() {
     local _bad_s
     _bad_s=$(awg_check_hp_min_s "$conf" || true)
     if [[ -n "$_bad_s" ]]; then
-      info "Причина: при защите заголовков (AWG 3.x) ядро требует"
-      info "S1-S4 не меньше ${AWG_HP_MIN_S} — в этот паддинг прячется nonce."
-      info "В конфиге меньше:${_bad_s}"
-      info "Лечится перегенерацией параметров: Сервер (1) → п.5"
-      info "(в версиях до v0.7.14 генератор мог выдать S ниже границы)"
+      info "AWG 3.x требует S1-S4 ≥ ${AWG_HP_MIN_S} (там nonce). Меньше:${_bad_s}"
+      info "Лечится перегенерацией: Сервер (1) → п.5"
       return 0
     fi
 
@@ -4388,9 +4349,9 @@ do_repair() {
   # по уже выданным конфигам, иначе бот выдаёт один I1 там, где скрипт даёт пять.
   if ! grep -q '^# AWG_OBF_LEVEL=' "$SERVER_CONF" 2>/dev/null; then
     local _lvl=0
-    if grep -qE '^I[2-5] = ' /root/*_awg2.conf 2>/dev/null; then
+    if grep -qE '^I[2-5] = ' /root/*_awg[23].conf 2>/dev/null; then
       _lvl=3
-    elif grep -qE '^I1 = ' /root/*_awg2.conf 2>/dev/null; then
+    elif grep -qE '^I1 = ' /root/*_awg[23].conf 2>/dev/null; then
       _lvl=2
     fi
     if [[ $_lvl -gt 0 ]]; then
@@ -4808,8 +4769,7 @@ do_self_update() {
   elif (( 10#$new_num < 10#$cur_num )); then
     warn "На GitHub версия СТАРШЕ текущей — это даунгрейд!"
     echo -e "${Y}  Текущая ($VERSION) > GitHub ($new_ver)${N}"
-    echo -e "${Y}  Возможно ты обновлял скрипт вручную, а в репо ещё старая версия,${N}"
-    echo -e "${Y}  либо в проекте сменилась схема нумерации.${N}"
+    echo -e "${Y}  Скрипт обновлён вручную или сменилась нумерация версий.${N}"
     echo ""
     if ! read_confirm "$(echo -e "${R}  Откатить до $new_ver? (введи yes): ${N}")"; then
       info "Отменено — текущая версия сохранена"
@@ -5300,7 +5260,7 @@ show_submenu_5() {
 BOT_CONF_PATH="/etc/awg-bot.conf"
 # Те же схемы, что понимает awgbot/net.py. Разъедутся — бот встанет на старте
 # с внятным отказом, но до этого лучше не доводить: проверяем здесь.
-BOT_PROXY_SCHEMES="http https socks4 socks5 socks5h"
+BOT_PROXY_SCHEMES="http https socks4 socks5 socks5h iface"
 
 # Версия установленного бота, а не той копии, что лежит рядом с awg2: в меню
 # важно, что реально крутится на сервере.
@@ -5341,6 +5301,8 @@ _bot_proxy_valid() {
   [[ "$url" == *"://"* ]] || return 1
   scheme="${url%%://*}"
   [[ -n "${url#*://}" ]] || return 1
+  # iface://<dev> — выход через туннель (бот вяжет сокеты к интерфейсу).
+  [[ "$scheme" == "iface" ]] && { [[ "${url#iface://}" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]]; return; }
   local s
   for s in $BOT_PROXY_SCHEMES; do
     [[ "$scheme" == "$s" ]] && return 0
@@ -5354,9 +5316,11 @@ _bot_proxy_valid() {
 # присваиванием: при неудаче curl сам печатает 000, и `|| echo 000` дописал
 # бы второй — получилось бы 000000, что мимо любой проверки.
 _bot_proxy_probe() {
-  local url="$1" code
+  local url="$1" code via
+  if [[ "$url" == iface://* ]]; then via=(--interface "${url#iface://}")
+  else via=(--proxy "$url"); fi
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 \
-           --proxy "$url" https://api.telegram.org/ 2>/dev/null) || code="000"
+           "${via[@]}" https://api.telegram.org/ 2>/dev/null) || code="000"
   [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]
 }
 
@@ -5383,22 +5347,37 @@ _bot_proxy_write() {
   return 0
 }
 
-# Локальные SOCKS-прокси, которые уже подняты на этом сервере, — их можно
-# отдать боту, не поднимая ничего отдельно. Практически это SOCKS-вход Xray
-# из пункта 5. Строки вида "socks5://127.0.0.1:10808|Xray (пункт 5)".
-#
-# Порт проверяем пробой наружу, а не просто «слушает ли кто-то»: Xray умеет
-# принимать соединения и никуда их не отправлять, если выходной сервер мёртв.
-# Отдать боту такой прокси — променять одну немоту на другую.
+# Все выходы этого сервера, годные боту: SOCKS Xray, апстрим tun2socks,
+# интерфейсы туннелей (WARP, AWG Exit-ноды, Xray/tun2socks TUN).
+# Строки "url|описание"; каждая проверена запросом к api.telegram.org.
 _bot_proxy_candidates() {
-  local port addr
+  local port url dev desc line
+  local -a list=()
   for port in 10808; do
     _xray_port_owner "$port" | grep -q . || continue
-    addr="127.0.0.1:${port}"
-    if _socks_probe "$addr" >/dev/null 2>&1; then
-      printf 'socks5://%s|SOCKS-вход Xray, туннель проверен\n' "$addr"
+    list+=("socks5://127.0.0.1:${port}|SOCKS-вход Xray")
+  done
+  if [[ -s "${TUN2SOCKS_CONF:-/etc/tun2socks/proxy.txt}" ]]; then
+    url=$(head -1 "${TUN2SOCKS_CONF:-/etc/tun2socks/proxy.txt}" | tr -d '[:space:]')
+    _bot_proxy_valid "$url" && list+=("${url}|апстрим tun2socks")
+  fi
+  for dev in /sys/class/net/*; do
+    dev="${dev##*/}"
+    case "$dev" in
+      warp0|wgcf) desc="WARP (Cloudflare)" ;;
+      awg-exit-*) desc="AWG Exit-нода ${dev#awg-exit-}" ;;
+      xray0)      desc="TUN Xray" ;;
+      tun0)       desc="TUN tun2socks" ;;
+      *) continue ;;
+    esac
+    list+=("iface://${dev}|${desc}")
+  done
+  for line in "${list[@]}"; do
+    url="${line%%|*}"
+    if _bot_proxy_probe "$url"; then
+      printf '%s|%s, Telegram отвечает\n' "$url" "${line#*|}"
     else
-      printf 'socks5://%s|SOCKS-вход Xray, но наружу через него не проходит\n' "$addr"
+      printf '%s|%s, Telegram НЕ отвечает\n' "$url" "${line#*|}"
     fi
   done
 }
@@ -5410,14 +5389,13 @@ _bot_proxy_candidates() {
 _bot_proxy_local_warn() {
   local url="$1"
   case "$url" in
-    *127.0.0.1*|*localhost*|*::1*) ;;
+    iface://*|*127.0.0.1*|*localhost*|*::1*) ;;
     *) return 0 ;;
   esac
   echo ""
-  warn "Это прокси с самого сервера — он живёт, пока поднят туннель"
-  info "Туннель из пункта 5 после перезагрузки не поднимается сам:"
-  info "  включите его заново, затем ${W}systemctl restart awg-bot${N}"
-  info "Пока туннеля нет, бот пойдёт напрямую (запасные адреса Telegram)"
+  warn "Это выход через туннель сервера — работает, пока туннель поднят"
+  info "Туннель лёг/не поднялся после ребута — бот пойдёт напрямую."
+  info "Поднял заново — ${W}systemctl restart awg-bot${N}"
 }
 
 do_bot_proxy() {
@@ -5436,9 +5414,8 @@ do_bot_proxy() {
     echo -e "  Сейчас: ${D}не задан — бот ходит напрямую${N}"
   fi
   echo ""
-  echo -e "  ${D}Нужен, если провайдер режет Telegram не по IP: запасные адреса${N}"
-  echo -e "  ${D}в таком случае не спасают. Подойдёт любой SOCKS5 или HTTP-прокси,${N}"
-  echo -e "  ${D}в том числе SOCKS-вход Xray с этого же сервера (пункт 5 → 4).${N}"
+  echo -e "  ${D}Нужен, если Telegram заблокирован (РФ-сервер). Подойдёт SOCKS5/HTTP${N}"
+  echo -e "  ${D}или любой туннель сервера: Xray, WARP, AWG Exit, tun2socks.${N}"
   echo ""
   echo -e "  ${C}1)${N} Задать / изменить прокси"
   if [[ -n "$cur" ]]; then
@@ -5459,7 +5436,7 @@ do_bot_proxy() {
       # не гадать, какой порт слушает Xray.
       while IFS= read -r line; do
         [[ -n "$line" ]] && cand_lines+=("$line")
-      done < <(_bot_proxy_candidates)
+      done < <(info "Ищу прокси и туннели на сервере (проверка до Telegram)..." >&2; _bot_proxy_candidates)
 
       echo ""
       if ((${#cand_lines[@]} > 0)); then
@@ -5485,7 +5462,7 @@ do_bot_proxy() {
       if [[ -z "$url" ]]; then
         echo ""
         echo -e "  ${D}Формат: схема://[логин:пароль@]хост:порт${N}"
-        echo -e "  ${D}Например: socks5://127.0.0.1:10808 или http://1.2.3.4:8080${N}"
+        echo -e "  ${D}Например: socks5://127.0.0.1:10808, http://1.2.3.4:8080, iface://warp0${N}"
         echo ""
         read -rp "$(echo -e "${C}  Адрес прокси (пусто — отмена): ${N}")" url || return 0
         url="${url//[[:space:]]/}"
@@ -5515,6 +5492,13 @@ do_bot_proxy() {
             warn "Не удалось поставить aiohttp-socks — обнови бота (пункт 1)"
         fi
       fi
+      # iface:// требует socket_factory в aiohttp (3.12+).
+      if [[ "$url" == iface://* ]] && [[ -x /opt/awg-bot/venv/bin/python ]] && \
+         ! /opt/awg-bot/venv/bin/python -c 'import inspect,aiohttp; assert "socket_factory" in inspect.signature(aiohttp.TCPConnector).parameters' 2>/dev/null; then
+        info "Обновляю aiohttp в venv бота (нужен 3.12+ для iface://)..."
+        /opt/awg-bot/venv/bin/pip install -q -U aiogram aiohttp 2>/dev/null || \
+          warn "Не удалось обновить aiohttp — обнови бота (пункт 1)"
+      fi
       _bot_proxy_write "$url" || return 1
       ok "Прокси сохранён: ${W}$(_bot_proxy_mask "$url")${N}"
       _bot_proxy_local_warn "$url"
@@ -5531,7 +5515,11 @@ do_bot_proxy() {
         ok "Через прокси Telegram отвечает"
       else
         err "Через прокси до Telegram достучаться не удалось"
-        info "Проверь, что прокси поднят: ${W}ss -lntp | grep ${cur##*:}${N}"
+        if [[ "$cur" == iface://* ]]; then
+          info "Проверь туннель: ${W}ip link show ${cur#iface://}${N}"
+        else
+          info "Проверь, что прокси поднят: ${W}ss -lntp | grep ${cur##*:}${N}"
+        fi
       fi
       ;;
     3)
@@ -5881,38 +5869,17 @@ choose_awg_proto() {
   hdr "▤  Версия протокола AmneziaWG"
   echo ""
   echo -e "  ${G}1)${N} ${W}AWG 2.0${N} ${D}(максимальная совместимость)${N}"
-  echo -e "     ${D}Обфускация Jc/Jmin/Jmax, S1-S4, H1-H4 плюс мимикрия I1-I5.${N}"
-  echo -e "     ${D}Работает со всеми клиентами AmneziaWG.${N}"
-  echo -e "     ${Y}Заголовок здесь открытый, поэтому H1-H4 обязаны быть${N}"
-  echo -e "     ${Y}диапазонами — иначе 1/2/3/4 выдают WireGuard прямым текстом.${N}"
-  echo -e "     ${Y}А диапазоны H заметно снижают скорость: замер на одном${N}"
-  echo -e "     ${Y}сервере дал 10 Мбит/с против 100+ при тех же остальных${N}"
-  echo -e "     ${Y}параметрах. Дешёвого способа получить и обфускацию${N}"
-  echo -e "     ${Y}заголовка, и полную скорость на 2.0 нет — это плата за версию.${N}"
+  echo -e "     ${D}Jc/S1-S4/H1-H4 + I1-I5. Работает со всеми клиентами AmneziaWG.${N}"
+  echo -e "     ${Y}Диапазоны H обязательны и режут скорость (бывает 10 vs 100+ Мбит/с).${N}"
   echo ""
   echo -e "  ${G}2)${N} ${W}AWG 3.1${N} ${C}(сильнее против анализа трафика И быстрее)${N}"
-  echo -e "     ${D}Защита заголовков ключом, случайный паддинг содержимого,${N}"
-  echo -e "     ${D}рандомизация таймингов рукопожатий, RandomTrailers (длина${N}"
-  echo -e "     ${D}пакетов рукопожатия перестаёт быть постоянной) и${N}"
-  echo -e "     ${D}DisableCookies — сервер не отвечает cookie-пакетами.${N}"
-  echo -e "     ${D}Заголовок шифруется целиком, поэтому диапазоны H не нужны:${N}"
-  echo -e "     ${D}ставятся штатные 1/2/3/4, и цены за них нет.${N}"
-  echo -e "     ${D}Нужны amneziawg-tools и модуль v3.1.20260906 или новее:${N}"
-  echo -e "     ${D}до 06.09.2026 модуль дописывал случайный хвост к пакетам${N}"
-  echo -e "     ${D}мимикрии I1-I5 и этим её ослаблял.${N}"
-  echo -e "     ${D}И НА СЕРВЕРЕ, И НА КЛИЕНТЕ: старый клиент такой конфиг${N}"
-  echo -e "     ${D}даже не прочитает.${N}"
+  echo -e "     ${D}Шифрованные заголовки, паддинг, случайные тайминги,${N}"
+  echo -e "     ${D}RandomTrailers, DisableCookies. H — штатные 1-4, без потерь скорости.${N}"
+  echo -e "     ${D}Модуль и tools v3.1.20260906+ на сервере и клиенте.${N}"
   echo ""
-  echo -e "  ${Y}  Требует клиента с поддержкой выбранной версии. Версия задаётся${N}"
-  echo -e "  ${Y}  на ВЕСЬ сервер: клиенты на 2.0 к серверу 3.1 не подключатся.${N}"
-  echo -e "  ${Y}  Для 3.1 нужен AmneziaVPN 5.0.1.5 или новее: версии постарше не${N}"
-  echo -e "  ${Y}  знают RandomTrailers и DisableCookies и отказываются импортировать${N}"
-  echo -e "  ${Y}  конфиг с незнакомым ключом ЦЕЛИКОМ — не «пропустят строку», а${N}"
-  echo -e "  ${Y}  отвергнут весь файл. Есть клиенты, которых обновить нельзя, —${N}"
-  echo -e "  ${Y}  оставьте им отдельный сервер на 2.0.${N}"
-  echo -e "  ${D}  Промежуточная 3.0 из выбора убрана — 3.1 это она же плюс${N}"
-  echo -e "  ${D}  RandomTrailers/DisableCookies; уже созданные серверы на 3.0${N}"
-  echo -e "  ${D}  работают дальше без изменений.${N}"
+  echo -e "  ${Y}  Версия — на весь сервер: клиенты 2.0 к 3.1 не подключатся.${N}"
+  echo -e "  ${Y}  Для 3.1 нужен AmneziaVPN 5.0.1.5+, старый отвергнет конфиг целиком.${N}"
+  echo -e "  ${D}  Серверы на 3.0 работают дальше без изменений.${N}"
   echo ""
   local _proto_choice
   read_choice _proto_choice "$(echo -e "${C}  Выбор [1-2] (Enter = 1): ${N}")" 1 2 "1"
@@ -6234,8 +6201,7 @@ _awg_check_mtu_headroom() {
   warn "MTU ${mtu} не оставляет запаса: внешний пакет доходит до ${outer} Б при пути в ${AWG_MTU_PATH}"
   info "Считаем так: ${mtu} + 32 (WG) + ${S4} (S4) + ${cpa_max} (паддинг) + 28 (IP/UDP)"
   info "Плюс случайный хвост RandomTrailers, которого в конфиге не видно"
-  info "Крупные пакеты начнут резаться, а PMTU discovery по UDP работает не везде —"
-  info "выглядит это не как обрыв, а как просадка скорости в разы при живом туннеле"
+  info "Крупные пакеты будут резаться → просадка скорости при живом туннеле"
   echo ""
   local _fix
   read_choice _fix "$(echo -e "${C}  1 — снизить MTU до ${safe_mtu} (Enter), 2 — оставить ${mtu}: ${N}")" 1 2 1
@@ -6523,6 +6489,37 @@ _apply_config() {
 # скопировать, положить в файл, отправить. QR остаётся отдельным осознанным
 # действием (Клиенты → «Показать QR клиента»), а не тем, что заслоняет собой
 # конфиг в половине случаев.
+# Клиентские конфиги: /root/<имя>_awg2.conf (AWG 2.0) или _awg3.conf (3.x).
+_cli_suffix() {
+  local p="${AWG_PROTO:-}"
+  [[ -n "$p" ]] || p=$(grep -m1 '^# AWG_PROTO=' "$SERVER_CONF" 2>/dev/null | cut -d= -f2 || true)
+  [[ "$p" == 3* ]] && echo "_awg3" || echo "_awg2"
+}
+
+# Путь к конфигу клиента: существующий файл любой версии, иначе новый по протоколу.
+_cli_file() {
+  local f
+  for f in "/root/${1}_awg3.conf" "/root/${1}_awg2.conf"; do
+    [[ -f "$f" ]] && { echo "$f"; return 0; }
+  done
+  echo "/root/${1}$(_cli_suffix).conf"
+}
+
+# Имя клиента из пути к конфигу.
+_cli_name_of() { local b="${1##*/}"; echo "${b%_awg[23].conf}"; }
+
+# Приводит суффиксы к протоколу сервера (после смены версии, рестора, обновления).
+_cli_sync_suffix() {
+  [[ -f "$SERVER_CONF" ]] || return 0
+  local want f t
+  want=$(_cli_suffix)
+  for f in /root/*_awg[23].conf; do
+    [[ -f "$f" && "$f" != *"${want}.conf" ]] || continue
+    t="/root/$(_cli_name_of "$f")${want}.conf"
+    [[ -e "$t" ]] || mv -f "$f" "$t"
+  done
+}
+
 _share_config() {
   local conf_file="$1" mode="${2:-text}"
   [[ -f "$conf_file" ]] || return 1
@@ -7044,9 +7041,7 @@ EOF
     echo -e "  ${Y}Без неё awg0 может не подняться: в памяти ядра сидит модуль,${N}"
     echo -e "  ${Y}не совпадающий с тем, что сейчас на диске.${N}"
     echo ""
-    info "После перезагрузки: awg2 → Сервер (1) → п.2 — Создать сервер"
-    info "Модуль под поднявшееся ядро п.2 подхватит сам. Если он скажет, что"
-    info "модуль не собран — сначала п.1, затем сразу п.2 без второй перезагрузки"
+    info "После перезагрузки: Сервер (1) → п.2. Модуль не собран — п.1, затем п.2"
     echo ""
     local _do_rb
     if [[ "${AUTO_MODE:-0}" == "1" ]]; then
@@ -7105,17 +7100,18 @@ do_autoinstall() {
   if [[ -f "$SERVER_CONF" ]]; then
     warn "Сервер AmneziaWG уже настроен ($SERVER_CONF)."
     info "Вывод существующего клиентского конфига..."
-    if [[ -f "/root/client1_awg2.conf" ]]; then
-      _share_config "/root/client1_awg2.conf"
+    local _c1; _c1=$(_cli_file client1)
+    if [[ -f "$_c1" ]]; then
+      _share_config "$_c1"
       echo ""
       echo -e "${G}======================================================${N}"
       echo -e "${W}          СКОПИРУЙТЕ ЭТОТ КОНФИГ ДЛЯ ПОДКЛЮЧЕНИЯ      ${N}"
       echo -e "${G}======================================================${N}"
-      cat /root/client1_awg2.conf
+      cat "$_c1"
       echo -e "${G}======================================================${N}"
       echo ""
     else
-      err "Файл /root/client1_awg2.conf не найден."
+      err "Файл $_c1 не найден."
     fi
     exit 0
   fi
@@ -7256,8 +7252,8 @@ do_autoinstall() {
     echo "Endpoint = $srv_ip:$PORT"
     echo "AllowedIPs = 0.0.0.0/0, ::/0"
     echo "PersistentKeepalive = 25"
-  } > /root/client1_awg2.conf
-  chmod 600 /root/client1_awg2.conf
+  } > "$(_cli_file client1)"
+  chmod 600 "$(_cli_file client1)"
 
   # Запуск интерфейса
   if awg-quick up "$SERVER_CONF"; then
@@ -7278,18 +7274,18 @@ do_autoinstall() {
 
   success_box "Автоустановка AmneziaWG завершена!"
   echo ""
-  echo -e "${W}  Клиентский конфиг сохранён в:${N} /root/client1_awg2.conf"
+  echo -e "${W}  Клиентский конфиг сохранён в:${N} $(_cli_file client1)"
   echo ""
 
   # Выводим QR код и сам конфиг
-  _share_config "/root/client1_awg2.conf"
+  _share_config "$(_cli_file client1)"
 
   # Дополнительно выводим сам текст конфига в консоль для удобного копирования
   echo ""
   echo -e "${G}======================================================${N}"
   echo -e "${W}          СКОПИРУЙТЕ ЭТОТ КОНФИГ ДЛЯ ПОДКЛЮЧЕНИЯ      ${N}"
   echo -e "${G}======================================================${N}"
-  cat /root/client1_awg2.conf
+  cat "$(_cli_file client1)"
   echo -e "${G}======================================================${N}"
   echo ""
 }
@@ -7314,8 +7310,8 @@ do_add_client_noninteractive() {
     err "Клиент '$client_name' уже есть в $SERVER_CONF"
     exit 1
   fi
-  if [[ -e "/root/${client_name}_awg2.conf" ]]; then
-    err "Файл /root/${client_name}_awg2.conf уже существует"
+  if [[ -e "$(_cli_file "$client_name")" ]]; then
+    err "Файл $(_cli_file "$client_name") уже существует"
     exit 1
   fi
 
@@ -7324,7 +7320,7 @@ do_add_client_noninteractive() {
   base_ip=$(echo "$server_net" | cut -d. -f1-3)
   client_addr=$(find_free_ip "$base_ip") || { err "Подсеть заполнена"; exit 1; }
 
-  local client_file="/root/${client_name}_awg2.conf"
+  local client_file; client_file=$(_cli_file "$client_name")
 
   # DNS по умолчанию Cloudflare
   CLIENT_DNS="1.1.1.1, 1.0.0.1"
@@ -7383,7 +7379,7 @@ do_add_client_noninteractive() {
   srv_ip=$(get_public_ip 2>/dev/null || echo "")
   if [[ -z "$srv_ip" ]]; then
      # Попробуем взять из Endpoint существующего клиента
-     srv_ip=$(grep -oP 'Endpoint = \K[0-9.]+' /root/*_awg2.conf 2>/dev/null | head -1 || echo "")
+     srv_ip=$(grep -oP 'Endpoint = \K[0-9.]+' /root/*_awg[23].conf 2>/dev/null | head -1 || echo "")
   fi
   if [[ -z "$srv_ip" ]]; then
     err "Не удалось определить внешний IP сервера — Endpoint был бы пустым"
@@ -7482,10 +7478,7 @@ do_gen() {
     warn "Сервер AmneziaWG уже установлен."
     warn "Текущий профиль: ${W}${_current_profile}${N}"
     echo ""
-    info "Для смены профиля сначала удали текущий сервер:"
-    info "  • Сервер (1) → п.7 — Сбросить настройки сервера (чистая переустановка)"
-    info "  • Удаление (7) → п.2 — Удалить всё (пакеты + конфиги)"
-    info "После этого выбери Сервер (1) → п.2 заново и укажи нужный профиль."
+    info "Смена профиля: Сервер (1) → п.7 (сброс), затем п.2 с нужным профилем"
     return 0
   fi
 
@@ -7789,8 +7782,8 @@ do_gen() {
     echo "Endpoint = $(endpoint_host "$srv_ip"):$PORT"
     echo "AllowedIPs = 0.0.0.0/0, ::/0"
     echo "PersistentKeepalive = $(awg_keepalive_value)"
-  } > "/root/${FIRST_CLIENT_NAME}_awg2.conf"
-  chmod 600 "/root/${FIRST_CLIENT_NAME}_awg2.conf"
+  } > "$(_cli_file "$FIRST_CLIENT_NAME")"
+  chmod 600 "$(_cli_file "$FIRST_CLIENT_NAME")"
 
   if awg_up_diag "$SERVER_CONF"; then
     log_info "do_gen: awg-quick up успешно"
@@ -7818,14 +7811,14 @@ do_gen() {
   fi
 
   # Раздача конфига
-  _share_config "/root/${FIRST_CLIENT_NAME}_awg2.conf"
+  _share_config "$(_cli_file "$FIRST_CLIENT_NAME")"
 
   echo ""
   success_box "■  Сервер создан успешно"
   echo -e "${W}  Версия : ${N}AWG ${AWG_PROTO:-2.0}"
   echo -e "${W}  Профиль: ${N}${MIMICRY_PROFILE:-none}"
   echo -e "${W}  Сервер : ${N}$SERVER_CONF"
-  echo -e "${W}  Клиент : ${N}/root/${FIRST_CLIENT_NAME}_awg2.conf"
+  echo -e "${W}  Клиент : ${N}$(_cli_file "$FIRST_CLIENT_NAME")"
   echo -e "${W}  IP     : ${N}$srv_ip:$PORT"
   echo -e "${W}  Iface  : ${N}$iface"
 
@@ -7988,7 +7981,7 @@ do_show_config() {
   local found_files=()
   while IFS= read -r -d '' f; do
     found_files+=("$f")
-  done < <(find /root -maxdepth 1 -name "*_awg2.conf" -print0 2>/dev/null)
+  done < <(find /root -maxdepth 1 -name "*_awg[23].conf" -print0 2>/dev/null)
 
   [[ ${#found_files[@]} -eq 0 ]] && { err "Конфиги не найдены в /root/"; return 1; }
 
@@ -8133,8 +8126,9 @@ do_rename_client() {
   chmod 600 "$SERVER_CONF"
 
   # Переименование файла клиента если он существует
-  local old_file="/root/${old_name}_awg2.conf"
-  local new_file="/root/${new_name}_awg2.conf"
+  local old_file new_file
+  old_file=$(_cli_file "$old_name")
+  new_file="/root/${new_name}$(_cli_suffix).conf"
   if [[ -f "$old_file" && "$old_name" != "безымянный" ]]; then
     mv "$old_file" "$new_file"
     ok "Файл переименован: $(basename "$old_file") → $(basename "$new_file")"
@@ -8200,7 +8194,7 @@ _delete_one_peer() {
   chmod 600 "$SERVER_CONF"
 
   # Удаляем файл клиента
-  local del_file="/root/${del_name}_awg2.conf"
+  local del_file; del_file=$(_cli_file "$del_name")
   if [[ -f "$del_file" && "$del_name" != "безымянный" ]]; then
     rm -f "$del_file"
   fi
@@ -8349,7 +8343,7 @@ do_add_client() {
     return 0
   fi
 
-  local client_file="/root/${client_name}_awg2.conf"
+  local client_file; client_file=$(_cli_file "$client_name")
   if [[ -f "$client_file" ]]; then warn "Файл $client_file уже существует — будет перезаписан"; fi
 
   read_yesno CONFIRM_IP "$(echo -e "${C}  Использовать IP $client_addr? [Y/n]: ${N}")" "y"
@@ -8702,7 +8696,7 @@ do_bulk_add_clients() {
         continue
       fi
       # дубль среди существующих клиентов?
-      if grep -qx "# ${_name}" "$SERVER_CONF" 2>/dev/null || [[ -f "/root/${_name}_awg2.conf" ]]; then
+      if grep -qx "# ${_name}" "$SERVER_CONF" 2>/dev/null || [[ -f "/root/${_name}_awg2.conf" || -f "/root/${_name}_awg3.conf" ]]; then
         warn "Пропущено: '$_name' (клиент уже существует)"
         _skipped_names=$((_skipped_names+1))
         continue
@@ -8890,7 +8884,7 @@ do_bulk_add_clients() {
       while (( name_idx <= 9999 )); do
         printf -v suffix "%03d" "$name_idx"
         candidate="${prefix}-${suffix}"
-        candidate_file="/root/${candidate}_awg2.conf"
+        candidate_file=$(_cli_file "$candidate")
         if [[ ! -f "$candidate_file" ]] && ! grep -qE "^# ${candidate}$" "$SERVER_CONF" 2>/dev/null; then
           name="$candidate"
           name_idx=$((name_idx+1))
@@ -8948,7 +8942,7 @@ do_bulk_add_clients() {
     rm -f "$psk_tmp"
 
     # Файл клиента
-    client_file="/root/${name}_awg2.conf"
+    client_file=$(_cli_file "$name")
     {
       echo "[Interface]"
       echo "PrivateKey = $cli_priv"
@@ -9016,7 +9010,7 @@ do_bulk_add_clients() {
 }
 
 # ─────────────────────────────────────────────────────────────
-# do_export_configs — собирает все клиентские *_awg2.conf из /root
+# do_export_configs — собирает все клиентские *_awg[23].conf из /root
 # в один архив. Приоритет zip, fallback tar.gz (zip не везде есть).
 # Серверный конфиг (awg0.conf) НЕ включается — только клиенты.
 # ─────────────────────────────────────────────────────────────
@@ -9027,14 +9021,14 @@ do_export_configs() {
   local srv_base
   srv_base=$(basename "${SERVER_CONF:-/etc/amnezia/amneziawg/awg0.conf}")
   local files=() f
-  for f in /root/*_awg2.conf; do
+  for f in /root/*_awg[23].conf; do
     [[ -e "$f" ]] || continue
     [[ "$(basename "$f")" == "$srv_base" ]] && continue
     files+=("$f")
   done
 
   if (( ${#files[@]} == 0 )); then
-    warn "Клиентских конфигов (*_awg2.conf) в /root не найдено — возврат"
+    warn "Клиентских конфигов (*_awg[23].conf) в /root не найдено — возврат"
     return 0
   fi
 
@@ -9351,7 +9345,7 @@ _server_mimicry() {
 # поэтому идёт только запасным путём.
 _detect_mimicry() {           # $1 = путь к конфигу клиента
   local conf="$1" name tag line
-  name=$(basename "$conf" _awg2.conf)
+  name=$(_cli_name_of "$conf")
   tag=$(_peer_meta_get "$name" "mimicry")
   if [[ -n "$tag" ]]; then
     if [[ "$tag" == "none" ]]; then echo "нет"; else echo "$tag"; fi
@@ -9373,7 +9367,7 @@ do_change_client_mimicry() {
   local found_files=()
   while IFS= read -r -d '' f; do
     found_files+=("$f")
-  done < <(find /root -maxdepth 1 -name "*_awg2.conf" -print0 2>/dev/null)
+  done < <(find /root -maxdepth 1 -name "*_awg[23].conf" -print0 2>/dev/null)
   [[ ${#found_files[@]} -eq 0 ]] && { err "Конфиги клиентов не найдены в /root/"; return 1; }
 
   local unique
@@ -9381,8 +9375,7 @@ do_change_client_mimicry() {
 
   hdr "~  Сменить мимикрию у клиента"
   echo ""
-  echo -e "  ${D}Меняются только I1-I5 в конфиге этого клиента.${N}"
-  echo -e "  ${D}Сервер и другие клиенты не затрагиваются — переподключать их не надо.${N}"
+  echo -e "  ${D}Меняются только I1-I5 этого клиента; сервер и остальные не затронуты.${N}"
   echo ""
   local i=0 f
   for f in "${unique[@]}"; do
@@ -9445,7 +9438,7 @@ do_change_client_mimicry() {
   # Метка в peer-блоке — единственный источник профиля для меню и для бота,
   # поэтому её обновляем в той же операции, что и сами I1-I5.
   local _cli_name
-  _cli_name=$(basename "$chosen" _awg2.conf)
+  _cli_name=$(_cli_name_of "$chosen")
   if ! _peer_meta_set "$_cli_name" "mimicry" "$(_mimicry_tag "${I1:-}")"; then
     warn "Профиль записан в конфиг, но метку в конфиге сервера обновить не удалось"
   fi
@@ -9468,7 +9461,7 @@ do_show_qr() {
   local found_files=()
   while IFS= read -r -d '' f; do
     found_files+=("$f")
-  done < <(find /root -maxdepth 1 -name "*_awg2.conf" -print0 2>/dev/null)
+  done < <(find /root -maxdepth 1 -name "*_awg[23].conf" -print0 2>/dev/null)
 
   [[ ${#found_files[@]} -eq 0 ]] && { err "Конфиги клиентов не найдены в /root/"; return 1; }
 
@@ -9555,9 +9548,7 @@ do_endpoint_menu() {
     echo -e "  Сейчас: ${W}${srv_ip:-?}:${port}${N} ${D}(IP сервера)${N}"
   fi
   echo ""
-  echo -e "  ${D}Домен удобнее при переезде: меняешь A-запись, а конфиги${N}"
-  echo -e "  ${D}у клиентов остаются рабочими. Требуется прямая A-запись${N}"
-  echo -e "  ${D}на IP сервера — проксирование UDP через Cloudflare не работает.${N}"
+  echo -e "  ${D}Домен: переезд = смена A-записи. Только прямая A-запись (без прокси CF).${N}"
   echo ""
   echo -e "  ${C}1)${N} Задать домен"
   [[ -n "$cur" ]] && echo -e "  ${C}2)${N} Вернуться на IP сервера" \
@@ -9601,7 +9592,7 @@ do_endpoint_menu() {
 _endpoint_rewrite_clients() {
   local ep="$1" files=() f
   shopt -s nullglob
-  files=( /root/*_awg2.conf )
+  files=( /root/*_awg[23].conf )
   shopt -u nullglob
   [[ ${#files[@]} -gt 0 ]] || return 0
 
@@ -9694,14 +9685,13 @@ do_rotate_awg_params() {
 
   # Считаем клиентов, которых это заденет
   local clients=() f
-  while IFS= read -r -d '' f; do clients+=("$f"); done     < <(find /root -maxdepth 1 -name "*_awg2.conf" -print0 2>/dev/null)
+  while IFS= read -r -d '' f; do clients+=("$f"); done     < <(find /root -maxdepth 1 -name "*_awg[23].conf" -print0 2>/dev/null)
 
   echo ""
   echo -e "${Y}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
   warn "ВСЕ клиенты потеряют связь до получения нового конфига"
   echo -e "  ${Y}Затронуто клиентов: ${W}${#clients[@]}${N}"
-  echo -e "  ${Y}Файлы в /root будут обновлены автоматически, но доставить${N}"
-  echo -e "  ${Y}их на устройства придётся вручную — или выдать через бота.${N}"
+  echo -e "  ${Y}Файлы в /root обновятся; раздать их — вручную или через бота.${N}"
   [[ "$new_proto" != "$cur_proto" ]] &&     echo -e "  ${R}Версия меняется: AWG ${cur_proto} → AWG ${new_proto}${N}"
   echo -e "${Y}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
   echo ""
@@ -9750,6 +9740,7 @@ do_rotate_awg_params() {
   done
   ok "Клиентских конфигов обновлено: ${updated}"
   [[ $failed -gt 0 ]] && warn "Не обновлено: ${failed}"
+  _cli_sync_suffix   # phone_awg2.conf ↔ phone_awg3.conf под новую версию
 
   # Именно down/up, а не syncconf: syncconf применяет дельту по пирам, а
   # параметры [Interface] (S1-S4, H1-H4, HeaderProtectionKey, RandomTrailers)
@@ -9775,7 +9766,7 @@ do_rotate_awg_params() {
   if [[ ${#clients[@]} -gt 0 ]]; then
     echo -e "  ${W}Кому раздать:${N}"
     for f in "${clients[@]}"; do
-      echo -e "    ${D}$(basename "$f" _awg2.conf)${N}"
+      echo -e "    ${D}$(_cli_name_of "$f")${N}"
     done
     echo ""
     echo -e "  ${C}Собрать всё в архив: Клиенты (2) → Экспорт конфигов${N}"
@@ -9794,7 +9785,7 @@ do_reset_server() {
   warn "Будет удалено:"
   echo -e "  ${R}—${N} Интерфейс awg0 (awg-quick down)"
   echo -e "  ${R}—${N} Серверный конфиг: ${W}$SERVER_CONF${N}"
-  echo -e "  ${R}—${N} Все клиентские конфиги: ${W}/root/*_awg2.conf${N}"
+  echo -e "  ${R}—${N} Все клиентские конфиги: ${W}/root/*_awg[23].conf${N}"
   echo -e "  ${R}—${N} UFW правила AmneziaWG"
   echo -e "  ${R}—${N} iptables правила NAT/FORWARD для awg0"
   echo ""
@@ -9850,7 +9841,7 @@ do_reset_server() {
   rm -f "${SERVER_CONF}".pre_delete.* 2>/dev/null || true
 
   trash "Удаляем клиентские конфиги..."
-  rm -f /root/*_awg2.conf 2>/dev/null || true
+  rm -f /root/*_awg[23].conf 2>/dev/null || true
 
   trash "Удаляем UFW правила..."
   if command -v ufw &>/dev/null; then
@@ -10551,8 +10542,7 @@ _warp_switch_backend() {
 
   echo ""
   warn "Переключение $current → $target"
-  echo -e "  ${D}Клиенты и их настройки WARP сохранятся: список общий,${N}"
-  echo -e "  ${D}имя интерфейса тоже. Туннель прервётся на несколько секунд.${N}"
+  echo -e "  ${D}Клиенты WARP сохранятся; туннель прервётся на несколько секунд.${N}"
   echo ""
   read_confirm "$(echo -e "${R}  Переключить бэкенд? (введи yes): ${N}")" || \
     { info "Отменено"; return 0; }
@@ -10657,8 +10647,7 @@ warp_usque_uninstall() {
   # config.json НЕ удаляем молча: повторная регистрация тратит лимит Cloudflare
   if [[ -s "$USQUE_CONF" ]]; then
     warn "Аккаунт $USQUE_CONF оставлен"
-    info "Повторная регистрация упирается в лимит Cloudflare — если он точно"
-    info "не нужен, удали вручную: rm -rf $USQUE_DIR"
+    info "Перерегистрация упирается в лимит Cloudflare. Не нужен — rm -rf $USQUE_DIR"
   fi
   ok "Бэкенд usque снят"
   return 0
@@ -13230,7 +13219,7 @@ do_uninstall() {
   echo -e "  ${R}—${N} Пакеты amneziawg, amneziawg-tools"
   echo -e "  ${R}—${N} DKMS-модуль (dkms remove, /usr/src, /var/lib/dkms)"
   echo -e "  ${R}—${N} /etc/amnezia/amneziawg/"
-  echo -e "  ${R}—${N} /root/*_awg2.conf"
+  echo -e "  ${R}—${N} /root/*_awg[23].conf"
   echo -e "  ${R}—${N} Автозапуск awg-quick@awg0"
   echo -e "  ${R}—${N} NAT-персистентность (hook / awg-nat.service)"
   $bot_present && echo -e "  ${R}—${N} Telegram-бот целиком (спрошу отдельно)"
@@ -13298,7 +13287,7 @@ do_uninstall() {
 
   trash "Удаляем конфиги..."
   rm -rf /etc/amnezia 2>/dev/null || true
-  rm -f /root/*_awg2.conf 2>/dev/null || true
+  rm -f /root/*_awg[23].conf 2>/dev/null || true
   rm -f /etc/modules-load.d/amneziawg.conf 2>/dev/null || true
 
   trash "Удаляем UFW правила..."
@@ -13366,9 +13355,7 @@ do_client_dpi_hint() {
   echo ""
   hdr "◈  DPI со стороны клиента"
   echo ""
-  echo -e "  ${Y}Запускать НЕ ЗДЕСЬ, а на устройстве, с которого вы ходите в VPN.${N}"
-  echo -e "  ${D}Сервер обычно стоит за границей: отсюда видно совсем не то, что${N}"
-  echo -e "  ${D}видит DPI у вашего провайдера. Ниже — команда для того устройства.${N}"
+  echo -e "  ${Y}Запускать на устройстве клиента, не на сервере.${N}"
   echo ""
   echo -e "  ${W}Docker (проще всего):${N}"
   echo -e "  ${G}docker run --rm -it --pull=always ghcr.io/runnin4ik/dpi-detector:latest${N}"
@@ -13382,16 +13369,12 @@ do_client_dpi_hint() {
   echo ""
   echo -e "${W}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
   echo -e "  ${W}Что делать с результатом:${N}"
-  echo -e "  ${C}•${N} Домен, который он показал рабочим, впишите при создании сервера"
-  echo -e "    или клиента: меню домена мимикрии → ${W}1) Ввести свой${N}."
-  echo -e "  ${C}•${N} Подмена DNS или перехват UDP/53 — включите шифрованный DNS:"
-  echo -e "    ${W}Туннели и DNS${N} → DNSCrypt."
-  echo -e "  ${C}•${N} Обрыв или просадка ПОСЛЕ первых десятков килобайт — это"
-  echo -e "    ограничение потока, а не оверхед параметров: пробуйте профиль"
-  echo -e "    ${W}«AmneziaVPN»${N} и цепочку I1-I5 покороче."
+  echo -e "  ${C}•${N} Рабочий домен → домен мимикрии → ${W}1) Ввести свой${N}"
+  echo -e "  ${C}•${N} Подмена DNS / перехват UDP/53 → ${W}Туннели и DNS${N} → DNSCrypt"
+  echo -e "  ${C}•${N} Обрыв после первых КБ → профиль ${W}«AmneziaVPN»${N}, короче I1-I5"
   echo -e "${W}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
   echo ""
-  echo -e "  ${D}Проект сторонний, лицензия MIT. awg2 его не ставит и не запускает.${N}"
+  echo -e "  ${D}Сторонний проект (MIT), awg2 его не ставит.${N}"
   return 0
 }
 
@@ -13614,7 +13597,7 @@ do_clean_clients() {
   fi
 
   mv "$temp_conf" "$SERVER_CONF"
-  rm -f /root/*_awg2.conf 2>/dev/null || true
+  rm -f /root/*_awg[23].conf 2>/dev/null || true
 
   info "Перезапускаем awg0..."
   if ! awg_up_diag "$SERVER_CONF"; then
@@ -13663,7 +13646,7 @@ do_backup() {
   while IFS= read -r -d '' cfile; do
     cp "$cfile" "$backup_path/" && ok "Клиент: $(basename "$cfile")"
     backed_up=$((backed_up + 1))
-  done < <(find /root -maxdepth 1 -name "*_awg2.conf" -print0 2>/dev/null)
+  done < <(find /root -maxdepth 1 -name "*_awg[23].conf" -print0 2>/dev/null)
 
   # AWG параметры (текущие, live dump)
   if ip link show awg0 &>/dev/null 2>&1; then
@@ -13785,11 +13768,13 @@ do_restore() {
 
   # Восстанавливаем клиентские конфиги (find -print0 — безопасно для имён с пробелами)
   while IFS= read -r -d '' cfile; do
+    rm -f "/root/$(_cli_name_of "$cfile")"_awg[23].conf
     cp "$cfile" "/root/$(basename "$cfile")"
     chmod 600 "/root/$(basename "$cfile")"
     ok "Клиент восстановлен: $(basename "$cfile")"
     restored=$((restored + 1))
-  done < <(find "$chosen_backup" -maxdepth 1 -name "*_awg2.conf" -print0 2>/dev/null)
+  done < <(find "$chosen_backup" -maxdepth 1 -name "*_awg[23].conf" -print0 2>/dev/null)
+  _cli_sync_suffix
 
   # ── Состояние WARP ──
   # Восстанавливаем аккаунты обоих бэкендов: перерегистрация упирается в лимиты
@@ -15602,7 +15587,7 @@ os.rename(tmp, conf)
 if removed_pubkey:
     print(removed_pubkey)
 PYEOF
-    local cli_file="/root/${n}_awg2.conf"
+    local cli_file; cli_file=$(_cli_file "$n")
     [[ -f "$cli_file" ]] && rm -f "$cli_file"
     ok "Удалён: $n"
   done
@@ -16271,14 +16256,72 @@ print('\n'.join(o['tag'] for o in conf.get('outbounds', [])
   ok "Outbound '$target' удалён."
 }
 
+# Применяет балансировщик ко всем proxy-outbounds: random|roundRobin|leastPing|leastLoad|off.
+# Код в quoted heredoc: bash его не разбирает (раньше кавычки в комментарии
+# внутри python3 -c "..." рвали строку → «host: No such file or directory»).
+_xray_apply_balancer() {
+  [[ -f "$XRAY_CONF" ]] || { err "Xray не установлен"; return 1; }
+  python3 - "$XRAY_CONF" "$1" <<'PY'
+import json, os, sys
+path, strategy = sys.argv[1], sys.argv[2]
+if strategy not in ('random', 'roundRobin', 'leastPing', 'leastLoad', 'off'):
+    sys.exit('стратегия: random|roundRobin|leastPing|leastLoad|off')
+conf = json.load(open(path))
+skip = ('freedom', 'blackhole', 'dns')
+tags = [o['tag'] for o in conf.get('outbounds', [])
+        if o.get('tag') and o.get('protocol') not in skip]
+routing = conf.setdefault('routing', {})
+rules = routing.setdefault('rules', [])
+# Основное правило — привязанное к входу туннеля; per-client правила не трогаем.
+known_in = {'xray0', 'tun-in', 'tun-probe', 'socks-in'}
+rule = next((r for r in rules if r.get('balancerTag') == 'balancer'), None) \
+    or next((r for r in rules if set(r.get('inboundTag') or []) & known_in), None)
+if strategy == 'off':
+    routing.pop('balancers', None)
+    conf.pop('observatory', None)
+    for r in rules:
+        if r.pop('balancerTag', None) and tags:
+            r['outboundTag'] = tags[0]
+else:
+    if len(tags) < 2:
+        sys.exit('нужно минимум 2 proxy-outbound')
+    routing['balancers'] = [{'tag': 'balancer', 'selector': tags,
+                             'strategy': {'type': strategy}}]
+    if rule:
+        rule.pop('outboundTag', None)
+        rule['balancerTag'] = 'balancer'
+    else:
+        rules.append({'type': 'field', 'inboundTag': ['tun-in'], 'balancerTag': 'balancer'})
+    # leastPing/leastLoad нужна observatory; subjectSelector — префиксы тегов.
+    if strategy in ('leastPing', 'leastLoad'):
+        conf['observatory'] = {'subjectSelector': tags,
+                               'probeUrl': 'https://www.google.com/generate_204',
+                               'probeInterval': '1m'}
+    else:
+        conf.pop('observatory', None)
+tmp = path + '.tmp'
+with open(tmp, 'w') as f:
+    json.dump(conf, f, indent=2, ensure_ascii=False)
+os.replace(tmp, path)
+PY
+}
+
 _xray_setup_balancer() {
   if [[ ! -f "$XRAY_CONF" ]]; then
     err "Xray не установлен"
     return 1
   fi
 
+  # Кандидаты — proxy-outbounds по протоколу (как в _xray_remove_outbound).
   local tags
-  tags=$(python3 -c "import json, sys; conf=json.load(open('$XRAY_CONF')); print('\n'.join([o.get('tag', 'unknown') for o in conf.get('outbounds', []) if o.get('tag') and not o.get('tag').startswith('direct')]))")
+  tags=$(python3 - "$XRAY_CONF" <<'PY' 2>/dev/null || true
+import json, sys
+conf = json.load(open(sys.argv[1]))
+skip = ('freedom', 'blackhole', 'dns')
+print('\n'.join(o['tag'] for o in conf.get('outbounds', [])
+                 if o.get('tag') and o.get('protocol') not in skip))
+PY
+)
 
   if [[ -z "$tags" ]]; then
     warn "Нет настроенных proxy outbounds. Добавь хотя бы один."
@@ -16301,54 +16344,24 @@ _xray_setup_balancer() {
   echo -e "  ${C}2)${N} roundRobin — по очереди (каждое новое соединение — следующий)"
   echo -e "  ${C}3)${N} leastPing  — по наименьшему пингу (observatory авто)"
   echo -e "  ${C}4)${N} leastLoad  — по наименьшей загрузке (observatory авто)"
+  echo -e "  ${C}5)${N} выключить  — весь трафик в первый outbound"
   echo ""
 
   local strategy
-  read_choice BAL_STRATEGY "$(echo -e "${C}  Выбор стратегии [1-4] (Enter = random): ${N}")" 1 4 1
+  read_choice BAL_STRATEGY "$(echo -e "${C}  Выбор стратегии [1-5] (Enter = random): ${N}")" 1 5 1
   case $BAL_STRATEGY in
     1) strategy="random" ;;
     2) strategy="roundRobin" ;;
     3) strategy="leastPing" ;;
     4) strategy="leastLoad" ;;
+    5) strategy="off" ;;
   esac
 
-  if python3 -c "
-import json, sys
-conf = json.load(open('$XRAY_CONF'))
-tags = sys.argv[1].strip().split('\n')
-strategy = sys.argv[2]
-conf.setdefault('routing', {})
-conf['routing']['balancers'] = [{'tag': 'balancer', 'selector': tags, 'strategy': {'type': strategy}}]
-rules = conf['routing'].get('rules', [])
-proxy_rule = next((r for r in rules if (r.get('outboundTag') and r.get('outboundTag') != 'direct') or r.get('balancerTag') == 'balancer'), None)
-if proxy_rule:
-    proxy_rule.pop('outboundTag', None)
-    proxy_rule['balancerTag'] = 'balancer'
-else:
-    rules.append({'type': 'field', 'inboundTag': ['tun-in'], 'balancerTag': 'balancer'})
-conf['routing']['rules'] = rules
-
-# leastPing/leastLoad требуют observatory.
-# subjectSelector — ПРЕФИКСНОЕ сопоставление с тегами outbounds (доки Xray).
-# Теги наших outbounds — "proxy_<host>", поэтому ['outbound'] не совпадало ни с
-# одним → observatory не пробил ничего → leastPing/leastLoad исключали ВСЕ
-# outbounds и деградировали до default outbound (балансировки не было).
-# Берём сами теги балансировщика:
-if strategy in ('leastPing', 'leastLoad'):
-    conf['observatory'] = {
-        'subjectSelector': tags,
-        'probeUrl': 'https://www.google.com/generate_204',
-        'probeInterval': '1m'
-    }
-
-# Через временный файл: обрыв на середине записи оставил бы битый config.json.
-import os
-tmp = '$XRAY_CONF' + '.tmp'
-with open(tmp, 'w') as f:
-    json.dump(conf, f, indent=2, ensure_ascii=False)
-os.replace(tmp, '$XRAY_CONF')
-" "$tags" "$strategy"; then
-    ok "Балансировщик ($strategy) настроен. Трафик распределяется между $count outbounds."
+  if _xray_apply_balancer "$strategy"
+  then
+    if [[ "$strategy" == off ]]; then ok "Балансировщик выключен."
+    else ok "Балансировщик ($strategy) настроен. Трафик распределяется между $count outbounds."; fi
+    ip link show xray0 &>/dev/null && info "Туннель активен — примени: пункт 7 (перезапуск)"
   else
     err "Ошибка настройки балансировщика."
     return 1
@@ -18813,6 +18826,41 @@ _global_cleanup() {
 trap '_global_cleanup' EXIT
 trap '_global_cleanup; echo ""; warn "Прервано пользователем"; exit 130' INT TERM
 
+# Неинтерактивное управление туннелями (для бота): awg2 --tunnel Т up|down|restart.
+_tunnel_cli() {
+  local t="$1" a="$2" up down
+  [[ "$a" =~ ^(up|down|restart)$ ]] || { err "Действие: up | down | restart"; return 1; }
+  case "$t" in
+    warp)  up=warp_up;  down=warp_down ;;
+    xray)  up=_xray_up; down=_xray_down ;;
+    tun2socks)
+      up=_tunnel_cli_t2s_up; down=_tun2socks_down ;;
+    exits) up=_tunnel_cli_exits_up; down=_exits_down ;;
+    dns)
+      [[ "$a" == down ]] && { err "DNS: только up | restart"; return 1; }
+      _dns_proxy_restart; return ;;
+    *) err "Туннель: warp | xray | tun2socks | exits | dns"; return 1 ;;
+  esac
+  case "$a" in
+    up)      "$up" ;;
+    down)    "$down" ;;
+    restart) "$down" 2>/dev/null || true; "$up" ;;
+  esac
+}
+
+# tun2socks — с сохранённым прокси.
+_tunnel_cli_t2s_up() {
+  [[ -s "$TUN2SOCKS_CONF" ]] || { err "tun2socks: прокси не задан — настрой в консоли"; return 1; }
+  _tun2socks_up "$(head -1 "$TUN2SOCKS_CONF")"
+}
+
+# Exit-ноды — в сохранённом режиме (all | peers).
+_tunnel_cli_exits_up() {
+  local mode
+  mode=$(grep -m1 '^mode=' "$AWG_EXITS_STATE" 2>/dev/null | cut -d= -f2 || true)
+  _exits_up "${mode:-all}"
+}
+
 # --post-update <прежняя версия> — скрипт сам себя перезапустил после
 # обновления. Показываем это один раз: обновление занимает секунду, и без
 # явного сообщения непонятно, произошло ли оно.
@@ -18833,6 +18881,9 @@ awg2 $VERSION
   awg2 --interactive          меню даже на чистом сервере
   awg2 --auto                 неинтерактивная установка сервера и client1
   awg2 --add-client ИМЯ       добавить клиента без меню
+  awg2 --tunnel Т up|down|restart
+                              Т: warp | xray | tun2socks | exits | dns
+  awg2 --xray-balancer С      С: random | roundRobin | leastPing | leastLoad | off
   awg2 --help                 эта справка
 
 Переменные окружения:
@@ -18849,6 +18900,22 @@ EOF
     AUTO_MODE=1
     check_deps
     do_add_client_noninteractive "$2"
+    exit 0
+    ;;
+  --tunnel)
+    AUTO_MODE=1
+    check_deps
+    _tunnel_cli "${2:-}" "${3:-}" && exit 0 || exit 1
+    ;;
+  --xray-balancer)
+    [[ -n "${2:-}" ]] || { err "Использование: awg2 --xray-balancer random|roundRobin|leastPing|leastLoad|off"; exit 1; }
+    _xray_apply_balancer "$2" || exit 1
+    ok "Балансировщик Xray: $2"
+    # Применить к поднятому туннелю — перезапуском.
+    if ip link show xray0 &>/dev/null || systemctl is-active --quiet awg-xray.service 2>/dev/null; then
+      _xray_down 2>/dev/null || true
+      _xray_up || exit 1
+    fi
     exit 0
     ;;
   -auto|--auto)
@@ -18875,6 +18942,9 @@ esac
 # Фоновая проверка новой версии — один раз за запуск, результат в кэш.
 # Шапка читает кэш и в сеть не ходит, поэтому меню не ждёт ничего.
 update_check_async || true
+
+# Серверы 3.x до v0.8.28 писали клиентов как *_awg2.conf — переименуем.
+_cli_sync_suffix 2>/dev/null || true
 
 while true; do
   check_deps

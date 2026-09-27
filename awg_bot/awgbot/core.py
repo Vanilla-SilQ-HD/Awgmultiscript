@@ -6,7 +6,7 @@ core.py — низкоуровневая работа с AmneziaWG.
 
 Совместимость с awg2 (v6.9.x):
   • сервер:        /etc/amnezia/amneziawg/awg0.conf
-  • клиент-файлы:  /root/<name>_awg2.conf
+  • клиент-файлы:  /root/<name>_awg2.conf (AWG 2.0) или _awg3.conf (3.x)
   • метка имени:   первый комментарий без "=" внутри [Peer] — "# <name>"
   • служебки:      "# expires=<ts>", "# orig_ips=<ip>", "# mimicry=<profile>"
   • интерфейс:     awg0
@@ -16,6 +16,8 @@ core.py — низкоуровневая работа с AmneziaWG.
 from __future__ import annotations
 
 import functools
+import html
+import json
 import os
 import random
 import re
@@ -126,7 +128,7 @@ class Peer:
 
     @property
     def conf_path(self) -> str:
-        return os.path.join(CLIENT_DIR, f"{self.name}_awg2.conf")
+        return client_conf(self.name)
 
 
 @dataclass
@@ -192,9 +194,39 @@ def endpoint_domain() -> str:
     return d
 
 
+CLIENT_SUFFIXES = ("_awg3.conf", "_awg2.conf")
+
+
+def is_client_file(fname: str) -> bool:
+    return fname.endswith(CLIENT_SUFFIXES)
+
+
+def client_files() -> list[Path]:
+    """Все клиентские конфиги: *_awg2.conf и *_awg3.conf."""
+    return sorted(f for f in Path(CLIENT_DIR).glob("*_awg[23].conf") if f.is_file())
+
+
+def _client_suffix() -> str:
+    """Суффикс для новых файлов по версии сервера: 3.x → _awg3, иначе _awg2."""
+    try:
+        m = re.search(r"^#\s*AWG_PROTO=(\S+)", Path(SERVER_CONF).read_text(), re.M)
+    except OSError:
+        m = None
+    return "_awg3.conf" if m and m.group(1).startswith("3") else "_awg2.conf"
+
+
+def client_conf(name: str) -> str:
+    """Путь к конфигу клиента: существующий любой версии, иначе новый по протоколу."""
+    for suf in CLIENT_SUFFIXES:
+        f = os.path.join(CLIENT_DIR, f"{name}{suf}")
+        if os.path.isfile(f):
+            return f
+    return os.path.join(CLIENT_DIR, f"{name}{_client_suffix()}")
+
+
 def _public_ip_from_peers() -> str:
     """Достаём endpoint из любого клиентского файла (Endpoint = ip:port)."""
-    for f in Path(CLIENT_DIR).glob("*_awg2.conf"):
+    for f in client_files():
         try:
             m = re.search(r"^Endpoint\s*=\s*([^:]+):", f.read_text(), re.M)
             if m:
@@ -279,7 +311,7 @@ def _obf_level_from_clients() -> int:
     2 — если только I1, 0 — если конфигов нет (значит и судить не по чему).
     """
     best = 0
-    for f in Path(CLIENT_DIR).glob("*_awg2.conf"):
+    for f in client_files():
         try:
             text = f.read_text()
         except OSError:
@@ -372,7 +404,7 @@ def get_peer(name: str) -> Peer | None:
 def restore_backup(archive_bytes: bytes) -> tuple[bool, str]:
     """
     Восстанавливает конфиг сервера и клиентов из .tar.gz бэкапа (формат нашего
-    cb_backup: awg0.conf + clients/*_awg2.conf). Перед заменой делает бэкап
+    cb_backup: awg0.conf + clients/*_awg[23].conf). Перед заменой делает бэкап
     текущего состояния для отката. Возвращает (ok, сообщение).
     """
     import tarfile, io as _io, shutil, time as _t
@@ -389,7 +421,7 @@ def restore_backup(archive_bytes: bytes) -> tuple[bool, str]:
                     name = m.name.lstrip("./")
                     if name.startswith("/") or ".." in name.split("/"):
                         continue
-                    if name == "awg0.conf" or (name.startswith("clients/") and name.endswith("_awg2.conf")):
+                    if name == "awg0.conf" or (name.startswith("clients/") and is_client_file(name)):
                         members.append(m)
                 if not members:
                     return False, "В архиве нет awg0.conf или клиентов — это не бэкап awgToolza."
@@ -416,7 +448,13 @@ def restore_backup(archive_bytes: bytes) -> tuple[bool, str]:
         restored = 0
         if os.path.isdir(cli_dir):
             for f in os.listdir(cli_dir):
-                if f.endswith("_awg2.conf"):
+                if is_client_file(f):
+                    # Тот же клиент под другим суффиксом — убрать, иначе будет два файла.
+                    base = f[:-len("_awgN.conf")]
+                    for suf in CLIENT_SUFFIXES:
+                        stale = os.path.join(CLIENT_DIR, base + suf)
+                        if suf != f[len(base):] and os.path.isfile(stale):
+                            os.unlink(stale)
                     shutil.copy2(os.path.join(cli_dir, f), os.path.join(CLIENT_DIR, f))
                     os.chmod(os.path.join(CLIENT_DIR, f), 0o600)
                     restored += 1
@@ -596,7 +634,7 @@ def add_client(name: str, expires: int | None = None,
         return False, "Сбой генерации ключей (awg genkey/genpsk)", None
 
     dns_m = None
-    for f in Path(CLIENT_DIR).glob("*_awg2.conf"):
+    for f in client_files():
         dm = re.search(r"^DNS\s*=\s*(.+)$", f.read_text(), re.M)
         if dm:
             dns_m = dm.group(1).strip()
@@ -684,7 +722,7 @@ def add_client(name: str, expires: int | None = None,
         "AllowedIPs = 0.0.0.0/0, ::/0",
         f"PersistentKeepalive = {_keepalive_value(text)}",
     ]
-    conf_path = os.path.join(CLIENT_DIR, f"{name}_awg2.conf")
+    conf_path = client_conf(name)
     Path(conf_path).write_text("\n".join(cli_lines) + "\n")
     os.chmod(conf_path, 0o600)
 
@@ -807,7 +845,7 @@ def delete_client(name: str) -> tuple[bool, str]:
     if not removed:
         return False, f"Клиент '{name}' не найден"
     _write_conf_atomic(header + "".join(kept))
-    cli = os.path.join(CLIENT_DIR, f"{name}_awg2.conf")
+    cli = client_conf(name)
     if os.path.isfile(cli):
         try:
             os.unlink(cli)
@@ -838,8 +876,8 @@ def rename_client(old: str, new: str) -> tuple[bool, str]:
         out_blocks.append(block)
     _write_conf_atomic(header + "".join(out_blocks))
 
-    old_f = os.path.join(CLIENT_DIR, f"{old}_awg2.conf")
-    new_f = os.path.join(CLIENT_DIR, f"{new}_awg2.conf")
+    old_f = client_conf(old)
+    new_f = os.path.join(CLIENT_DIR, f"{new}{_client_suffix()}")
     if os.path.isfile(old_f):
         os.rename(old_f, new_f)
     _rename_note(old, new)
@@ -1701,3 +1739,136 @@ def dns_status() -> str:
         else:
             lines.append("Резолв через 127.0.2.1: ⚠️ нет ответа")
     return "\n".join(lines)
+
+
+# ───────────────────────── туннели: сводка и управление ─────────────────────────
+# Статусы читаем сами; up/down/restart — через `awg2 --tunnel` (с v0.8.29).
+XRAY_CONF = "/etc/xray/config.json"
+TUN2SOCKS_CONF = "/etc/tun2socks/proxy.txt"
+AWG_EXITS_DIR = "/etc/amnezia/amneziawg"
+CASCADE_RULES = "/etc/awg-cascade/rules.conf"
+TUNNELS = ("warp", "xray", "exits", "tun2socks", "dns")
+XRAY_STRATEGIES = ("random", "roundRobin", "leastPing", "leastLoad", "off")
+
+
+def _iface_up(dev: str) -> bool:
+    return os.path.isdir(f"/sys/class/net/{dev}")
+
+
+def _unit_active(unit: str) -> bool:
+    return run(["systemctl", "is-active", "--quiet", unit])[0] == 0
+
+
+def xray_info() -> dict:
+    """Outbounds и балансировщик из конфига Xray."""
+    info: dict = {"installed": os.path.isfile(XRAY_CONF), "outbounds": [],
+                  "strategy": ""}
+    if not info["installed"]:
+        return info
+    try:
+        conf = json.loads(Path(XRAY_CONF).read_text())
+    except (OSError, ValueError):
+        return info
+    skip = ("freedom", "blackhole", "dns")
+    info["outbounds"] = [o["tag"] for o in conf.get("outbounds", [])
+                         if o.get("tag") and o.get("protocol") not in skip]
+    bal = (conf.get("routing") or {}).get("balancers") or []
+    if bal:
+        info["strategy"] = (bal[0].get("strategy") or {}).get("type") or "random"
+    return info
+
+
+def _exit_nodes() -> list[str]:
+    try:
+        return sorted(f[len("awg-exit-"):-len(".conf")] for f in os.listdir(AWG_EXITS_DIR)
+                      if f.startswith("awg-exit-") and f.endswith(".conf"))
+    except OSError:
+        return []
+
+
+def tunnels_overview() -> str:
+    """Сводка по всем туннелям сервера (HTML)."""
+    on, off, na = "🟢", "⚪️", "➖"
+    lines: list[str] = []
+
+    if _iface_up("warp0"):
+        lines.append(f"{on} <b>WARP</b> — включён")
+    elif os.path.isfile("/etc/wireguard/warp0.conf") or os.path.isfile("/etc/awg-warp-backend"):
+        lines.append(f"{off} <b>WARP</b> — выключен")
+    else:
+        lines.append(f"{na} <b>WARP</b> — не установлен")
+
+    x = xray_info()
+    if x["installed"]:
+        st = on if (_iface_up("xray0") or _unit_active("awg-xray.service")) else off
+        bal = f"балансировщик: {x['strategy']}" if x["strategy"] else "без балансировщика"
+        lines.append(f"{st} <b>Xray</b> — outbounds: {len(x['outbounds'])}, {bal}")
+        for t in x["outbounds"][:8]:
+            lines.append(f"      · <code>{html.escape(t)}</code>")
+    else:
+        lines.append(f"{na} <b>Xray</b> — не установлен")
+
+    nodes = _exit_nodes()
+    if nodes:
+        st = on if _unit_active("awg-exits-routing.service") else off
+        up = [n for n in nodes if _iface_up(f"awg-exit-{n}")]
+        lines.append(f"{st} <b>AWG Exit-ноды</b> — {len(nodes)} шт., поднято {len(up)}")
+        for n in nodes[:8]:
+            lines.append(f"      · {'🟢' if n in up else '⚪️'} <code>{html.escape(n)}</code>")
+    else:
+        lines.append(f"{na} <b>AWG Exit-ноды</b> — не настроены")
+
+    if _unit_active("awg-tun2socks.service"):
+        lines.append(f"{on} <b>tun2socks</b> — включён")
+    elif os.path.isfile(TUN2SOCKS_CONF):
+        lines.append(f"{off} <b>tun2socks</b> — выключен")
+    else:
+        lines.append(f"{na} <b>tun2socks</b> — не настроен")
+
+    rules = 0
+    try:
+        rules = sum(1 for ln in Path(CASCADE_RULES).read_text().splitlines()
+                    if ln.strip() and not ln.lstrip().startswith("#"))
+    except OSError:
+        pass
+    lines.append(f"{on if rules else na} <b>Каскад</b> — "
+                 + (f"{rules} правил" if rules else "не настроен"))
+
+    if _unit_active("dnscrypt-proxy.service") or _unit_active("dnscrypt-proxy.socket"):
+        lines.append(f"{on} <b>Шифрованный DNS</b> — включён")
+    elif have("dnscrypt-proxy"):
+        lines.append(f"{off} <b>Шифрованный DNS</b> — выключен")
+    else:
+        lines.append(f"{na} <b>Шифрованный DNS</b> — не установлен")
+    return "\n".join(lines)
+
+
+# Свой замок: подъём туннеля идёт минутами и не должен держать _MUTEX клиентов.
+_TUNNEL_LOCK = threading.Lock()
+
+
+def _awg2_cli(args: list[str], timeout: int = 240) -> tuple[bool, str]:
+    if not os.path.isfile(AWG2_BIN_PATH):
+        return False, "awg2 не найден"
+    if not _TUNNEL_LOCK.acquire(blocking=False):
+        return False, "Другая операция с туннелями ещё выполняется"
+    try:
+        rc, out, err = run([AWG2_BIN_PATH, *args], timeout=timeout)
+    finally:
+        _TUNNEL_LOCK.release()
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", (out + err)).strip()
+    if "Неизвестный аргумент" in text:
+        return False, "awg2 устарел — обнови: sudo awg2 → пункт 8"
+    return rc == 0, text[-1500:] or ("готово" if rc == 0 else f"код {rc}")
+
+
+def tunnel_action(name: str, action: str) -> tuple[bool, str]:
+    if name not in TUNNELS or action not in ("up", "down", "restart"):
+        return False, "Неизвестный туннель или действие"
+    return _awg2_cli(["--tunnel", name, action])
+
+
+def xray_set_balancer(strategy: str) -> tuple[bool, str]:
+    if strategy not in XRAY_STRATEGIES:
+        return False, "Неизвестная стратегия"
+    return _awg2_cli(["--xray-balancer", strategy])

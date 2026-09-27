@@ -955,10 +955,73 @@ async def cb_restart_ok(cq: CallbackQuery) -> None:
 # ───────────────────────── туннели / обслуживание (через awg2) ─────────────────────────
 @router.callback_query(F.data == "tunnels")
 async def cb_tunnels(cq: CallbackQuery) -> None:
-    note = "" if wrapper.available() else "\n\n⚠️ Модуль pexpect не установлен — операции недоступны."
-    await safe_edit(cq, "<b>🛡 Туннели</b>\nWARP и шифрованный DNS." + note,
-                    kb.tunnels_menu())
+    txt = await asyncio.to_thread(core.tunnels_overview)
+    await safe_edit(cq, "<b>🛡 Туннели</b>\n\n" + txt, kb.tunnels_menu())
     await cq.answer()
+
+
+def _tunnel_text(name: str) -> str:
+    title = kb.TUNNEL_TITLES.get(name, name)
+    if name == "xray":
+        x = core.xray_info()
+        if not x["installed"]:
+            return f"<b>{title}</b>\n\nНе установлен. Установка и outbounds — в консоли: sudo awg2 → 5 → 4."
+        outs = "\n".join(f"· <code>{esc(t)}</code>" for t in x["outbounds"]) or "— нет"
+        bal = x["strategy"] or "выключен"
+        return f"<b>{title}</b>\n\nOutbounds:\n{outs}\n\nБалансировщик: <b>{esc(bal)}</b>"
+    return f"<b>{title}</b>"
+
+
+@router.callback_query(F.data.startswith("tun:"))
+async def cb_tunnel_card(cq: CallbackQuery) -> None:
+    name = cq.data.split(":", 1)[1]
+    if name not in core.TUNNELS:
+        return await cq.answer("Неизвестный туннель", show_alert=True)
+    txt = await asyncio.to_thread(_tunnel_text, name)
+    await safe_edit(cq, txt, kb.tunnel_card(name))
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("tun_ask:"))
+async def cb_tunnel_ask(cq: CallbackQuery) -> None:
+    _, name, action = cq.data.split(":", 2)
+    await safe_edit(cq, f"Выключить {esc(kb.TUNNEL_TITLES.get(name, name))}?\n"
+                        "Клиенты, завёрнутые в него, пойдут напрямую.",
+                    kb.confirm(yes_cb=f"tun_do:{name}:{action}", no_cb=f"tun:{name}", danger=False))
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("tun_do:"))
+async def cb_tunnel_do(cq: CallbackQuery) -> None:
+    _, name, action = cq.data.split(":", 2)
+    await cq.answer("Выполняю… до пары минут.")
+    ok, out = await asyncio.to_thread(core.tunnel_action, name, action)
+    await safe_edit(cq, f"<b>{'✅' if ok else '❌'} {esc(kb.TUNNEL_TITLES.get(name, name))}: {action}</b>"
+                        f"\n<pre>{esc(out[-1500:])}</pre>", kb.tunnel_card(name))
+
+
+@router.callback_query(F.data == "xbal")
+async def cb_xray_balancer(cq: CallbackQuery) -> None:
+    x = await asyncio.to_thread(core.xray_info)
+    if len(x["outbounds"]) < 2:
+        return await cq.answer("Нужно минимум 2 outbound — добавь в консоли: awg2 → 5 → 4 → 2",
+                               show_alert=True)
+    await safe_edit(cq, "<b>⚖ Балансировщик Xray</b>\n\n"
+                        "random — случайно · roundRobin — по очереди\n"
+                        "leastPing — меньший пинг · leastLoad — меньшая нагрузка",
+                    kb.xray_balancer_choices(x["strategy"]))
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("xbal_set:"))
+async def cb_xray_balancer_set(cq: CallbackQuery) -> None:
+    strategy = cq.data.split(":", 1)[1]
+    await cq.answer("Применяю…")
+    ok, out = await asyncio.to_thread(core.xray_set_balancer, strategy)
+    x = await asyncio.to_thread(core.xray_info)
+    await safe_edit(cq, f"<b>{'✅' if ok else '❌'} Балансировщик: {esc(strategy)}</b>"
+                        f"\n<pre>{esc(out[-1000:])}</pre>",
+                    kb.xray_balancer_choices(x["strategy"]))
 
 
 TUNNEL_ACTIONS = {
@@ -972,21 +1035,21 @@ TUNNEL_ACTIONS = {
 async def cb_warp_status(cq: CallbackQuery) -> None:
     await cq.answer("Читаю статус WARP…")
     txt = await asyncio.to_thread(core.warp_status)
-    await safe_edit(cq, f"<b>🌐 WARP</b>\n\n{esc(txt)}", kb.tunnels_menu())
+    await safe_edit(cq, f"<b>🌐 WARP</b>\n\n{esc(txt)}", kb.tunnel_card("warp"))
 
 @router.callback_query(F.data == "t_warp_restart")
 async def cb_warp_restart(cq: CallbackQuery) -> None:
     await cq.answer("Жёсткий рестарт WARP…")
     ok, msg = await asyncio.to_thread(core.warp_hard_restart)
     icon = "✅" if ok else "❌"
-    await safe_edit(cq, f"<b>{icon} WARP рестарт</b>\n\n<pre>{esc(msg)}</pre>", kb.tunnels_menu())
+    await safe_edit(cq, f"<b>{icon} WARP рестарт</b>\n\n<pre>{esc(msg)}</pre>", kb.tunnel_card("warp"))
 
 
 @router.callback_query(F.data == "t_dns_status")
 async def cb_dns_status(cq: CallbackQuery) -> None:
     await cq.answer("Читаю статус DNS…")
     txt = await asyncio.to_thread(core.dns_status)
-    await safe_edit(cq, f"<b>🌐 Шифрованный DNS</b>\n\n{esc(txt)}", kb.tunnels_menu())
+    await safe_edit(cq, f"<b>🌐 Шифрованный DNS</b>\n\n{esc(txt)}", kb.tunnel_card("dns"))
 
 
 @router.callback_query(F.data.in_(TUNNEL_ACTIONS.keys()))
@@ -999,7 +1062,8 @@ async def cb_tunnel_action(cq: CallbackQuery) -> None:
     ok, out = await asyncio.to_thread(wrapper.run_menu_sequence, keys)
     tail = out[-1500:] if out else "(нет вывода)"
     note = "" if ok else "\n\n⚠️ Если не сработало — выполни в консоли: sudo awg2"
-    await safe_edit(cq, f"<b>Результат:</b>\n<pre>{esc(tail)}</pre>{note}", kb.tunnels_menu())
+    back = "warp" if scenario.startswith("warp") else "dns"
+    await safe_edit(cq, f"<b>Результат:</b>\n<pre>{esc(tail)}</pre>{note}", kb.tunnel_card(back))
 
 
 @router.callback_query(F.data == "maint")
@@ -1226,7 +1290,7 @@ async def cb_backup_create(cq: CallbackQuery) -> None:
         if os.path.isfile(core.SERVER_CONF):
             tar.add(core.SERVER_CONF, arcname="awg0.conf")
         for f in os.listdir(core.CLIENT_DIR):
-            if f.endswith("_awg2.conf"):
+            if core.is_client_file(f):
                 tar.add(os.path.join(core.CLIENT_DIR, f), arcname=f"clients/{f}")
     buf.seek(0)
     fname = f"awg_backup_{datetime.now():%Y%m%d_%H%M}.tar.gz"
