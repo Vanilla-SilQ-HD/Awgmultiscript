@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="v0.8.32"
+VERSION="v0.8.33"
 SCRIPT_PATH="/usr/local/bin/awg2"
 
 # ── Канал обновлений ───────────────────────────────────────
@@ -19466,6 +19466,7 @@ EOF
 
   _wgobf_write_linux_installer "$name" "$dir"
   _wgobf_write_readme "$name" "$dir"
+  _wgobf_write_keenetic "$name" "$dir"
   chmod 600 "$dir"/*
   chmod 700 "$dir/install-linux.sh"
   return 0
@@ -19598,6 +19599,7 @@ _wgobf_write_readme() {
     echo "                     там слушает обфускатор на этом же устройстве)"
     echo "  obfuscator.conf  — конфиг wg-obfuscator $WGOBF_VERSION"
     echo "  install-linux.sh — установка всего на Debian/Ubuntu одной командой"
+    echo "  keenetic.txt     — поля и конфиг для AWG Manager на Keenetic"
     [[ "$clean" == "1" ]] && \
       echo "  wg-direct.conf   — БЕЗ обфускатора (телефоны); виден DPI как WireGuard"
     echo ""
@@ -19608,6 +19610,9 @@ _wgobf_write_readme() {
     echo "     https://github.com/ClusterM/wg-obfuscator/releases/tag/$WGOBF_VERSION"
     echo "  2. Запустить: wg-obfuscator -c obfuscator.conf  (окно не закрывать)"
     echo "  3. Импортировать wg.conf в приложение WireGuard и подключиться"
+    echo ""
+    echo "Keenetic (AWG Manager): Новый туннель → вкладка «ClusterM» (не «Phobos»),"
+    echo "  все поля и конфиг — в keenetic.txt"
     echo ""
     echo "OpenWrt: пакет wg-obfuscator с LuCI —"
     echo "  https://github.com/ClusterM/wg-obfuscator/blob/master/docs/OPENWRT.md"
@@ -19621,22 +19626,48 @@ _wgobf_write_readme() {
   } > "$dir/README.txt"
 }
 
+# Keenetic + AWG Manager (github.com/hoaxisr/awg-manager): вкладка «ClusterM»
+# при создании туннеля. Именно ClusterM, а не Phobos: вкладка Phobos ставит
+# обфускатор из форка Phobos, а у нас на сервере оригинал ClusterM (менеджер
+# держит ту же версию 1.6). Поля обфускатора вводятся руками — конфиг с
+# [instance] менеджер считает конфигом Phobos, поэтому его не делаем.
+_wgobf_write_keenetic() {
+  local name="$1" dir="$2"
+  {
+    echo "Keenetic + AWG Manager — клиент $name"
+    echo ""
+    echo "AWG Manager → Новый туннель → вкладка «ClusterM» (НЕ «Phobos»)"
+    echo ""
+    echo "Сервер (host:port) обфускатора: $(_wgobf_get ENDPOINT):$(_wgobf_get PORT)"
+    echo "Ключ:                          $(_wgobf_get KEY)"
+    echo "Маскировка:                    $(_wgobf_get MASKING)"
+    echo "max-dummy:                     4"
+    echo "idle-timeout:                  0"
+    echo ""
+    echo "Конфиг WireGuard (.conf) — вставить всё от [Interface] до конца файла:"
+    echo ""
+    cat "$dir/wg.conf"
+  } > "$dir/keenetic.txt"
+}
+
 _wgobf_show_bundle() {
   local name="$1" dir="$WGOBF_CLIENTS/$1"
   [[ -f "$dir/wg.conf" ]] || { err "Комплект $name не найден ($dir)"; return 1; }
+  # Комплекты до v0.8.33 выпущены без keenetic.txt — дописываем на лету
+  [[ -f "$dir/keenetic.txt" ]] || { _wgobf_write_keenetic "$name" "$dir"; chmod 600 "$dir/keenetic.txt"; }
   echo ""
   hdr "Клиент $name"
   echo -e "  ${W}Папка:${N} $dir"
   echo -e "  ${D}$(find "$dir" -maxdepth 1 -type f -printf '%f ' | sort)${N}"
   echo ""
-  echo -e "${Y}  ── obfuscator.conf ──${N}"
+  echo -e "${Y}# ── obfuscator.conf ──${N}"
   cat "$dir/obfuscator.conf"
   echo ""
-  echo -e "${Y}  ── wg.conf ──${N}"
+  echo -e "${Y}# ── wg.conf ──${N}"
   cat "$dir/wg.conf"
   if [[ -f "$dir/wg-direct.conf" ]]; then
     echo ""
-    echo -e "${Y}  ── wg-direct.conf (без обфускатора) ──${N}"
+    echo -e "${Y}# ── wg-direct.conf (без обфускатора) ──${N}"
     if command -v qrencode &>/dev/null; then
       qrencode -t ansiutf8 -s 1 -m 1 < "$dir/wg-direct.conf"
       echo -e "${D}  ↑ QR для приложения WireGuard (без обфускатора, виден DPI)${N}"
@@ -19644,6 +19675,14 @@ _wgobf_show_bundle() {
       cat "$dir/wg-direct.conf"
     fi
   fi
+  echo ""
+  echo -e "${Y}  ── Keenetic, AWG Manager → вкладка «ClusterM» (не «Phobos») ──${N}"
+  echo -e "  Сервер (host:port) : ${W}$(_wgobf_get ENDPOINT):$(_wgobf_get PORT)${N}"
+  echo -e "  Ключ               : ${W}$(_wgobf_get KEY)${N}"
+  echo -e "  Маскировка         : ${W}$(_wgobf_get MASKING)${N}"
+  echo -e "  max-dummy          : ${W}4${N}   idle-timeout: ${W}0${N}"
+  echo -e "  Конфиг WireGuard   : ${W}wg.conf${N} выше, от [Interface] до конца"
+  echo -e "  ${D}Всё это одним файлом: $dir/keenetic.txt${N}"
   echo ""
   info "Инструкции по платформам: $dir/README.txt"
   info "Linux-клиент: скопируй install-linux.sh на устройство и запусти через sudo"
