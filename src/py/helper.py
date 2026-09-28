@@ -12,6 +12,7 @@ import os
 import random
 import re
 import secrets
+import shutil
 import string
 import struct
 import sys
@@ -792,6 +793,245 @@ def cmd_pcap_analyze(path):
         print("VERDICT|OK|Обфускация работает; пакеты мимикрии прошли до начала захвата")
 
 
+# ════════════════════════ машинный API ════════════════════════
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _typed(val, typ):
+    """Значение по типу ключа: s строка, n число, b да/нет, j JSON, f файл."""
+    if typ == "n":
+        try:
+            return int(val)
+        except ValueError:
+            try:
+                return float(val)
+            except ValueError:
+                return None
+    if typ == "b":
+        return val.strip().lower() in ("1", "true", "yes", "on", "y")
+    if typ == "j":
+        return json.loads(val) if val.strip() else None
+    if typ == "f":
+        try:
+            return ANSI.sub("", read(val))
+        except OSError:
+            return ""
+    return val
+
+
+def _split_key(key):
+    name, _, typ = key.partition(":")
+    return name, typ or "s"
+
+
+def cmd_json_kv():
+    """Строки «ключ[:тип]<TAB>значение» → объект; точки в ключе — вложенность."""
+    out = {}
+    for line in sys.stdin.read().splitlines():
+        if "\t" not in line:
+            continue
+        key, val = line.split("\t", 1)
+        name, typ = _split_key(key)
+        cur = out
+        parts = name.split(".")
+        for part in parts[:-1]:
+            cur = cur.setdefault(part, {})
+        cur[parts[-1]] = _typed(val, typ)
+    print(json.dumps(out, ensure_ascii=False))
+
+
+def cmd_json_rows(*cols):
+    """Строки TSV → список объектов по колонкам «имя[:тип]»."""
+    spec = [_split_key(c) for c in cols]
+    rows = []
+    for line in sys.stdin.read().splitlines():
+        if not line:
+            continue
+        vals = line.split("\t")
+        vals += [""] * (len(spec) - len(vals))
+        rows.append({name: _typed(v, typ) for (name, typ), v in zip(spec, vals)})
+    print(json.dumps(rows, ensure_ascii=False))
+
+
+def cmd_json_list():
+    """Непустые строки stdin → JSON-массив строк."""
+    print(json.dumps([l for l in sys.stdin.read().splitlines() if l], ensure_ascii=False))
+
+
+def _peers_list(path):
+    """peers.list туннеля → {ip: нода или ""}; None — файла нет."""
+    try:
+        text = read(path)
+    except OSError:
+        return None
+    out = {}
+    for line in text.splitlines():
+        ip, _, node = line.strip().partition("|")
+        if ip:
+            out[ip] = node
+    return out
+
+
+def _first_ip(value):
+    return value.split(",")[0].split("/")[0].strip()
+
+
+def cmd_clients_json(conf, dump, client_dir, warp, xray, exits):
+    """Клиенты awg0 со статистикой `awg show dump` и туннелями — для бота."""
+    _, peers = split_peers(read(conf))
+    stats = {}
+    try:
+        for line in read(dump).splitlines()[1:]:
+            f = line.split("\t")
+            if len(f) >= 7:
+                stats[f[0]] = f
+    except OSError:
+        pass
+    now = int(time.time())
+    tunnels = {"warp": _peers_list(warp), "xray": _peers_list(xray), "exit": _peers_list(exits)}
+    rows = []
+    for b in peers:
+        pub = peer_field(b, "PublicKey")
+        if not pub:
+            continue
+        name = peer_name(b)
+        orig = peer_meta(b, "orig_ips")
+        ip = _first_ip(orig or peer_field(b, "AllowedIPs"))
+        exp = peer_meta(b, "expires")
+        s = stats.get(pub) or ["", "", "", "", "0", "0", "0"]
+        hs = int(s[4]) if s[4].isdigit() else 0
+        path = ""
+        for suf in ("_awg3.conf", "_awg2.conf"):
+            p = os.path.join(client_dir, name + suf)
+            if name and os.path.isfile(p):
+                path = p
+                break
+        row = {
+            "name": name, "ip": ip, "pub": pub,
+            "expires": int(exp) if exp.isdigit() else None, "blocked": bool(orig),
+            "mimicry": peer_meta(b, "mimicry") or "none",
+            "handshake": hs, "ago": now - hs if hs else None,
+            "online": bool(hs) and now - hs < 180,
+            "rx": int(s[5]) if s[5].isdigit() else 0, "tx": int(s[6]) if s[6].isdigit() else 0,
+            "endpoint": "" if s[2] in ("", "(none)") else s[2], "file": path,
+        }
+        for t, lst in tunnels.items():
+            if lst is None:
+                row[t] = None
+            elif t == "exit":
+                row[t] = (lst[ip] or "shared") if ip in lst else "off"
+            else:
+                row[t] = ip in lst
+        rows.append(row)
+    print(json.dumps(rows, ensure_ascii=False))
+
+
+def _job_info(jdir, active):
+    try:
+        meta = json.loads(read(os.path.join(jdir, "meta.json")))
+    except (OSError, ValueError):
+        meta = {"id": os.path.basename(jdir)}
+    try:
+        res = json.loads(read(os.path.join(jdir, "result.json")))
+    except (OSError, ValueError):
+        res = None
+    if res is not None:
+        meta["state"] = "done"
+        meta.update({k: res.get(k) for k in ("ok", "rc", "data", "error")})
+        try:
+            meta["finished"] = int(os.path.getmtime(os.path.join(jdir, "result.json")))
+        except OSError:
+            pass
+    else:
+        meta["state"] = "running" if active == "1" else "lost"
+    return meta
+
+
+def cmd_api_job_status(jdir, offset, active):
+    """Состояние задачи и новый кусок журнала с байта offset. Кусок режется
+    по концу строки: следующий опрос продолжит с целой строки."""
+    info = _job_info(jdir, active)
+    try:
+        off = max(0, int(offset))
+    except ValueError:
+        off = 0
+    try:
+        with open(os.path.join(jdir, "log"), "rb") as f:
+            f.seek(off)
+            chunk = f.read(256 * 1024)
+    except OSError:
+        chunk = b""
+    if info["state"] == "running":
+        cut = chunk.rfind(b"\n") + 1
+        chunk = chunk[:cut]
+    info["offset"] = off + len(chunk)
+    info["log"] = ANSI.sub("", chunk.decode("utf-8", "replace"))
+    print(json.dumps(info, ensure_ascii=False))
+
+
+def cmd_api_jobs(jobs_dir, *active_ids):
+    """Последние 20 задач, новые сверху; active_ids — задачи с живым юнитом."""
+    try:
+        ids = sorted(os.listdir(jobs_dir), reverse=True)[:20]
+    except OSError:
+        ids = []
+    rows = []
+    for i in ids:
+        info = _job_info(os.path.join(jobs_dir, i), "1" if i in active_ids else "0")
+        info.pop("data", None)
+        rows.append(info)
+    print(json.dumps(rows, ensure_ascii=False))
+
+
+def cmd_api_envelope(rc, data_file, log_file):
+    try:
+        raw = read(data_file).strip()
+    except OSError:
+        raw = ""
+    try:
+        data = json.loads(raw) if raw else None
+    except ValueError:
+        data = None
+    try:
+        log = ANSI.sub("", read(log_file))
+    except OSError:
+        log = ""
+    log = "\n".join(line.rstrip() for line in log.splitlines()).strip("\n")
+    error = ""
+    if rc != "0":
+        errs = [l.strip()[1:].strip() for l in log.splitlines() if l.strip().startswith("×")]
+        error = errs[-1] if errs else (log.splitlines()[-1].strip() if log else "код %s" % rc)
+    print(json.dumps({"ok": rc == "0", "rc": int(rc), "data": data, "log": log, "error": error},
+                     ensure_ascii=False))
+
+
+# ════════════════════════ архивы ════════════════════════
+def cmd_safe_untar(archive, dest):
+    """Распаковать только обычные файлы и каталоги без выхода за dest:
+    архив может прийти от пользователя (бэкап, загруженный в бота)."""
+    import tarfile
+    root = os.path.realpath(dest)
+    os.makedirs(root, exist_ok=True)
+    n = 0
+    with tarfile.open(archive, "r:*") as tar:
+        for m in tar.getmembers():
+            parts = [p for p in m.name.replace("\\", "/").split("/") if p not in ("", ".")]
+            if not parts or ".." in parts or not (m.isfile() or m.isdir()):
+                continue
+            path = os.path.join(root, *parts)
+            if m.isdir():
+                os.makedirs(path, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            src = tar.extractfile(m)
+            with open(path, "wb") as f:
+                shutil.copyfileobj(src, f)
+            os.chmod(path, 0o600)
+            n += 1
+    if not n:
+        die("в архиве нет файлов")
+
+
 COMMANDS = {
     "peers": cmd_peers, "meta-set": cmd_meta_set, "peer-del": cmd_peer_del,
     "peer-rename": cmd_peer_rename, "peers-clear": cmd_peers_clear,
@@ -807,7 +1047,10 @@ COMMANDS = {
     "xray-probe-tag": cmd_xray_probe_tag, "xray-tun-probe": cmd_xray_tun_probe,
     "xray-balancer": cmd_xray_balancer, "xray-balancer-get": cmd_xray_balancer_get,
     "xray-ru": cmd_xray_ru, "xray-prepare": cmd_xray_prepare,
-    "pcap-analyze": cmd_pcap_analyze,
+    "pcap-analyze": cmd_pcap_analyze, "safe-untar": cmd_safe_untar,
+    "json-kv": cmd_json_kv, "json-rows": cmd_json_rows, "json-list": cmd_json_list,
+    "clients-json": cmd_clients_json, "api-envelope": cmd_api_envelope,
+    "api-job-status": cmd_api_job_status, "api-jobs": cmd_api_jobs,
 }
 
 if __name__ == "__main__":

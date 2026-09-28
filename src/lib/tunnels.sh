@@ -221,6 +221,38 @@ tunnels_panic_reset() {
 }
 
 # ── Выбор клиентов для туннеля ────────────────────────────
+# Правила работающего туннеля пересобираются по списку целиком.
+_tunnel_rules_refresh() {  # файл устройство таблица
+  local ip
+  ip link show "$2" &>/dev/null || return 0
+  rt_rules_clear "$3"
+  while IFS= read -r ip; do
+    valid_ip "${ip%%|*}" && ip rule add from "${ip%%|*}" lookup "$3" priority "$3"
+  done < "$1"
+  return 0
+}
+
+# tunnel_client warp|xray ИМЯ|all|none on|off
+tunnel_client() {
+  local file dev table ip
+  case "$1" in
+    warp) file="$WARP_PEERS"; dev="$WARP_IF"; table="$WARP_TABLE" ;;
+    xray) file="$XRAY_PEERS"; dev="$XRAY_IF"; table="$XRAY_TABLE" ;;
+    *) err "Туннель: warp | xray"; return 1 ;;
+  esac
+  mkdir -p "$(dirname "$file")"
+  peers_sync "$file"
+  case "$2" in
+    all) clients_name_ip | cut -d'|' -f2 > "$file" ;;
+    none) : > "$file" ;;
+    *) ip=$(clients_name_ip | awk -F'|' -v n="$2" '$1 == n {print $2; exit}')
+       [[ -n "$ip" ]] || { err "Клиента $2 нет"; return 1; }
+       peers_seed "$file"
+       if [[ "${3:-on}" == on ]]; then peers_add "$file" "$ip"; else peers_del "$file" "$ip"; fi ;;
+  esac
+  _tunnel_rules_refresh "$file" "$dev" "$table"
+  ok "Клиенты ${1^^}: $(grep -c . "$file" || true) через туннель"
+}
 # tunnel_peers_menu ЗАГОЛОВОК ФАЙЛ УСТРОЙСТВО ТАБЛИЦА
 tunnel_peers_menu() {
   local title="$1" file="$2" dev="$3" table="$4" rows=() i c name ip
@@ -246,13 +278,7 @@ tunnel_peers_menu() {
       *) ip="${rows[$((c - 1))]#*|}"
          if peers_has "$file" "$ip"; then peers_del "$file" "$ip"; else peers_add "$file" "$ip"; fi ;;
     esac
-    # Применить к работающему туннелю: правила пересобираются целиком
-    if ip link show "$dev" &>/dev/null; then
-      rt_rules_clear "$table"
-      while IFS= read -r ip; do
-        valid_ip "${ip%%|*}" && ip rule add from "${ip%%|*}" lookup "$table" priority "$table"
-      done < "$file"
-    fi
+    _tunnel_rules_refresh "$file" "$dev" "$table"
   done
 }
 

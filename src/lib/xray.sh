@@ -50,11 +50,11 @@ xray_port_owners() {
 }
 
 # ── Установка ─────────────────────────────────────────────
-xray_install() {
+xray_install() {  # [update] — без вопроса обновить уже установленный
   local asset base tmp want rc
   if xray_installed; then
     info "Установлен: $("$XRAY_BIN" version 2>/dev/null | head -1)"
-    ask_yes "  Обновить до последней версии? [y/N]: " n || return 0
+    [[ "${1:-}" == update ]] || ask_yes "  Обновить до последней версии? [y/N]: " n || return 0
   fi
   asset=$(_xray_asset)
   [[ -n "$asset" ]] || { err "Архитектура $(uname -m) не поддерживается Xray"; return 1; }
@@ -88,11 +88,17 @@ xray_install() {
 
 # ── Выходы (outbounds) ────────────────────────────────────
 xray_add_outbound() {
-  local link ob msgs tag probe why
+  local link
   xray_installed || { err "Сначала установи Xray (пункт 1)"; return 1; }
   read_line link "${C}  Ссылка (vless:// vmess:// hysteria2://): ${N}"
   link="${link//[[:space:]]/}"
   [[ -n "$link" ]] || return 0
+  xray_add_link "$link"
+}
+
+xray_add_link() {  # ссылка
+  local link="$1" ob msgs tag probe why rc=0
+  xray_installed || { err "Сначала установи Xray"; return 1; }
   mktmp msgs || return 1
   ob=$(py xray-link "$link" 2>"$msgs") || { err "Ссылка не разобрана: $(tail -1 "$msgs")"; return 1; }
   grep -q '^NOTE:' "$msgs" && sed -n 's/^NOTE:/  /p' "$msgs"
@@ -108,12 +114,11 @@ xray_add_outbound() {
     info "hysteria2 есть не во всех сборках Xray — используй vless/vmess"
     return 1
   fi
-  local rc=0
   py xray-add "$XRAY_CONF" <<< "$ob" 2>/dev/null || rc=$?
   (( rc == 3 )) && { err "Выход $tag уже есть"; return 1; }
   (( rc == 0 )) || { err "Не удалось записать конфиг"; return 1; }
   ok "Выход $tag добавлен и выбран активным"
-  if xray_is_up; then info "Туннель работает на прежнем выходе — перезапусти его (пункт 7)"; fi
+  if xray_is_up; then info "Туннель работает на прежнем выходе — перезапусти его"; fi
 }
 
 _xray_pick_tag() {  # → CHOSEN
@@ -129,9 +134,14 @@ _xray_pick_tag() {  # → CHOSEN
 xray_del_outbound() {
   xray_installed || { err "Xray не установлен"; return 1; }
   _xray_pick_tag || return 0
-  py xray-del "$XRAY_CONF" "$CHOSEN"
+  xray_del_tag "$CHOSEN"
+}
+
+xray_del_tag() {  # тег
+  xray_tags | grep -qxF "$1" || { err "Выхода $1 нет"; return 1; }
+  py xray-del "$XRAY_CONF" "$1"
   py xray-prepare "$XRAY_CONF" "$(xray_tun_supported && echo native || echo tun2socks)" || true
-  ok "Выход $CHOSEN удалён"
+  ok "Выход $1 удалён"
 }
 
 xray_balancer() {  # стратегия
@@ -209,14 +219,23 @@ EOF
 }
 
 xray_ru_toggle() {
-  local bak why
   xray_installed || { err "Xray не установлен"; return 1; }
-  if xray_ru_on; then
-    py xray-ru "$XRAY_CONF" off && _xray_ru_timer off
-    ok "РФ-сайты снова идут через туннель"
+  if xray_ru_on; then xray_ru_set off
   else
     echo -e "  ${D}.ru/.su/.рф, сервисы «только из РФ» и РФ-IP пойдут с сервера напрямую —${N}"
     echo -e "  ${D}нужно, когда сервер в РФ, а Xray ведёт за границу.${N}"
+    xray_ru_set on
+  fi
+}
+
+# РФ-сайты напрямую: on|off. Работающий туннель перезапускается.
+xray_ru_set() {
+  local bak why
+  xray_installed || { err "Xray не установлен"; return 1; }
+  if [[ "$1" == off ]]; then
+    xray_ru_on && { py xray-ru "$XRAY_CONF" off && _xray_ru_timer off; }
+    ok "РФ-сайты идут через туннель"
+  else
     [[ -f "$XRAY_ASSET_DIR/geoip_RU.dat" && -f "$XRAY_ASSET_DIR/geosite_RU.dat" ]] || xray_ru_update || return 1
     mktmp bak || return 1
     cp -a "$XRAY_CONF" "$bak"
@@ -229,7 +248,7 @@ xray_ru_toggle() {
     _xray_ru_timer on
     ok "РФ-сайты идут напрямую, базы обновляются раз в неделю"
   fi
-  xray_is_up && ask_yes "  Перезапустить туннель сейчас? [Y/n]: " y && xray_restart
+  if xray_is_up; then info "Перезапускаю туннель"; xray_restart; fi
   return 0
 }
 
@@ -383,6 +402,10 @@ xray_restart() { xray_down quiet; xray_up; }
 
 xray_remove() {
   read_confirm "${R}  Удалить Xray (бинарь, конфиг с выходами, службы)? (введи yes): ${N}" || return 0
+  xray_uninstall
+}
+
+xray_uninstall() {
   xray_down quiet
   remove_unit "$XRAY_ROUTING_UNIT" "$XRAY_TUN_UNIT" "$XRAY_UNIT" awg-xray-rugeo.timer awg-xray-rugeo.service
   rm -rf "$XRAY_DIR" "$XRAY_BIN" "$XRAY_ROUTING_SCRIPT" \
@@ -411,8 +434,27 @@ xray_status() {
   return 0
 }
 
+# Выходы, которых эта сборка Xray не принимает (по тегу в строке).
+xray_bad_outbounds() {
+  local t probe
+  mktmp probe || return 1
+  while IFS= read -r t; do
+    py xray-probe-tag "$XRAY_CONF" "$t" "$probe" && ! xray_test "$probe" >/dev/null && echo "$t"
+  done < <(xray_tags)
+  return 0
+}
+
+xray_fix() {
+  local bad=()
+  mapfile -t bad < <(xray_bad_outbounds)
+  (( ${#bad[@]} )) && py xray-del "$XRAY_CONF" "${bad[@]}"
+  py xray-prepare "$XRAY_CONF" "$(xray_tun_supported && echo native || echo tun2socks)"
+  if xray_test >/dev/null; then ok "Конфиг принят Xray${bad[*]:+, убраны: ${bad[*]}}"
+  else err "Конфиг всё ещё отвергается"; return 1; fi
+}
+
 xray_diagnose() {
-  local owners why bad=() t probe
+  local owners why bad=()
   xray_installed || { err "Xray не установлен"; return 1; }
   info "Бинарь: $("$XRAY_BIN" version 2>/dev/null | head -1)"
   if xray_tun_supported; then info "Inbound tun: есть — xray0 поднимает сам Xray"
@@ -427,17 +469,11 @@ xray_diagnose() {
   if why=$(xray_test); then ok "Конфиг принят Xray"; return 0; fi
   err "Конфиг отвергнут:"
   sed 's/^/      /' <<< "$why"
-  mktmp probe || return 1
-  while IFS= read -r t; do
-    py xray-probe-tag "$XRAY_CONF" "$t" "$probe" && ! xray_test "$probe" >/dev/null && bad+=("$t")
-  done < <(xray_tags)
+  mapfile -t bad < <(xray_bad_outbounds)
   if (( ${#bad[@]} )); then
     warn "Эта сборка Xray не принимает выходы: ${bad[*]}"
-    if ask_yes "  Удалить их из конфига? [Y/n]: " y; then
-      py xray-del "$XRAY_CONF" "${bad[@]}"
-      py xray-prepare "$XRAY_CONF" "$(xray_tun_supported && echo native || echo tun2socks)"
-      if xray_test >/dev/null; then ok "Конфиг починен"; else warn "Конфиг всё ещё отвергается"; fi
-    fi
+    if (( AUTO_MODE )); then info "Убрать их — «Починить конфиг»"
+    elif ask_yes "  Удалить их из конфига? [Y/n]: " y; then xray_fix; fi
   else
     info "Выходы по отдельности принимаются — дело в маршрутизации."
     info "Включение туннеля само чинит ссылки на удалённые выходы."

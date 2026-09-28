@@ -15,7 +15,7 @@ OUT="${1:-dist/awg2.sh}"
 LIBS=(
   core const sys net conf module params mimicry server clients expire
   tunnels warp dns cascade xray tun2socks exits wgobf
-  backup update bot uninstall diag menu cli
+  backup update bot uninstall diag menu api cli
 )
 
 die() { echo "build: $*" >&2; exit 1; }

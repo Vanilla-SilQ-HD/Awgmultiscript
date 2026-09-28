@@ -54,6 +54,101 @@ client_delete() {
   ok "Удалён: ${name:-без имени}"
 }
 
+# ── Ядра операций (без вопросов: меню, командная строка и бот) ──
+client_pub() { clients_tsv | awk -F'\t' -v n="$1" '$1 == n {print $2; exit}'; }
+
+# client_create ИМЯ [СРОК] [МИМИКРИЯ] [DNS] [MTU]
+# МИМИКРИЯ — строка mimicry_from_spec, по умолчанию «как у сервера».
+client_create() {
+  local name="$1" expire="${2:-}" spec="${3:-server}" dns="${4:-1.1.1.1, 1.0.0.1}" mtu="${5:-}" addr
+  server_exists || { err "Сервер не создан"; return 1; }
+  _name_free "$name" || { err "Имя $name занято или недопустимо (латиница, цифры, _ -, до 32)"; return 1; }
+  [[ -z "$expire" || "$expire" =~ ^[0-9]+$ ]] || { err "Срок — unix-время"; return 1; }
+  [[ -n "$mtu" ]] || mtu=$(conf_iface_get MTU)
+  addr=$(free_client_ip) || { err "В подсети нет свободных адресов"; return 1; }
+  mimicry_from_spec "$spec" || return 1
+  client_add "$name" "$addr" "$dns" "$mtu" "$expire" || return 1
+  ok "Клиент $name: $addr"
+  echo "Файл конфигурации: $(client_file "$name")"
+}
+
+client_remove() {  # имя
+  local pub
+  pub=$(client_pub "$1")
+  [[ -n "$pub" ]] || { err "Клиента $1 нет"; return 1; }
+  client_delete "$pub"
+}
+
+client_rename() {  # старое новое
+  local old="$1" new="$2" pub f
+  pub=$(client_pub "$old")
+  [[ -n "$pub" ]] || { err "Клиента $old нет"; return 1; }
+  _name_free "$new" || { err "Имя $new занято или недопустимо"; return 1; }
+  py peer-rename "$SERVER_CONF" "$pub" "$new" || return 1
+  f=$(client_file "$old")
+  [[ -f "$f" ]] && mv -f "$f" "$CLIENT_DIR/${new}$(client_suffix).conf"
+  log_info "клиент переименован: $old → $new"
+  ok "Переименован: $old → $new"
+}
+
+# Мимикрия выданного клиента: меняются только его I1-I5 — сервер их не видит.
+client_set_mimicry() {  # имя строка
+  [[ -f "$(client_file "$1")" ]] || { err "Нет конфига клиента $1"; return 1; }
+  mimicry_from_spec "$2" && _client_write_mimicry "$1"
+}
+
+_client_write_mimicry() {  # имя — записать текущие I_LINES
+  local name="$1" f
+  f=$(client_file "$name")
+  cp -a "$f" "$f.bak.$(date +%s)"
+  i_lines_block | py i-replace "$f" || return 1
+  peer_meta_set "$name" mimicry "$(mimicry_tag)" || warn "Метку в awg0.conf обновить не удалось"
+  ok "Мимикрия $name: $(mimicry_tag), пакетов: ${#I_LINES[@]}"
+  warn "Клиенту нужен новый конфиг"
+}
+
+client_expire_set() {  # имя unix-время
+  [[ "$2" =~ ^[0-9]+$ ]] && (( $2 > $(date +%s) + 60 )) || { err "Срок должен быть в будущем"; return 1; }
+  client_exists "$1" || { err "Клиента $1 нет"; return 1; }
+  expire_install
+  py expire-set "$SERVER_CONF" "$1" "$2" || return 1
+  rm -f "$EXPIRE_STATE_DIR/warn1h_$(client_pub "$1" | tr -c 'A-Za-z0-9\n' '_')"
+  ok "Срок $1: $(expire_fmt "$2")"
+}
+
+# Снять срок; заблокированный клиент получает прежний адрес.
+client_expire_clear() {
+  client_exists "$1" || { err "Клиента $1 нет"; return 1; }
+  py expire-clear "$SERVER_CONF" "$1" "$EXPIRE_SUSPEND_IP" >/dev/null || return 1
+  _expire_apply
+  ok "$1 — бессрочный"
+}
+
+clients_purge_blocked() {
+  local pub n=0
+  while IFS= read -r pub; do client_delete "$pub" && n=$((n + 1)); done \
+    < <(clients_tsv | awk -F'\t' '$5 != "" {print $2}')
+  ok "Удалено заблокированных: $n"
+}
+
+# Архив всех конфигов → путь в EXPORT_PATH.
+EXPORT_PATH=""
+clients_export() {
+  local files=() stamp
+  mapfile -t files < <(client_files)
+  (( ${#files[@]} )) || { warn "Конфигов клиентов нет"; return 1; }
+  stamp=$(date +%Y%m%d_%H%M%S)
+  if command -v zip &>/dev/null || apt_install zip >/dev/null 2>&1; then
+    EXPORT_PATH="$CLIENT_DIR/awg_clients_$stamp.zip"
+    zip -j -q "$EXPORT_PATH" "${files[@]}" || return 1
+  else
+    EXPORT_PATH="$CLIENT_DIR/awg_clients_$stamp.tar.gz"
+    tar -czf "$EXPORT_PATH" -C "$CLIENT_DIR" "${files[@]##*/}" || return 1
+  fi
+  chmod 600 "$EXPORT_PATH"
+  ok "Архив: $EXPORT_PATH (${#files[@]} конфигов)"
+}
+
 # Имя для нового клиента: валидное и не занятое ни пиром, ни файлом.
 _name_free() { valid_client_name "$1" && ! client_exists "$1" && [[ ! -e "$CLIENT_DIR/${1}_awg2.conf" && ! -e "$CLIENT_DIR/${1}_awg3.conf" ]]; }
 
@@ -84,10 +179,7 @@ _client_mimicry() {
   profile=$(server_profile)
   I_LINES=(); MIMICRY=none
   case "$profile" in
-    lite) gen_chain_from_server ;;
-    standard)
-      MIMICRY=quic; scan_domains quic "${QUIC_DOMAINS[@]}"
-      gen_chain quic "${SCAN_OK[0]:-}" --only-i1 || MIMICRY=none ;;
+    lite|standard) mimicry_from_spec server ;;
     *)
       c=$(conf_marker AWG_MIMICRY)
       echo -e "  Мимикрия I1-I5:"
@@ -96,7 +188,7 @@ _client_mimicry() {
       echo -e "  ${C}3)${N} Без I1-I5"
       read_choice c "${C}  Выбор [1-3] (Enter = 1): ${N}" 1 3 1
       case "$c" in
-        1) gen_chain_from_server ;;
+        1) mimicry_from_spec server ;;
         2) choose_and_gen_chain || { I_LINES=(); MIMICRY=none; } ;;
       esac ;;
   esac
@@ -137,18 +229,6 @@ do_add_client() {
   if [[ -n "$expire" ]]; then info "Срок действия: $(expire_fmt "$expire")"; fi
 }
 
-# Неинтерактивно (для скриптов и бота): мимикрия и MTU — как у сервера.
-do_add_client_cli() {
-  local name="$1" addr
-  server_exists || { err "Сервер не создан"; return 1; }
-  _name_free "$name" || { err "Имя $name занято или недопустимо"; return 1; }
-  addr=$(free_client_ip) || { err "В подсети нет свободных адресов"; return 1; }
-  I_LINES=(); MIMICRY=none
-  [[ "$(server_profile)" != standard ]] && gen_chain_from_server
-  client_add "$name" "$addr" "1.1.1.1, 1.0.0.1" "$(conf_iface_get MTU)" || return 1
-  ok "Клиент $name добавлен"
-  echo "Файл конфигурации: $(client_file "$name")"
-}
 
 do_bulk_add() {
   server_exists || { err "Сервер не создан"; return 1; }
@@ -239,21 +319,17 @@ do_delete_client() {
 
 do_rename_client() {
   server_exists || { err "Сервер не создан"; return 1; }
-  local old pub new f
+  local old new
   _pick_client || return 0
-  old="${CHOSEN%%$'\t'*}"; pub="${CHOSEN#*$'\t'}"
+  old="${CHOSEN%%$'\t'*}"
+  [[ -n "$old" ]] || { warn "У клиента нет имени — переименовать можно только именованного"; return 1; }
   while true; do
-    read_line new "${C}  Новое имя для ${old:-без имени}: ${N}"
+    read_line new "${C}  Новое имя для $old: ${N}"
     [[ -z "$new" || "$new" == "$old" ]] && return 0
     _name_free "$new" && break
     warn "Имя недопустимо или занято"
   done
-  py peer-rename "$SERVER_CONF" "$pub" "$new" || return 1
-  if [[ -n "$old" ]]; then
-    f=$(client_file "$old")
-    [[ -f "$f" ]] && mv -f "$f" "$CLIENT_DIR/${new}$(client_suffix).conf"
-  fi
-  ok "Переименован: ${old:-без имени} → $new"
+  client_rename "$old" "$new"
 }
 
 _pick_client_file() {  # → путь в CHOSEN
@@ -299,20 +375,8 @@ do_list_clients() {
 }
 
 do_export_clients() {
-  local files=() out stamp
-  mapfile -t files < <(client_files)
-  (( ${#files[@]} )) || { warn "Конфигов клиентов нет"; return 0; }
-  stamp=$(date +%Y%m%d_%H%M%S)
-  if command -v zip &>/dev/null || apt_install zip >/dev/null 2>&1; then
-    out="$CLIENT_DIR/awg_clients_$stamp.zip"
-    zip -j -q "$out" "${files[@]}" || return 1
-  else
-    out="$CLIENT_DIR/awg_clients_$stamp.tar.gz"
-    tar -czf "$out" -C "$CLIENT_DIR" "${files[@]##*/}" || return 1
-  fi
-  chmod 600 "$out"
-  ok "Архив: $out (${#files[@]} конфигов)"
-  info "Скачать: scp root@$(public_ip_cached):$out ."
+  clients_export || return 0
+  info "Скачать: scp root@$(public_ip_cached):$EXPORT_PATH ."
 }
 
 # Смена мимикрии у выданного клиента: меняются только его I1-I5.
@@ -327,13 +391,9 @@ do_change_mimicry() {
     OBF_LEVEL=2
     choose_mimicry || return 0
     choose_cps_domain
-    gen_chain "$MIMICRY" "$CPS_DOMAIN" --only-i1 || { warn "Генератор не выдал пакетов"; return 1; }
+    mimicry_generate
   fi
-  cp -a "$f" "$f.bak.$(date +%s)"
-  i_lines_block | py i-replace "$f" || return 1
-  peer_meta_set "$name" mimicry "$(mimicry_tag)" || warn "Метку в awg0.conf обновить не удалось"
-  ok "Мимикрия: $(mimicry_tag), пакетов: ${#I_LINES[@]}"
-  warn "Клиенту нужен новый конфиг"
+  _client_write_mimicry "$name" || return 1
   share_config "$f"
 }
 

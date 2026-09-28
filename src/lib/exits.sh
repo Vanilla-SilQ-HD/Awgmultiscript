@@ -181,12 +181,9 @@ exits_down() {
 
 # ── Ноды ──────────────────────────────────────────────────
 exits_add() {
-  local name c tmp path f i
+  local name c tmp path
   read_line name "${C}  Имя ноды (латиница/цифры/_, до 6 символов): ${N}"
   [[ -n "$name" ]] || return 0
-  [[ "$name" =~ ^[A-Za-z0-9_]{1,6}$ ]] || { err "Имя интерфейса awg-exit-<имя> — не длиннее 15 символов"; return 1; }
-  f="$EXITS_DIR/awg-exit-$name.conf"
-  [[ -f "$f" ]] && { err "Нода $name уже есть"; return 1; }
   mktmp tmp || return 1
   echo -e "  ${C}1)${N} Вставить текст конфига"
   echo -e "  ${C}2)${N} Путь к файлу .conf"
@@ -199,6 +196,19 @@ exits_add() {
     [[ -f "$path" ]] || { err "Файла нет: $path"; return 1; }
     cat "$path" > "$tmp"
   fi
+  exits_node_add "$name" "$tmp" || return 1
+  if ask_yes "  Сделать её основным выходом? [Y/n]: " y; then exits_balance single "$name"; else exits_reapply; fi
+}
+
+# exits_node_add ИМЯ ФАЙЛ — поставить ноду из клиентского конфига AWG/WG.
+exits_node_add() {
+  local name="$1" tmp f i
+  [[ "$name" =~ ^[A-Za-z0-9_]{1,6}$ ]] || { err "Имя ноды: латиница, цифры, _, до 6 символов"; return 1; }
+  f="$EXITS_DIR/awg-exit-$name.conf"
+  [[ -f "$f" ]] && { err "Нода $name уже есть"; return 1; }
+  [[ -s "$2" ]] || { err "Пустой конфиг"; return 1; }
+  mktmp tmp || return 1
+  cat "$2" > "$tmp"
   grep -qiE '^\s*\[Interface\]' "$tmp" || { err "Нет секции [Interface]"; return 1; }
   grep -qiE '^\s*Endpoint\s*=' "$tmp" || { err "Нет Endpoint — это не клиентский конфиг"; return 1; }
   # Table = off (иначе через ноду уйдёт весь сервер) и без DNS (awg-quick
@@ -216,8 +226,6 @@ exits_add() {
     return 1
   fi
   ok "Нода $name поднята"
-  ask_yes "  Сделать её основным выходом? [Y/n]: " y && exits_state_set balancer single single_exit "$name"
-  exits_reapply
 }
 
 _exits_node_line() {  # нода → строка статуса
@@ -260,6 +268,12 @@ exits_delete() {
   (( c )) || return 0
   n="${nodes[$((c - 1))]}"
   ask_yes "  Удалить ноду $n? [y/N]: " n || return 0
+  exits_node_del "$n"
+}
+
+exits_node_del() {  # имя
+  local n="$1"
+  [[ -f "$EXITS_DIR/awg-exit-$n.conf" ]] || { err "Ноды $n нет"; return 1; }
   exits_is_up && exits_routing_stop
   systemctl disable --now "awg-quick@awg-exit-$n" &>/dev/null || true
   rm -f "$EXITS_DIR/awg-exit-$n.conf"
@@ -284,13 +298,42 @@ exits_balancer_menu() {
   case "$c" in
     1) for i in "${!up[@]}"; do echo -e "  ${C}$((i + 1)))${N} ${up[$i]}"; done
        read_choice i "${C}  Нода: ${N}" 1 "${#up[@]}"
-       exits_state_set balancer single single_exit "${up[$((i - 1))]}" ;;
-    2) (( ${#up[@]} > 1 )) || return 0
-       exits_state_set balancer ecmp ;;
-    *) return 0 ;;
+       exits_balance single "${up[$((i - 1))]}" ;;
+    2) (( ${#up[@]} > 1 )) && exits_balance ecmp ;;
   esac
-  ok "Балансировка сохранена"
+  return 0
+}
+
+# exits_balance single НОДА | ecmp
+exits_balance() {
+  case "$1" in
+    single) [[ -f "$EXITS_DIR/awg-exit-${2:-}.conf" ]] || { err "Ноды ${2:-?} нет"; return 1; }
+            exits_state_set balancer single single_exit "$2" ;;
+    ecmp) (( $(exits_up_nodes | grep -c . || true) > 1 )) || { err "Для ECMP нужны две поднятые ноды"; return 1; }
+          exits_state_set balancer ecmp ;;
+    *) err "Балансировка: single НОДА | ecmp"; return 1 ;;
+  esac
+  ok "Балансировка: $1${2:+ $2}"
   exits_reapply
+}
+
+# Клиент и exit-ноды: exits_client ИМЯ off|shared|НОДА. Переводит в выборочный режим.
+exits_client() {
+  local ip
+  ip=$(clients_name_ip | awk -F'|' -v n="$1" '$1 == n {print $2; exit}')
+  [[ -n "$ip" ]] || { err "Клиента $1 нет"; return 1; }
+  if [[ "$(exits_state_get mode)" != peers ]]; then
+    peers_seed "$EXITS_PEERS"
+    exits_state_set mode peers
+  fi
+  case "$2" in
+    off) peers_del "$EXITS_PEERS" "$ip" ;;
+    shared) peers_add "$EXITS_PEERS" "$ip" ;;
+    *) [[ -f "$EXITS_DIR/awg-exit-$2.conf" ]] || { err "Ноды $2 нет"; return 1; }
+       peers_add "$EXITS_PEERS" "$ip" "$ip|$2" ;;
+  esac
+  exits_reapply
+  ok "$1: ${2/shared/общий выход}"
 }
 
 exits_toggle() {

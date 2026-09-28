@@ -98,7 +98,7 @@ _expire_apply() {
 do_expire_menu() {
   server_exists || { err "Сервер не создан"; return 1; }
   expire_install
-  local c name pub ts now rows=() row n=0 exp orig
+  local c name pub ts now rows=() n=0 exp orig
   while true; do
     echo ""
     hdr "Срок действия клиентов"
@@ -122,20 +122,13 @@ do_expire_menu() {
          name="${CHOSEN%%$'\t'*}"
          [[ -n "$name" ]] || { warn "У клиента нет имени"; continue; }
          ts=$(_ask_expire)
-         [[ -n "$ts" ]] || continue
-         (( ts > now + 60 )) || { warn "Срок должен быть в будущем"; continue; }
-         py expire-set "$SERVER_CONF" "$name" "$ts" && ok "Срок $name: $(expire_fmt "$ts")"
-         pub="${CHOSEN#*$'\t'}"
-         rm -f "$EXPIRE_STATE_DIR/warn1h_${pub//[^A-Za-z0-9]/_}" ;;
+         [[ -n "$ts" ]] && { client_expire_set "$name" "$ts" || true; } ;;
       2) _pick_client || continue
-         name="${CHOSEN%%$'\t'*}"
-         py expire-clear "$SERVER_CONF" "$name" "$EXPIRE_SUSPEND_IP" >/dev/null \
-           && { _expire_apply; ok "$name — бессрочный"; } ;;
-      3) mapfile -t rows < <(clients_tsv | awk -F'\t' '$5 != "" {print $2 "\t" $1}')
+         client_expire_clear "${CHOSEN%%$'\t'*}" || true ;;
+      3) mapfile -t rows < <(clients_tsv | awk -F'\t' '$5 != "" {print $1}')
          (( ${#rows[@]} )) || { info "Заблокированных нет"; continue; }
-         warn "Будут удалены навсегда: $(printf '%s\n' "${rows[@]}" | cut -f2 | tr '\n' ' ')"
-         read_confirm "${R}  Подтверди (введи yes): ${N}" || continue
-         for row in "${rows[@]}"; do client_delete "${row%%$'\t'*}" || true; done ;;
+         warn "Будут удалены навсегда: ${rows[*]}"
+         read_confirm "${R}  Подтверди (введи yes): ${N}" && clients_purge_blocked ;;
       0) return 0 ;;
     esac
   done

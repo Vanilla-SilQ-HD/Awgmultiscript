@@ -13,6 +13,7 @@ awg2 $VERSION — AmneziaWG 2.0 / 3.1 для Ubuntu 24.04+ и Debian 12+
   awg2 --xray-ru-update         обновить РФ-базы Xray
   awg2 --wgobf add|del|bundle ИМЯ | rotate-key | restart
   awg2 --status                 сводка состояния
+  awg2 api КОМАНДА              JSON-интерфейс для Telegram-бота (awg2 api help)
   awg2 --version
 
 Переменные: AUTOINSTALL=1 — то же, что --auto; AWG2_UPDATE_CHANNEL=beta — разовый запуск на бета-канале.
@@ -61,6 +62,8 @@ main() {
   log_init
   trap _cleanup_tmp EXIT
   trap _on_interrupt INT TERM
+  # Машинный интерфейс бота: весь вывод — внутри одного JSON-ответа
+  [[ "${1:-}" == api ]] && { shift; api_main "$@"; exit; }
   update_channel_init
   base_deps
   helpers_refresh || true
@@ -73,7 +76,7 @@ main() {
     --add-client)
       [[ -n "${2:-}" ]] || { err "Использование: awg2 --add-client ИМЯ"; exit 1; }
       AUTO_MODE=1
-      do_add_client_cli "$2" && exit 0 || exit 1 ;;
+      client_create "$2" && exit 0 || exit 1 ;;
     --tunnel) AUTO_MODE=1; tunnel_cli "${2:-}" "${3:-}" && exit 0 || exit 1 ;;
     --xray-balancer)
       [[ -n "${2:-}" ]] || { err "Использование: awg2 --xray-balancer random|roundRobin|leastPing|leastLoad|off"; exit 1; }

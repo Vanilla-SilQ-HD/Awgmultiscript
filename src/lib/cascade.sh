@@ -101,13 +101,13 @@ _cascade_port_conflict() {  # proto порт → причина в stdout
 }
 
 cascade_add() {
-  local mode="$1" proto p protos in out dst comment why added=0
+  local mode="$1" p protos in out dst comment
   echo -e "  ${D}Клиент подключается к этому серверу, трафик уходит на конечный.${N}"
   echo -e "  ${C}1)${N} UDP"
   echo -e "  ${C}2)${N} TCP"
   echo -e "  ${C}3)${N} UDP + TCP"
   read_choice p "${C}  Протокол [1-3] (Enter = 1): ${N}" 1 3 1
-  case "$p" in 1) protos=(udp) ;; 2) protos=(tcp) ;; 3) protos=(udp tcp) ;; esac
+  case "$p" in 1) protos=udp ;; 2) protos=tcp ;; 3) protos=both ;; esac
   while true; do
     read_line dst "${C}  IP конечного сервера: ${N}"
     dst="${dst// /}"; [[ -z "$dst" ]] && return 0
@@ -128,7 +128,15 @@ cascade_add() {
     done
   fi
   read_line comment "${C}  Комментарий (Enter — без него): ${N}"
-  comment="${comment//|/ }"
+  cascade_rule_add "$protos" "$in" "$dst" "$out" "$comment"
+}
+
+# cascade_rule_add udp|tcp|both ВХОД ЦЕЛЬ ВЫХОД [комментарий]
+cascade_rule_add() {
+  local protos=() proto in="$2" dst="$3" out="$4" comment="${5//|/ }" why added=0
+  case "$1" in udp|tcp) protos=("$1") ;; both) protos=(udp tcp) ;; *) err "Протокол: udp | tcp | both"; return 1 ;; esac
+  valid_port "$in" && valid_port "$out" || { err "Порт 1-65535"; return 1; }
+  valid_ip "$dst" && ! ip_is_private "$dst" || { err "Нужен публичный IPv4, например 5.6.7.8"; return 1; }
   ip_forward_enable
   mkdir -p "$CASCADE_DIR"
   for proto in "${protos[@]}"; do
@@ -162,12 +170,19 @@ cascade_list() {
 }
 
 cascade_delete() {
-  local rows=() c p in dst out
+  local rows=() c p in
   cascade_list || return 0
   mapfile -t rows < <(cascade_rules)
   read_choice c "${C}  Номер для удаления (0 — отмена): ${N}" 0 "${#rows[@]}" 0
   (( c == 0 )) && return 0
-  IFS='|' read -r p in dst out _ <<< "${rows[$((c - 1))]}"
+  IFS='|' read -r p in _ <<< "${rows[$((c - 1))]}"
+  cascade_rule_del "$p" "$in"
+}
+
+cascade_rule_del() {  # proto вход
+  local p="$1" in="$2" dst out
+  IFS='|' read -r _ _ dst out _ < <(grep -E "^${p}\|${in}\|" "$CASCADE_RULES" 2>/dev/null)
+  [[ -n "$dst" ]] || { err "Правила ${p^^} $in нет"; return 1; }
   cascade_unapply "$p" "$in"
   grep -vE "^${p}\|${in}\|" "$CASCADE_RULES" > "$CASCADE_RULES.tmp" || true
   mv -f "$CASCADE_RULES.tmp" "$CASCADE_RULES"
@@ -186,6 +201,10 @@ cascade_reapply() {
 cascade_flush() {
   (( $(cascade_count) )) || { info "Каскад пуст"; return 0; }
   read_confirm "${R}  Удалить все правила каскада? (введи yes): ${N}" || return 0
+  cascade_clear
+}
+
+cascade_clear() {
   cascade_flush_rules
   _cascade_ufw_legacy_cleanup
   : > "$CASCADE_RULES"

@@ -8,9 +8,10 @@ OS_ID="" OS_VER="" OS_CODENAME="" OS_LABEL=""
 os_detect() {
   [[ -n "$OS_ID" ]] && return 0
   [[ -r /etc/os-release ]] || return 1
-  OS_ID=$(. /etc/os-release && echo "${ID:-}")
-  OS_VER=$(. /etc/os-release && echo "${VERSION_ID:-}")
-  OS_CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-}")
+  # В os-release свой VERSION — читаем его только в подоболочке
+  # shellcheck source=/dev/null
+  IFS='|' read -r OS_ID OS_VER OS_CODENAME < <(. /etc/os-release \
+    && printf '%s|%s|%s\n' "${ID:-}" "${VERSION_ID:-}" "${VERSION_CODENAME:-}")
   OS_LABEL="${OS_ID^} ${OS_VER:-${OS_CODENAME:-?}}"
   [[ -n "$OS_CODENAME" && -n "$OS_VER" ]] && OS_LABEL+=" ($OS_CODENAME)"
   return 0

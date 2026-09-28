@@ -2,16 +2,21 @@
 # сервера, подсказка для проверки DPI со стороны клиента, сводка состояния.
 
 do_check_domains() {
-  local c ru=0 pool kind d r ok=0 total=0 dir
+  local c
+  echo -e "  ${C}1)${N} Мир / Европа"
+  echo -e "  ${C}2)${N} Россия"
+  read_choice c "${C}  Регион [1-2] (Enter = 1): ${N}" 1 2 1
+  if [[ "$c" == 2 ]]; then domains_check ru; else domains_check world; fi
+}
+
+domains_check() {  # world|ru
+  local ru=0 pool kind d r ok=0 total=0 dir
   local -a pools=(
     "tls|TLS / HTTPS"          "quic|QUIC / HTTP/3"
     "sip|SIP / VoIP"           "stun|STUN / WebRTC"
     "cps|Российские сервисы (CPS)"
   )
-  echo -e "  ${C}1)${N} Мир / Европа"
-  echo -e "  ${C}2)${N} Россия"
-  read_choice c "${C}  Регион [1-2] (Enter = 1): ${N}" 1 2 1
-  [[ "$c" == 2 ]] && ru=1
+  [[ "${1:-world}" == ru ]] && ru=1
   mktmp dir -d || return 1
   info "Проверяю доступность с этого сервера..."
   for pool in "${pools[@]}"; do
@@ -53,24 +58,38 @@ _diag_pool() {  # вид ru(0|1)
 
 # Захват первых пакетов переподключившегося клиента и разбор: видны ли
 # пакеты мимикрии и под какой протокол они похожи.
-do_sniff_test() {
-  local port dev eps=() names=() i c pub name ep verdict pcap line tag msg extra
-  server_exists || { err "Сервер не создан"; return 1; }
-  need_cmds tcpdump:tcpdump || return 1
-  mimicry_module_warnings
-  port=$(server_port)
-  dev=$(uplink_iface) || { err "Не определился внешний интерфейс"; return 1; }
+# «имя<TAB>ip:порт» клиентов, у которых есть endpoint (были на связи).
+_sniff_candidates() {
+  local pub ep name
   while read -r pub ep; do
     [[ "$ep" == "(none)" ]] && continue
     name=$(clients_tsv | awk -F'\t' -v k="$pub" '$2 == k {print $1; exit}')
-    eps+=("$ep"); names+=("${name:-?}")
+    printf '%s\t%s\n' "${name:-?}" "$ep"
   done < <(awg show "$AWG_IF" endpoints 2>/dev/null)
-  (( ${#eps[@]} )) || { warn "Нет подключённых клиентов — подключись и вернись сюда"; return 0; }
-  for i in "${!eps[@]}"; do echo -e "  ${C}$((i + 1)))${N} ${names[$i]} ${D}${eps[$i]}${N}"; done
-  read_choice c "${C}  Клиент (Enter = 1): ${N}" 1 "${#eps[@]}" 1
-  ep="${eps[$((c - 1))]}"
+}
+
+do_sniff_test() {
+  local rows=() i c
+  server_exists || { err "Сервер не создан"; return 1; }
+  mapfile -t rows < <(_sniff_candidates)
+  (( ${#rows[@]} )) || { warn "Нет подключённых клиентов — подключись и вернись сюда"; return 0; }
+  for i in "${!rows[@]}"; do echo -e "  ${C}$((i + 1)))${N} ${rows[$i]%%$'\t'*} ${D}${rows[$i]#*$'\t'}${N}"; done
+  read_choice c "${C}  Клиент (Enter = 1): ${N}" 1 "${#rows[@]}" 1
   echo -e "  ${Y}На клиенте: отключись, подожди 3 секунды и подключись снова${N}"
   pause
+  sniff_client "${rows[$((c - 1))]%%$'\t'*}"
+}
+
+# Захват первых пакетов переподключившегося клиента (20 с) и разбор.
+sniff_client() {  # имя
+  local port dev ep verdict pcap tag msg extra
+  server_exists || { err "Сервер не создан"; return 1; }
+  need_cmds tcpdump:tcpdump || return 1
+  ep=$(_sniff_candidates | awk -F'\t' -v n="$1" '$1 == n {print $2; exit}')
+  [[ -n "$ep" ]] || { err "Клиент $1 ещё не подключался — адреса нет"; return 1; }
+  mimicry_module_warnings
+  port=$(server_port)
+  dev=$(uplink_iface) || { err "Не определился внешний интерфейс"; return 1; }
   mktmp pcap || return 1
   info "Слушаю 20 секунд..."
   timeout 20 tcpdump -i "$dev" -nn -c 30 "udp port $port and src host ${ep%:*}" -w "$pcap" &>/dev/null || true

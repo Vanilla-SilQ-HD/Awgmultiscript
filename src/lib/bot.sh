@@ -92,26 +92,43 @@ bot_proxy_menu() {
          [[ -n "$url" ]] || return 0
        fi
        bot_proxy_valid "$url" || { err "Нужна схема: ${BOT_PROXY_SCHEMES// /, }"; return 1; }
-       if bot_proxy_probe "$url"; then ok "Через прокси Telegram отвечает"
-       else ask_yes "  Telegram через него не отвечает. Всё равно сохранить? [y/N]: " n || return 0; fi
-       # На давно установленном боте в venv может не быть нужных модулей
-       if [[ "$url" == socks* && -x "$BOT_VENV_PY" ]] && ! "$BOT_VENV_PY" -c 'import aiohttp_socks' 2>/dev/null; then
-         "$BOT_DIR/venv/bin/pip" install -q aiohttp-socks &>/dev/null || warn "Не поставился aiohttp-socks — обнови бота"
-       fi
-       if [[ "$url" == iface://* && -x "$BOT_VENV_PY" ]] && ! "$BOT_VENV_PY" -c \
-          'import inspect,aiohttp; assert "socket_factory" in inspect.signature(aiohttp.TCPConnector).parameters' 2>/dev/null; then
-         "$BOT_DIR/venv/bin/pip" install -q -U aiogram aiohttp &>/dev/null || warn "Не обновился aiohttp (нужен 3.12+) — обнови бота"
-       fi
-       _bot_proxy_write "$url" || return 1
-       ok "Прокси: $(bot_proxy_mask "$url")"
-       [[ "$url" == iface://* || "$url" == *127.0.0.1* ]] && info "Туннель лёг — бот пойдёт напрямую; поднял — systemctl restart awg-bot" ;;
+       if bot_proxy_probe "$url"; then bot_proxy_set "$url" || return 1
+       else ask_yes "  Telegram через него не отвечает. Всё равно сохранить? [y/N]: " n || return 0
+            bot_proxy_set "$url" force || return 1; fi ;;
     2) [[ -n "$cur" ]] || { info "Прокси не задан"; return 0; }
        if bot_proxy_probe "$cur"; then ok "Telegram отвечает"; else err "Через прокси Telegram не отвечает"; fi
        return 0 ;;
     3) [[ -n "$cur" ]] || return 0
-       _bot_proxy_write "" && ok "Прокси убран" ;;
-    *) return 0 ;;
+       bot_proxy_set "" ;;
   esac
+  return 0
+}
+
+# bot_proxy_set URL [force] — пусто убирает прокси. Без force сохраняет,
+# только если Telegram через прокси отвечает. Бот перезапускается.
+bot_proxy_set() {
+  local url="${1//[[:space:]]/}"
+  if [[ -n "$url" ]]; then
+    bot_proxy_valid "$url" || { err "Нужна схема: ${BOT_PROXY_SCHEMES// /, }"; return 1; }
+    if bot_proxy_probe "$url"; then ok "Через прокси Telegram отвечает"
+    elif [[ "${2:-}" != force ]]; then err "Через $(bot_proxy_mask "$url") Telegram не отвечает — не сохраняю"; return 1
+    else warn "Через прокси Telegram не отвечает — сохраняю по требованию"; fi
+    # На давно установленном боте в venv может не быть нужных модулей
+    if [[ "$url" == socks* && -x "$BOT_VENV_PY" ]] && ! "$BOT_VENV_PY" -c 'import aiohttp_socks' 2>/dev/null; then
+      "$BOT_DIR/venv/bin/pip" install -q aiohttp-socks &>/dev/null || warn "Не поставился aiohttp-socks — обнови бота"
+    fi
+    if [[ "$url" == iface://* && -x "$BOT_VENV_PY" ]] && ! "$BOT_VENV_PY" -c \
+       'import inspect,aiohttp; assert "socket_factory" in inspect.signature(aiohttp.TCPConnector).parameters' 2>/dev/null; then
+      "$BOT_DIR/venv/bin/pip" install -q -U aiogram aiohttp &>/dev/null || warn "Не обновился aiohttp (нужен 3.12+) — обнови бота"
+    fi
+  fi
+  _bot_proxy_write "$url" || return 1
+  if [[ -n "$url" ]]; then
+    ok "Прокси: $(bot_proxy_mask "$url")"
+    [[ "$url" == iface://* || "$url" == *127.0.0.1* ]] && info "Туннель лёг — бот пойдёт напрямую; поднял — systemctl restart awg-bot"
+  else
+    ok "Прокси убран"
+  fi
   unit_active "$BOT_UNIT" && systemctl restart "$BOT_UNIT" && ok "Бот перезапущен"
   return 0
 }

@@ -27,7 +27,11 @@ auto_backup() {  # причина
   info "Авто-бэкап: ${arch##*/}"
 }
 
-do_backup() {
+do_backup() { backup_create; }
+
+# Полный бэкап → каталог в BACKUP_PATH; с «archive» ещё и .tar.gz рядом (для бота).
+BACKUP_PATH=""
+backup_create() {
   local ts dir n=0 f
   ts=$(date +%Y%m%d_%H%M%S)
   dir="$BACKUP_DIR/awg2_backup_$ts"
@@ -65,13 +69,39 @@ do_backup() {
     echo "hostname=$(hostname)"
   } > "$dir/backup_meta.txt"
   chmod -R go-rwx "$dir"
-  success_box "Бэкап: $dir"
-  log_info "бэкап: $dir"
+  BACKUP_PATH="$dir"
+  if [[ "${1:-}" == archive ]]; then
+    tar -czf "$dir.tar.gz" -C "$BACKUP_DIR" "${dir##*/}" && chmod 600 "$dir.tar.gz" && BACKUP_PATH="$dir.tar.gz"
+  fi
+  success_box "Бэкап: $BACKUP_PATH"
+  log_info "бэкап: $BACKUP_PATH"
 }
 
 _restore_list() {  # → строки «путь» (новые сверху)
-  find "$BACKUP_DIR" -maxdepth 1 \( -type d -name 'awg2_backup_*' -o -type f -name 'auto_*.tar.gz' \) \
+  find "$BACKUP_DIR" -maxdepth 1 \( -type d -name 'awg2_backup_*' -o -type f -name '*.tar.gz' \) \
     -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-
+}
+
+# Каталог с awg0.conf из любого бэкапа: каталог полного бэкапа, его архив,
+# авто-бэкап (пути от корня) или архив бота прежних версий (awg0.conf + clients/).
+RESTORE_SRC=""
+_restore_prepare() {
+  local src="$1" tmp d
+  RESTORE_SRC=""
+  if [[ -d "$src" ]]; then
+    [[ -f "$src/awg0.conf" ]] || { err "В бэкапе нет awg0.conf"; return 1; }
+    RESTORE_SRC="$src"; return 0
+  fi
+  [[ -f "$src" ]] || { err "Нет файла $src"; return 1; }
+  mktmp tmp -d || return 1
+  py safe-untar "$src" "$tmp/x" || { err "Архив не распаковался"; return 1; }
+  if [[ -f "$tmp/x/awg0.conf" ]]; then d="$tmp/x"
+  elif [[ -f "$tmp/x$SERVER_CONF" ]]; then d="$tmp/x"; cp -a "$tmp/x$SERVER_CONF" "$d/awg0.conf"
+  else d=$(find "$tmp/x" -mindepth 2 -maxdepth 2 -name awg0.conf -printf '%h\n' | head -1); fi
+  [[ -n "$d" && -f "$d/awg0.conf" ]] || { err "В архиве нет awg0.conf — это не бэкап awg2"; return 1; }
+  # Клиенты у разных форматов лежат по-разному — собираем рядом с awg0.conf
+  find "$tmp/x" -name '*_awg[23].conf' ! -path "$d/*_awg[23].conf" -exec cp -a {} "$d/" \;
+  RESTORE_SRC="$d"
 }
 
 _restore_awg_files() {  # каталог бэкапа
@@ -103,7 +133,6 @@ _restore_warp() {  # каталог бэкапа
 _restore_tunnels() {  # каталог бэкапа
   local arch="$1/tunnels.tar.gz" n
   [[ -f "$arch" ]] || return 0
-  ask_yes "  Восстановить настройки туннелей (Xray, exit-ноды, каскад, tun2socks, DNS)? [Y/n]: " y || return 0
   tar -xzf "$arch" -C / || { warn "Настройки туннелей не распаковались"; return 0; }
   rm -f "$XRAY_STATE"
   [[ -f "$EXITS_STATE" ]] && exits_state_set state inactive
@@ -113,40 +142,44 @@ _restore_tunnels() {  # каталог бэкапа
 }
 
 do_restore() {
-  local list=() i c src label name tmp port
-  command -v awg-quick &>/dev/null || { err "Нет awg-quick — сначала установи компоненты (Сервер → 1)"; return 1; }
+  local list=() i c src name opts=()
   mapfile -t list < <(_restore_list)
   (( ${#list[@]} )) || { err "Бэкапов нет в $BACKUP_DIR"; return 1; }
   for i in "${!list[@]}"; do
     name="${list[$i]##*/}"
     if [[ -d "${list[$i]}" ]]; then echo -e "  ${C}$((i + 1)))${N} $name ${D}(полный)${N}"
-    else echo -e "  ${C}$((i + 1)))${N} $name ${D}(авто: сервер и клиенты)${N}"; fi
+    else echo -e "  ${C}$((i + 1)))${N} $name"; fi
   done
   read_choice c "${C}  Бэкап (Enter = 1, 0 — отмена): ${N}" 0 "${#list[@]}" 1
   (( c )) || return 0
   src="${list[$((c - 1))]}"
-  label="${src##*/}"
-  if [[ -f "$src" ]]; then
-    mktmp tmp -d || return 1
-    tar -xzf "$src" -C "$tmp" || { err "Архив не распаковался"; return 1; }
-    mkdir -p "$tmp/flat"
-    cp -a "$tmp${SERVER_CONF}" "$tmp/flat/awg0.conf" 2>/dev/null || { err "В архиве нет awg0.conf"; return 1; }
-    find "$tmp" -path "$tmp/flat" -prune -o -name '*_awg[23].conf' -exec cp -a {} "$tmp/flat/" \;
-    src="$tmp/flat"
-  fi
-  [[ -f "$src/awg0.conf" ]] || { err "В бэкапе нет awg0.conf"; return 1; }
+  _restore_prepare "$src" || return 1
   read_confirm "${R}  Текущий сервер будет заменён. Продолжить? (введи yes): ${N}" || return 0
+  [[ -d "$RESTORE_SRC/wgobf/etc" ]] && ask_yes "  В бэкапе есть WG + обфускатор — восстановить? [Y/n]: " y && opts+=(wgobf)
+  [[ -f "$RESTORE_SRC/tunnels.tar.gz" ]] \
+    && ask_yes "  Восстановить настройки туннелей (Xray, exit-ноды, каскад, tun2socks, DNS)? [Y/n]: " y && opts+=(tunnels)
+  backup_restore "$src" "${opts[@]}"
+}
+
+# backup_restore БЭКАП [wgobf] [tunnels] — сервер и клиенты всегда, остальное по флагам.
+backup_restore() {
+  local src="$1" label="${1##*/}" port f
+  shift
+  command -v awg-quick &>/dev/null || { err "Нет awg-quick — сначала установи компоненты (Сервер → 1)"; return 1; }
+  _restore_prepare "$src" || return 1
+  src="$RESTORE_SRC"
   awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true
   [[ -f "$SERVER_CONF" ]] && cp -a "$SERVER_CONF" "$SERVER_CONF.pre_restore.$(date +%s)"
   _restore_awg_files "$src"
   client_files_sync_suffix
   ok "Сервер и клиенты: $(client_files | wc -l) кл."
   _restore_warp "$src"
-  if [[ -f "$src/wgobf/$WGOBF_IF.conf" && -d "$src/wgobf/etc" ]] \
-     && ask_yes "  В бэкапе есть WG + обфускатор — восстановить? [Y/n]: " y; then
-    wgobf_restore "$src/wgobf" || true
-  fi
-  _restore_tunnels "$src"
+  for f in "$@"; do
+    case "$f" in
+      wgobf) [[ -f "$src/wgobf/$WGOBF_IF.conf" && -d "$src/wgobf/etc" ]] && { wgobf_restore "$src/wgobf" || true; } ;;
+      tunnels) _restore_tunnels "$src" ;;
+    esac
+  done
   # Восстановление на чистый сервер: автозапуск, форвардинг и порт в UFW
   ip_forward_enable
   setup_autostart

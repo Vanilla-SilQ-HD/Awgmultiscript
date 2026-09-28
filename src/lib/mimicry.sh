@@ -34,6 +34,14 @@ TLS_DOMAINS_RU=(ya.ru vk.com mail.ru ozon.ru wildberries.ru rutube.ru gosuslugi.
 # символов всё работает, дальше `awg show` виснет, от ~3870 `awg set` падает.
 CPS_HARD_LIMIT=3500
 MIMICRY_PROFILES=(quic curl_quic dns stun webrtc sip ntp rtp ssdp)
+# Подписи профилей для меню и бота: «профиль|название|пояснение».
+MIMICRY_INFO=(
+  "quic|QUIC|Chrome, HTTP/3"          "curl_quic|cURL QUIC|curl, SNI в ECH"
+  "dns|DNS|короткий, плотный QR"      "stun|STUN|ICE-провайдер"
+  "webrtc|WebRTC|начало звонка"       "sip|SIP|открытый текст"
+  "ntp|NTP|48 байт, мало деталей"     "rtp|RTP|медиа без сигналинга"
+  "ssdp|SSDP|наружу ходит редко"
+)
 
 # Результат выбора — глобальные переменные (их же пишем метками в шапку):
 MIMICRY="none" OBF_LEVEL=1 CPS_BUDGET=0 CPS_DOMAIN="" I_LINES=()
@@ -124,20 +132,15 @@ choose_obf_level() {
 }
 
 choose_mimicry() {
-  local c def=1
+  local c def=1 i label hint
   MIMICRY=none
   (( OBF_LEVEL == 1 )) && return 0
   echo ""
   hdr "Профиль мимикрии"
-  echo -e "  ${G}1${N} QUIC       ${D}Chrome, HTTP/3${N}"
-  echo -e "  ${G}2${N} cURL QUIC  ${D}curl, SNI в ECH${N}"
-  echo -e "  ${G}3${N} DNS        ${D}короткий, плотный QR${N}"
-  echo -e "  ${G}4${N} STUN       ${D}ICE-провайдер${N}"
-  echo -e "  ${G}5${N} WebRTC     ${D}начало звонка${N}"
-  echo -e "  ${Y}6${N} SIP        ${D}открытый текст${N}"
-  echo -e "  ${Y}7${N} NTP        ${D}48 байт, мало деталей${N}"
-  echo -e "  ${Y}8${N} RTP        ${D}медиа без сигналинга${N}"
-  echo -e "  ${Y}9${N} SSDP       ${D}наружу ходит редко${N}"
+  for i in "${!MIMICRY_INFO[@]}"; do
+    IFS='|' read -r _ label hint <<< "${MIMICRY_INFO[$i]}"
+    printf "  %b%d%b %-10s %b%s%b\n" "$( (( i < 5 )) && echo "$G" || echo "$Y")" "$((i + 1))" "$N" "$label" "$D" "$hint" "$N"
+  done
   echo -e "  ${D}0 назад${N}"
   # Цепочка уходит залпом за микросекунды. Пять пакетов подряд естественны
   # для DNS (A/AAAA/HTTPS), RTP и ICE-сбора STUN; пять QUIC Initial в одну
@@ -157,12 +160,17 @@ choose_mimicry() {
 # Сколько пакетов профиля влезет в бюджет (минимум один — он выдаётся всегда).
 _cps_fit() { local n=$(( $1 / $2 )); (( n < 1 )) && n=1; (( n > 5 )) && n=5; echo "$n"; }
 
+# Бюджет по умолчанию: компактный, если в него влезают все пять пакетов.
+cps_default_budget() {
+  if (( $(_cps_fit 1500 "$(_cps_pkt_len "$1")") < 5 )); then echo "$CPS_HARD_LIMIT"; else echo 1500; fi
+}
+
 choose_cps_budget() {
   local pkt c def=1
   CPS_BUDGET=0
   (( OBF_LEVEL == 3 )) || return 0
   pkt=$(_cps_pkt_len "$MIMICRY")
-  (( $(_cps_fit 1500 "$pkt") < 5 )) && def=3
+  [[ "$(cps_default_budget "$MIMICRY")" == 1500 ]] || def=3
   echo ""
   hdr "Длина цепочки I1-I5"
   echo -e "  ${D}Профиль $MIMICRY: пакет ~$pkt символов, режется целыми пакетами.${N}"
@@ -176,7 +184,7 @@ choose_cps_budget() {
 # Один домен на всю цепочку: настоящий клиент за одно рукопожатие ходит на
 # один хост. Результат — CPS_DOMAIN (пусто = генератор возьмёт свой).
 choose_cps_domain() {
-  local c d kind pool=() ask_own=1
+  local c d ask_own=1
   CPS_DOMAIN=""
   if ! _profile_needs_domain "$MIMICRY"; then
     [[ "$MIMICRY" =~ ^(stun|webrtc)$ ]] || return 0
@@ -201,6 +209,12 @@ choose_cps_domain() {
       warn "Не похоже на домен"
     done
   fi
+  mimicry_pool_domain
+}
+
+# Случайный доступный домен из встроенного пула профиля → CPS_DOMAIN.
+mimicry_pool_domain() {
+  local kind pool=()
   case "$MIMICRY" in
     quic|curl_quic) kind=quic; pool=("${QUIC_DOMAINS[@]}")
                     [[ "$(server_region)" == ru ]] && pool+=("${QUIC_DOMAINS_RU[@]}") ;;
@@ -217,6 +231,18 @@ choose_cps_domain() {
   fi
 }
 
+# Генерация I1-I5 по выбранным MIMICRY / OBF_LEVEL / CPS_BUDGET / CPS_DOMAIN.
+mimicry_generate() {
+  I_LINES=()
+  if (( OBF_LEVEL == 1 )) || [[ "$MIMICRY" == none ]]; then MIMICRY=none; OBF_LEVEL=1; return 0; fi
+  info "Генерирую $MIMICRY${CPS_DOMAIN:+ ($CPS_DOMAIN)}..."
+  if (( OBF_LEVEL == 2 )); then gen_chain "$MIMICRY" "$CPS_DOMAIN" --only-i1
+  else gen_chain "$MIMICRY" "$CPS_DOMAIN"; fi || { warn "Генератор не выдал пакетов — без мимикрии"; MIMICRY=none; OBF_LEVEL=1; return 0; }
+  ok "Пакетов: ${#I_LINES[@]}, символов: $(i_chain_len)"
+  (( $(i_chain_len) > 2500 )) && warn "Цепочка длинная — в QR не влезет, выдавать файлом"
+  return 0
+}
+
 # Полный выбор мимикрии для профиля «Мощный» и генерация. 1 — отмена.
 choose_and_gen_chain() {
   I_LINES=()
@@ -225,12 +251,32 @@ choose_and_gen_chain() {
   (( OBF_LEVEL == 1 )) && return 0
   choose_cps_budget
   choose_cps_domain
-  info "Генерирую $MIMICRY${CPS_DOMAIN:+ ($CPS_DOMAIN)}..."
-  if (( OBF_LEVEL == 2 )); then gen_chain "$MIMICRY" "$CPS_DOMAIN" --only-i1
-  else gen_chain "$MIMICRY" "$CPS_DOMAIN"; fi || { warn "Генератор не выдал пакетов — без мимикрии"; MIMICRY=none; OBF_LEVEL=1; return 0; }
-  ok "Пакетов: ${#I_LINES[@]}, символов: $(i_chain_len)"
-  (( $(i_chain_len) > 2500 )) && warn "Цепочка длинная — в QR не влезет, выдавать файлом"
-  return 0
+  mimicry_generate
+}
+
+# Мимикрия по строке без вопросов (бот, командная строка):
+#   server — как у сервера (у «Standard» — свежий QUIC I1);  none — без I1-I5;
+#   ПРОФИЛЬ[:УРОВЕНЬ[:ДОМЕН[:БЮДЖЕТ]]] — уровень 2 (только I1) или 3 (цепочка),
+#   без домена — случайный доступный из пула, без бюджета — по профилю.
+mimicry_from_spec() {
+  local spec="${1:-server}" p lvl dom bud
+  I_LINES=()
+  case "$spec" in
+    none) MIMICRY=none; OBF_LEVEL=1; CPS_BUDGET=0; CPS_DOMAIN=""; return 0 ;;
+    server)
+      if [[ "$(server_profile)" == standard ]]; then spec="quic:2"
+      else gen_chain_from_server; return 0; fi ;;
+  esac
+  IFS=: read -r p lvl dom bud <<< "$spec"
+  [[ " ${MIMICRY_PROFILES[*]} " == *" $p "* ]] || { err "Профиль мимикрии: ${MIMICRY_PROFILES[*]}"; return 1; }
+  [[ -z "$dom" ]] || valid_domain "$dom" || { err "Недопустимый домен: $dom"; return 1; }
+  MIMICRY="$p"; OBF_LEVEL=3; CPS_DOMAIN="${dom,,}"; CPS_BUDGET=0
+  [[ "$lvl" == 2 ]] && OBF_LEVEL=2
+  if (( OBF_LEVEL == 3 )); then
+    if [[ "$bud" =~ ^[0-9]+$ ]] && (( bud > 0 )); then CPS_BUDGET=$bud; else CPS_BUDGET=$(cps_default_budget "$p"); fi
+  fi
+  [[ -z "$CPS_DOMAIN" ]] && _profile_needs_domain "$p" && mimicry_pool_domain
+  mimicry_generate
 }
 
 # Метка профиля выданного клиента (пишется в его блок [Peer]).

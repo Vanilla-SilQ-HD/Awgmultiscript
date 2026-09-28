@@ -181,15 +181,18 @@ _dns_wait_ready() {
   return 1
 }
 
-dns_install() {
+dns_install() {  # [force] — включить поверх стороннего DNS-сервиса
   local busy
   server_exists && iface_up || { err "Сначала создай и запусти сервер"; return 1; }
   # Сторонний DNS на 53/853 (Pi-hole, Unbound, bind) — перехват уведёт клиентов мимо него
   busy=$(ss -Htulpn 2>/dev/null | awk '$5 ~ /:(53|853)$/' | grep -vE '127\.0\.0\.5[34]|127\.0\.2\.1|127\.0\.0\.1' | head -3 || true)
-  if [[ -n "$busy" ]]; then
+  if [[ -n "$busy" && "${1:-}" != force ]]; then
     warn "На сервере уже работает DNS-сервис:"
     sed 's/^/    /' <<< "$busy"
-    ask_yes "  Всё равно включить перехват? [y/N]: " n || return 0
+    if ! ask_yes "  Всё равно включить перехват? [y/N]: " n; then
+      (( AUTO_MODE )) && { err "Порт 53/853 занят другим DNS — перехват не включён"; return 1; }
+      return 0
+    fi
   fi
   need_cmds dnscrypt-proxy:dnscrypt-proxy dig:dnsutils || return 1
   if [[ -f "$DNS_PROXY_CONF" && ! -f "$DNS_PROXY_BACKUP_CONF" ]]; then
@@ -246,7 +249,7 @@ dns_status() {
 }
 
 dns_change_upstream() {
-  local c i names="" manual nofilter=true toml n
+  local c i names="" manual
   [[ -f "$DNS_PROXY_CONF" ]] || { err "Сначала включи шифрованный DNS (пункт 1)"; return 1; }
   for i in "${!DNS_PRESETS[@]}"; do echo -e "  ${C}$((i + 1)))${N} ${DNS_PRESETS[$i]#*|}"; done
   echo -e "  ${C}$(( ${#DNS_PRESETS[@]} + 1 )))${N} Вручную ${D}(имена из public-resolvers.md)${N}"
@@ -258,13 +261,19 @@ dns_change_upstream() {
     echo -e "  ${D}Список: https://github.com/DNSCrypt/dnscrypt-resolvers/blob/master/v3/public-resolvers.md${N}"
     read_line manual "${C}  Резолверы через запятую: ${N}"
     [[ -n "$manual" ]] || return 0
-    [[ "$manual" =~ ^[A-Za-z0-9_,\ -]+$ ]] || { err "Допустимы латиница, цифры, дефис и запятая"; return 1; }
-    names="${manual//,/ }"
+    names="$manual"
   fi
+  dns_set_upstream "$names"
+}
+
+# Резолверы dnscrypt-proxy по именам из public-resolvers.md (через пробел или запятую).
+dns_set_upstream() {
+  local names="${1//,/ }" nofilter=true toml="" n
+  [[ -f "$DNS_PROXY_CONF" ]] || { err "Шифрованный DNS не настроен"; return 1; }
+  [[ "$names" =~ ^[A-Za-z0-9_\ -]+$ && -n "${names// /}" ]] || { err "Допустимы латиница, цифры, дефис и запятая"; return 1; }
   # Фильтрующий резолвер при require_nofilter=true dnscrypt-proxy молча
   # отбрасывает — и остаётся без серверов вообще.
   [[ " $names " == *safe* || " $names " == *filter* || " $names " == *family* || " $names " == *adguard* ]] && nofilter=false
-  toml=""
   for n in $names; do toml+="${toml:+, }'$n'"; done
   sed -i "s|^server_names[[:space:]]*=.*|server_names = [$toml]|; s|^require_nofilter[[:space:]]*=.*|require_nofilter = $nofilter|" "$DNS_PROXY_CONF"
   ok "Резолверы: $names"
@@ -275,6 +284,11 @@ dns_remove() {
   local purge=n
   read_confirm "${R}  Выключить шифрованный DNS? Клиенты пойдут на DNS из своих конфигов (введи yes): ${N}" || return 0
   read_yesno purge "  Удалить и пакет dnscrypt-proxy? [y/N]: " n
+  dns_uninstall "$([[ "$purge" == y ]] && echo purge)"
+}
+
+dns_uninstall() {  # [purge] — удалить и пакет
+  local purge="${1:-}"
   remove_unit awg-dns-healthcheck.timer awg-dns-healthcheck.service awg-dns-persist.service
   rm -f "$DNS_HEALTH_SCRIPT" "$DNS_PERSIST_SCRIPT" "$DNS_SYSCTL"
   dns_rules_down
@@ -285,7 +299,7 @@ dns_remove() {
   fi
   sysctl -qw net.ipv4.conf.all.route_localnet=0 2>/dev/null || true
   systemctl disable --now "$DNS_UNIT" "$DNS_SOCKET" &>/dev/null || true
-  if [[ "$purge" == y ]]; then
+  if [[ "$purge" == purge ]]; then
     apt-get purge -y -q dnscrypt-proxy &>/dev/null || true
     rm -rf /var/cache/dnscrypt-proxy
   elif [[ -f "$DNS_PROXY_BACKUP_CONF" ]]; then

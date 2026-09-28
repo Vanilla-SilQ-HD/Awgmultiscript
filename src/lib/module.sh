@@ -453,8 +453,9 @@ exit 0"
 }
 
 # ── Действия из меню ──────────────────────────────────────
+# mod_update_flow [тег] [force] — force: пересобрать, даже если тег уже стоит.
 mod_update_flow() {
-  local tag="${1:-}" cur
+  local tag="${1:-}" force="${2:-}" cur
   components_deps || return 1
   ensure_headers "$(uname -r)" || { err "Нет заголовков ядра $(uname -r)"; kernel_headers_help; return 1; }
   if secure_boot_on; then
@@ -463,20 +464,36 @@ mod_update_flow() {
   fi
   [[ -n "$tag" ]] || tag=$(resolve_tag mod)
   cur=$(mod_tag)
-  if [[ "${cur#≈}" == "$tag" ]]; then
-    ask_yes "  Уже стоит $tag. Пересобрать? [y/N]: " n || return 0
+  if [[ "${cur#≈}" == "$tag" && "$force" != force ]]; then
+    ask_yes "  Уже стоит $tag. Пересобрать? [y/N]: " n || { ok "Модуль $tag уже установлен"; return 0; }
   fi
   mod_install_tag "$tag" || return 1
   mod_autoload
   if mod_loaded; then mod_reload || true; else modprobe "$MOD_NAME" 2>/dev/null || true; fi
 }
 
-tools_update_flow() {
+tools_update_flow() {  # [force]
   local tag
   components_deps || return 1
   tag=$(resolve_tag tools)
-  [[ "$(tools_tag)" == "$tag" ]] && { ask_yes "  Уже стоит $tag. Пересобрать? [y/N]: " n || return 0; }
+  if [[ "$(tools_tag)" == "$tag" && "${1:-}" != force ]]; then
+    ask_yes "  Уже стоит $tag. Пересобрать? [y/N]: " n || { ok "amneziawg-tools $tag уже установлены"; return 0; }
+  fi
   tools_install_tag "$tag"
+}
+
+mod_rebuild_all() {
+  components_deps && run_step "Сборка DKMS под все ядра" _mod_dkms_install_all
+}
+
+mod_backups() { ls -1t "$MOD_BACKUP_DIR"/src-*.tar.gz 2>/dev/null || true; }
+
+mod_rollback() {  # архив из mod_backups
+  [[ -f "$1" && "$1" == "$MOD_BACKUP_DIR"/src-*.tar.gz ]] || { err "Нет такой резервной копии"; return 1; }
+  run_step "Возврат модуля из ${1##*/}" mod_restore_src "$1" || return 1
+  rm -f "$MOD_TAG_FILE"
+  ok "Модуль возвращён из резервной копии"
+  mod_reload || true
 }
 
 mod_pick_tag() {  # → тег в stdout
@@ -492,7 +509,7 @@ mod_pick_tag() {  # → тег в stdout
 
 mod_rollback_flow() {
   local files=() i c
-  mapfile -t files < <(ls -1t "$MOD_BACKUP_DIR"/src-*.tar.gz 2>/dev/null)
+  mapfile -t files < <(mod_backups)
   (( ${#files[@]} )) || { warn "Резервных копий нет ($MOD_BACKUP_DIR)"; return 0; }
   for i in "${!files[@]}"; do
     printf "  %2d) %s ${D}(%s)${N}\n" "$((i+1))" "${files[$i]##*/}" "$(date -r "${files[$i]}" '+%d.%m %H:%M')"
@@ -500,10 +517,7 @@ mod_rollback_flow() {
   echo "   0) Назад"
   read_choice c "${C}  Копия: ${N}" 0 "${#files[@]}" 0
   (( c == 0 )) && return 0
-  run_step "Возврат модуля из ${files[$((c-1))]##*/}" mod_restore_src "${files[$((c-1))]}" || return 1
-  rm -f "$MOD_TAG_FILE"
-  ok "Модуль возвращён из резервной копии"
-  mod_reload || true
+  mod_rollback "${files[$((c-1))]}"
 }
 
 kernel_headers_help() {
@@ -539,7 +553,7 @@ do_components_menu() {
       2) t=$(mod_pick_tag) && { mod_update_flow "$t" || true; } ;;
       3) tools_update_flow || true ;;
       4) mod_reload || true ;;
-      5) components_deps && run_step "Сборка DKMS под все ядра" _mod_dkms_install_all || true ;;
+      5) mod_rebuild_all || true ;;
       6) mod_rollback_flow || true ;;
       7) if upstream_refresh; then ok "Модуль: $(upstream_latest mod), tools: $(upstream_latest tools)"
          else err "github.com недоступен"; fi ;;

@@ -7,6 +7,13 @@ do_clean_clients() {
   (( n )) || { info "Клиентов нет"; return 0; }
   warn "Будут удалены все клиенты ($n) и их конфиги в $CLIENT_DIR"
   read_confirm "${R}  Подтверди (введи yes): ${N}" || return 0
+  clients_clean
+}
+
+clients_clean() {
+  local n
+  server_exists || { err "Сервер не создан"; return 1; }
+  n=$(grep -c '^\[Peer\]' "$SERVER_CONF" || true)
   auto_backup clean || warn "Авто-бэкап не удался"
   py peers-clear "$SERVER_CONF" || { err "Конфиг не изменён"; return 1; }
   rm -f "$CLIENT_DIR"/*_awg[23].conf
@@ -52,7 +59,7 @@ _tools_files() {
 }
 
 do_uninstall() {
-  local del_bot=n del_wgobf=n del_self=n v
+  local del_bot=n del_wgobf=n del_self=n opts
   hdr "Удаление AWG Toolza"
   warn "Будет удалено:"
   echo -e "  ${R}—${N} сервер awg0, его клиенты и автозапуск"
@@ -67,6 +74,22 @@ do_uninstall() {
   bot_installed && read_yesno del_bot "  Удалить и Telegram-бота? [Y/n]: " y
   wgobf_installed && read_yesno del_wgobf "  Удалить и WG + обфускатор? [Y/n]: " y
   read_yesno del_self "  Удалить сам скрипт awg2? [Y/n]: " y
+  opts=()
+  [[ "$del_bot" == y ]] && opts+=(bot)
+  [[ "$del_wgobf" == y ]] && opts+=(wgobf)
+  [[ "$del_self" == y ]] && opts+=(self)
+  uninstall_all "${opts[@]}"
+  (( UNINSTALLED_SELF )) && exit 0
+  return 0
+}
+
+# uninstall_all [bot] [wgobf] [self] — без вопросов; полный бэкап делается всегда.
+UNINSTALLED_SELF=0
+uninstall_all() {
+  local v o del_bot=n del_wgobf=n del_self=n
+  for o in "$@"; do
+    case "$o" in bot) del_bot=y ;; wgobf) del_wgobf=y ;; self) del_self=y ;; esac
+  done
 
   server_exists && do_backup
   awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true
@@ -106,7 +129,7 @@ do_uninstall() {
   ok "Удалено всё, включая $SCRIPT_PATH. Бэкапы: $BACKUP_DIR"
   # bash дочитывает скрипт с диска по ходу — удаляем его из отдельного процесса
   ( sleep 1; rm -f "$SCRIPT_PATH" ) &>/dev/null &
-  exit 0
+  UNINSTALLED_SELF=1
 }
 
 do_danger_menu() {

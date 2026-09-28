@@ -31,12 +31,23 @@ update_check_async() {
   ts=$(awk '{print $2 + 0; exit}' "$UPDATE_CACHE" 2>/dev/null || echo 0)
   (( now - ${ts:-0} < UPDATE_CHECK_TTL )) && return 0
   mkdir -p "$STATE_DIR"
-  (
-    v=$(curl -fsSL --connect-timeout 5 --max-time 10 -r 0-4095 -H 'Cache-Control: no-cache' \
-          "$UPDATE_URL?nocache=$now" 2>/dev/null | grep -m1 '^VERSION=' | cut -d'"' -f2)
-    [[ -n "$v" ]] && printf '%s %s\n' "$v" "$(date +%s)" > "$UPDATE_CACHE"
-  ) </dev/null &>/dev/null &
+  update_peek </dev/null &>/dev/null &
   disown 2>/dev/null || true
+}
+
+# Версия в канале по первым 4 КБ файла (напрямую и через зеркала) → в кэш.
+update_peek() {
+  local mp v
+  for mp in "${GH_MIRRORS[@]}"; do
+    v=$(curl -fsSL --connect-timeout 5 --max-time 10 -r 0-4095 -H 'Cache-Control: no-cache' \
+          "${mp}${UPDATE_URL}?nocache=$(date +%s)" 2>/dev/null | grep -m1 '^VERSION=' | cut -d'"' -f2)
+    if [[ "$v" =~ ^v?[0-9]+\.[0-9]+ ]]; then
+      printf '%s %s\n' "$v" "$(date +%s)" > "$UPDATE_CACHE" 2>/dev/null || true
+      echo "$v"
+      return 0
+    fi
+  done
+  return 1
 }
 
 update_available() {  # → версия, если новее текущей
@@ -58,38 +69,67 @@ _update_download() {  # файл
   return 1
 }
 
-do_self_update() {
-  local tmp new cur_n new_n target="$SCRIPT_PATH"
-  [[ -f "$target" ]] || target=$(readlink -f "$0")
+# Скачать сборку из канала и проверить её → UPDATE_FILE, UPDATE_NEW.
+UPDATE_FILE="" UPDATE_NEW=""
+update_fetch() {
+  mktmp UPDATE_FILE || return 1
   info "Канал: $(update_channel_label) ${D}($UPDATE_REPO)${N}"
-  mktmp tmp || return 1
-  _update_download "$tmp" || { err "Не удалось скачать обновление"; return 1; }
-  if (( $(stat -c%s "$tmp") < 50000 )) || ! head -1 "$tmp" | grep -q '^#!.*bash' || ! bash -n "$tmp" 2>/dev/null; then
+  _update_download "$UPDATE_FILE" || { err "Не удалось скачать обновление"; return 1; }
+  if (( $(stat -c%s "$UPDATE_FILE") < 50000 )) || ! head -1 "$UPDATE_FILE" | grep -q '^#!.*bash' \
+     || ! bash -n "$UPDATE_FILE" 2>/dev/null; then
     err "Скачанный файл повреждён (не bash или синтаксическая ошибка) — повтори позже"
     return 1
   fi
-  new=$(head -c 4096 "$tmp" | grep -m1 '^VERSION=' | cut -d'"' -f2)
-  [[ -n "$new" ]] || { err "В скачанном файле нет VERSION"; return 1; }
-  cur_n=$(ver_num "$VERSION"); new_n=$(ver_num "$new")
-  echo -e "  Текущая: ${W}$VERSION${N}   В канале: ${W}$new${N}"
+  UPDATE_NEW=$(head -c 4096 "$UPDATE_FILE" | grep -m1 '^VERSION=' | cut -d'"' -f2)
+  [[ -n "$UPDATE_NEW" ]] || { err "В скачанном файле нет VERSION"; return 1; }
+  printf '%s %s\n' "$UPDATE_NEW" "$(date +%s)" > "$UPDATE_CACHE" 2>/dev/null || true
+  echo "Текущая: $VERSION, в канале: $UPDATE_NEW"
+}
+
+# Поставить скачанное. Замена через rename: работающие копии awg2 дочитывают
+# свой файл, а не новый. «force» — разрешить откат на старшую версию.
+update_install() {
+  local target="$SCRIPT_PATH"
+  [[ -f "$target" ]] || target=$(readlink -f "$0")
+  if (( 10#$(ver_num "$UPDATE_NEW") < 10#$(ver_num "$VERSION") )) && [[ "${1:-}" != force ]]; then
+    err "В канале версия старше текущей ($UPDATE_NEW) — откат только явно"
+    return 1
+  fi
+  if cmp -s "$target" "$UPDATE_FILE"; then ok "Уже последняя версия ($VERSION)"; return 0; fi
+  cp -a "$target" "$target.bak" 2>/dev/null && info "Прежняя версия: $target.bak"
+  install -m 755 "$UPDATE_FILE" "$target.new" && mv -f "$target.new" "$target" \
+    || { err "Не удалось заменить $target"; return 1; }
+  hash -r
+  ok "Установлено: $UPDATE_NEW"
+  log_info "самообновление $VERSION → $UPDATE_NEW"
+}
+
+do_self_update() {
+  local cur_n new_n target="$SCRIPT_PATH"
+  [[ -f "$target" ]] || target=$(readlink -f "$0")
+  update_fetch || return 1
+  cur_n=$(ver_num "$VERSION"); new_n=$(ver_num "$UPDATE_NEW")
   if (( 10#$new_n < 10#$cur_n )); then
     warn "В канале версия старше текущей — это откат"
-    read_confirm "${R}  Откатиться до $new? (введи yes): ${N}" || return 0
+    read_confirm "${R}  Откатиться до $UPDATE_NEW? (введи yes): ${N}" || return 0
   elif (( 10#$new_n == 10#$cur_n )); then
-    cmp -s "$target" "$tmp" && { ok "Уже последняя версия"; return 0; }
+    cmp -s "$target" "$UPDATE_FILE" && { ok "Уже последняя версия"; return 0; }
     ask_yes "  Версия та же, но файл отличается. Перезаписать? [y/N]: " n || return 0
   else
-    ask_yes "  Установить $new? [Y/n]: " y || return 0
+    ask_yes "  Установить $UPDATE_NEW? [Y/n]: " y || return 0
   fi
-  cp -a "$target" "$target.bak" 2>/dev/null && info "Прежняя версия: $target.bak"
-  install -m 755 "$tmp" "$target" || { err "Не удалось заменить $target"; return 1; }
-  printf '%s %s\n' "$new" "$(date +%s)" > "$UPDATE_CACHE" 2>/dev/null || true
-  hash -r
-  ok "Установлено: $new"
-  log_info "самообновление $VERSION → $new"
+  update_install force || return 1
   # В памяти старый код, а bash дочитывает файл по ходу — продолжать здесь нельзя
   info "Перезапускаюсь..."
   exec "$target" --post-update "$VERSION"
+}
+
+update_channel_set() {  # stable|beta
+  [[ "$1" == stable || "$1" == beta ]] || { err "Канал: stable | beta"; return 1; }
+  mkdir -p "$STATE_DIR"
+  echo "$1" | write_file "$UPDATE_CHANNEL_FILE" 644
+  update_channel_apply "$1"
+  ok "Канал: $(update_channel_label)"
 }
 
 do_switch_channel() {
@@ -99,10 +139,7 @@ do_switch_channel() {
     warn "Бета — ранние сборки: правки приезжают раньше, но могут быть сырыми"
     ask_yes "  Переключиться на бета-канал? [y/N]: " n || return 0
   fi
-  mkdir -p "$STATE_DIR"
-  echo "$to" | write_file "$UPDATE_CHANNEL_FILE" 644
-  update_channel_apply "$to"
-  ok "Канал: $(update_channel_label)"
+  update_channel_set "$to"
   ask_yes "  Обновиться с этого канала сейчас? [Y/n]: " y && do_self_update
   return 0
 }

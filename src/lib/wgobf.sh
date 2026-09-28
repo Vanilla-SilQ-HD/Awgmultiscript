@@ -454,11 +454,10 @@ wgobf_rotate_key() {
 
 # ── Установка / удаление ──────────────────────────────────
 wgobf_install() {
-  local ep port c mask clean dns wg_port net priv first
+  local ep port c mask clean dns first
   wgobf_installed && { warn "Уже установлен"; return 0; }
   echo -e "  ${D}Отдельный WireGuard ($WGOBF_IF) за wg-obfuscator $WGOBF_VERSION. AWG не затрагивается.${N}"
   echo -e "  ${D}Клиентам нужен обфускатор на устройстве: роутер, Linux, Windows, macOS.${N}"
-  _wgobf_prepare || return 1
   ep=$(public_ip_cached)
   if [[ -z "$ep" ]] || ip_is_private "$ep"; then
     while true; do
@@ -470,7 +469,7 @@ wgobf_install() {
   fi
   while true; do
     read_line port "${C}  UDP-порт обфускатора (Enter — случайный): ${N}"
-    if [[ -z "$port" ]]; then port=$(random_free_udp_port) || { err "Нет свободного порта"; return 1; }; break; fi
+    [[ -z "$port" ]] && break
     valid_port "$port" && (( port >= 1024 )) || { warn "Порт 1024-65535"; continue; }
     udp_port_busy "$port" && { warn "UDP $port занят (сокет, AWG или каскад)"; continue; }
     break
@@ -487,6 +486,36 @@ wgobf_install() {
   echo -e "  ${C}3)${N} Quad9"
   read_choice c "${C}  DNS клиентов [1-3] (Enter = 1): ${N}" 1 3 1
   case "$c" in 2) dns="8.8.8.8, 8.8.4.4" ;; 3) dns="9.9.9.9, 149.112.112.112" ;; *) dns="1.1.1.1, 1.0.0.1" ;; esac
+  read_line first "${C}  Имя первого клиента (Enter = client1): ${N}"
+  first="${first// /}"
+  wgobf_install_opts "endpoint=$ep" ${port:+"port=$port"} "masking=$mask" "clean=$clean" "dns=$dns" "client=${first:-client1}" \
+    && wgobf_show_bundle "${first:-client1}"
+  return 0
+}
+
+# Установка без вопросов: wgobf_install_opts ключ=значение...
+#   port= (случайный)  masking=STUN|NONE  clean=0|1  dns="1.1.1.1, 1.0.0.1"
+#   endpoint=публичный IPv4  client=имя первого клиента (пусто — без клиента)
+wgobf_install_opts() {
+  local kv k v ep="" port="" mask=STUN clean=0 dns="1.1.1.1, 1.0.0.1" first="" wg_port net priv
+  wgobf_installed && { err "Уже установлен"; return 1; }
+  for kv in "$@"; do
+    k="${kv%%=*}"; v="${kv#*=}"
+    case "$k" in
+      port) valid_port "$v" && (( v >= 1024 )) || { err "port: 1024-65535"; return 1; }
+            udp_port_busy "$v" && { err "UDP $v занят"; return 1; }; port="$v" ;;
+      masking) [[ "$v" =~ ^(STUN|NONE)$ ]] || { err "masking: STUN | NONE"; return 1; }; mask="$v" ;;
+      clean) [[ "$v" =~ ^[01]$ ]] || { err "clean: 0 | 1"; return 1; }; clean="$v" ;;
+      dns) [[ "$v" =~ ^[0-9.,[:space:]]+$ ]] || { err "dns: IPv4 через запятую"; return 1; }; dns="$v" ;;
+      endpoint) valid_ip "$v" || { err "endpoint: IPv4"; return 1; }; ep="$v" ;;
+      client) [[ -z "$v" || "$v" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || { err "Имя клиента недопустимо"; return 1; }; first="$v" ;;
+      *) err "Неизвестный параметр: $k"; return 1 ;;
+    esac
+  done
+  [[ -n "$ep" ]] || ep=$(public_ip_cached)
+  valid_ip "$ep" && ! ip_is_private "$ep" || { err "Публичный IPv4 не определился — задай endpoint="; return 1; }
+  [[ -n "$port" ]] || port=$(random_free_udp_port) || { err "Нет свободного порта"; return 1; }
+  _wgobf_prepare || return 1
   wg_port=$(random_free_udp_port "$port") || { err "Нет свободного порта для WireGuard"; return 1; }
   net=$(taken_networks | py pick-net) || { err "Нет свободной /24"; return 1; }
   priv=$(wg genkey)
@@ -514,9 +543,7 @@ EOF
   ufw_allow "$port/udp" "$WGOBF_TAG"
   ok "WG + обфускатор запущен: вход $ep:$port/udp, подсеть $net"
   log_info "wgobf: установлен (порт $port, wg $wg_port, сеть $net, маскировка $mask)"
-  read_line first "${C}  Имя первого клиента (Enter = client1): ${N}"
-  first="${first// /}"
-  wgobf_add_client "${first:-client1}" && wgobf_show_bundle "${first:-client1}" || true
+  [[ -z "$first" ]] || wgobf_add_client "$first"
 }
 
 _wgobf_teardown() {  # keep|drop — клиентские комплекты
@@ -593,16 +620,27 @@ wgobf_settings() {
   echo -e "  ${C}3)${N} Сменить ключ обфускатора"
   read_choice c "${C}  Выбор (0 — назад): ${N}" 0 3 0
   case "$c" in
-    1) wgobf_set MASKING "$([[ "$mask" == STUN ]] && echo NONE || echo STUN)"
-       info "Старые комплекты продолжат работать — сервер понимает оба режима" ;;
-    2) wgobf_set ALLOW_CLEAN "$([[ "$clean" == 1 ]] && echo 0 || echo 1)"
-       _wgobf_write_service_files && systemctl restart "$WGOBF_UNIT" &>/dev/null ;;
+    1) wgobf_set_masking "$([[ "$mask" == STUN ]] && echo NONE || echo STUN)" ;;
+    2) wgobf_set_clean "$([[ "$clean" == 1 ]] && echo 0 || echo 1)" ;;
     3) warn "После смены ключа ВСЕ клиенты отключатся, пока не получат новый комплект"
-       read_confirm "${R}  Сменить ключ? (введи yes): ${N}" && { wgobf_rotate_key || true; }
-       return 0 ;;
-    *) return 0 ;;
+       read_confirm "${R}  Сменить ключ? (введи yes): ${N}" && { wgobf_rotate_key || true; } ;;
   esac
-  ok "Сохранено, комплекты перевыпущены: $(_wgobf_regen_bundles)"
+  return 0
+}
+
+# Маскировка у клиентов: STUN|NONE. Сервер в режиме AUTO понимает обе.
+wgobf_set_masking() {
+  [[ "$1" =~ ^(STUN|NONE)$ ]] || { err "Маскировка: STUN | NONE"; return 1; }
+  wgobf_set MASKING "$1"
+  ok "Маскировка $1, комплекты перевыпущены: $(_wgobf_regen_bundles)"
+  info "Старые комплекты продолжат работать"
+}
+
+wgobf_set_clean() {  # 1 — пускать клиентов без обфускатора
+  [[ "$1" =~ ^[01]$ ]] || { err "0 | 1"; return 1; }
+  wgobf_set ALLOW_CLEAN "$1"
+  _wgobf_write_service_files && systemctl restart "$WGOBF_UNIT" &>/dev/null
+  ok "Клиенты без обфускатора: $([[ "$1" == 1 ]] && echo да || echo нет), комплекты перевыпущены: $(_wgobf_regen_bundles)"
 }
 
 do_wgobf_menu() {

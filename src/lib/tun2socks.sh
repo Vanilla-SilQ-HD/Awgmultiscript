@@ -104,6 +104,10 @@ t2s_down() {
 
 t2s_remove() {
   read_confirm "${R}  Удалить tun2socks (служба, бинарь, адрес прокси)? (введи yes): ${N}" || return 0
+  t2s_uninstall
+}
+
+t2s_uninstall() {
   t2s_down quiet
   remove_unit "$T2S_UNIT"
   rm -rf "$T2S_DIR" "$T2S_ROUTING_SCRIPT"

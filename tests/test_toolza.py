@@ -429,6 +429,130 @@ chk("--help", r.returncode == 0 and "--tunnel" in r.stdout and "--wgobf" in r.st
 head = open(AWG2, encoding="utf-8").read(4096)
 chk("VERSION в первых 4 КБ (самообновление и бот)", re.search(r'^VERSION="v\d+\.\d+\.\d+"$', head, re.M) is not None)
 
+# ── 7. Машинный API (awg2 api) ────────────────────────────
+print("API")
+# Обёртка вместо установленного awg2: те же функции, пути — песочница.
+# systemd-run «нет» — задачи идут запасным путём через setsid.
+API_WRAP = os.path.join(TMP, "awg2-api")
+with open(API_WRAP, "w") as f:
+    f.write("#!/usr/bin/env bash\n" + PRELUDE + '[[ "${1:-}" == api ]] && shift\napi_main "$@"\n')
+os.chmod(API_WRAP, 0o755)
+with open(os.path.join(BIN, "systemd-run"), "w") as f:
+    f.write("#!/usr/bin/env bash\nexit 1\n")
+os.chmod(os.path.join(BIN, "systemd-run"), 0o755)
+with open(conf, "w") as f:
+    f.write(OLD20)
+for n in ("alice", "bob"):
+    with open(os.path.join(ROOT, "root", n + "_awg2.conf"), "w") as f:
+        f.write("[Interface]\nPrivateKey = X\n")
+
+
+def api(*args, stdin=None, env=None):
+    # stdin — открытый пайп: API обязан не ждать его без нужды
+    r = subprocess.run([API_WRAP, *args], input=stdin, capture_output=True, text=True,
+                       env=dict(ENV, **(env or {})), timeout=120)
+    lines = r.stdout.strip().splitlines()
+    try:
+        res = json.loads(lines[-1]) if len(lines) == 1 else {"raw": r.stdout}
+    except ValueError:
+        res = {"raw": r.stdout}
+    res["_rc"] = r.returncode
+    res["_err"] = r.stderr
+    return res
+
+
+r = api("version")
+chk("api version — одна строка JSON", r.get("ok") is True and r["data"]["version"].startswith("v")
+    and r["data"]["api"] == 1, r)
+r = api("status")
+d = r.get("data") or {}
+chk("api status", r.get("ok") and d["server"]["exists"] and d["server"]["clients"] == 2
+    and d["server"]["proto"] == "2.0" and d["tunnels"]["warp"] == "none", r)
+r = api("clients", "list")
+rows = r.get("data") or []
+chk("api clients list", [c["name"] for c in rows] == ["alice", "bob"] and rows[0]["ip"] == "10.23.45.2"
+    and rows[0]["file"].endswith("alice_awg2.conf") and rows[1]["expires"] == 1 and rows[0]["warp"] is None, r)
+r = api("client", "add", "carol", "expire=+1d", "mimicry=none")
+d = r.get("data") or {}
+chk("api client add", r.get("ok") and d.get("name") == "carol" and "[Interface]" in d.get("text", ""), r)
+r = api("client", "add", "carol", "mimicry=none")
+chk("занятое имя — ошибка с текстом", r.get("ok") is False and r["rc"] == 1 and "carol" in r["error"], r)
+rows = api("clients", "list").get("data") or []
+carol = next((c for c in rows if c["name"] == "carol"), {})
+chk("срок клиента", carol.get("expires", 0) > 1e9 and carol.get("mimicry") == "none", carol)
+r = api("client", "rename", "carol", "dave")
+chk("api client rename", r.get("ok") and os.path.exists(os.path.join(ROOT, "root", "dave_awg2.conf")), r)
+r = api("client", "del", "dave")
+chk("api client del", r.get("ok") and not os.path.exists(os.path.join(ROOT, "root", "dave_awg2.conf")), r)
+r = api("clients", "bulk", "t:3", "mimicry=none")
+chk("api clients bulk", r.get("ok") and r["data"] == ["t-001", "t-002", "t-003"], r)
+r = api("tunnels", "clients", "warp")
+chk("клиенты туннеля без списка — все", r.get("ok") and len(r["data"]) == 5 and all(c["on"] for c in r["data"]), r)
+api("tunnels", "client", "warp", "none")
+r = api("tunnels", "client", "warp", "alice", "on")
+rows = api("tunnels", "clients", "warp").get("data") or []
+chk("выбор клиентов туннеля", [c["name"] for c in rows if c["on"]] == ["alice"], rows)
+r = api("mimicry")
+chk("api mimicry", r.get("ok") and len(r["data"]) == 9 and r["data"][0]["id"] == "quic" and r["data"][0]["domain"], r)
+r = api("cascade", "add", "udp", "4443", "5.6.7.8", "443", "тест")
+rule = next((x for x in api("cascade", "list").get("data") or [] if x["in"] == 4443), {})
+chk("api cascade add/list", r.get("ok") and rule.get("out") == 443 and rule.get("proto") == "udp"
+    and rule.get("comment") == "тест", [r, rule])
+r = api("exits", "add", "n1", stdin="")
+chk("stdin обязателен для exits add", r.get("ok") is False and "stdin" in r["error"], r)
+r = api("exits", "add", "n1", stdin="[Interface]\nPrivateKey = X\n")
+chk("конфиг ноды читается из stdin", r.get("ok") is False and "Endpoint" in r["error"], r)
+rfd, wfd = os.pipe()          # пишущий конец держим открытым до конца вызова
+try:
+    out = subprocess.run([API_WRAP, "version"], stdin=rfd, capture_output=True, text=True,
+                         env=ENV, timeout=60).stdout
+except subprocess.TimeoutExpired:
+    out = "завис на чтении stdin"
+os.close(rfd)
+os.close(wfd)
+chk("открытый stdin не блокирует команду", '"ok": true' in out, out)
+r = api("frobnicate")
+chk("неизвестная команда — rc 2", r.get("ok") is False and r["rc"] == 2, r)
+r = api("server", "proto", "9.9")
+chk("проверка аргументов", r.get("ok") is False and r["rc"] == 2 and "server proto" in r["error"], r)
+
+# Очередь: пока занят замок, изменяющая команда отказывает, чтение — нет
+lock = os.path.join(ROOT, "var/lib/awg2/api.lock")
+holder = subprocess.Popen(["flock", lock, "sleep", "8"])
+import time
+time.sleep(0.5)
+r = api("client", "del", "t-001", env={"API_LOCK_WAIT": "1"})
+chk("занятая очередь — rc 75", r.get("ok") is False and r["rc"] == 75 and "другая операция" in r["error"], r)
+r = api("clients", "list")
+chk("чтение мимо очереди", r.get("ok") is True, r)
+holder.kill()
+holder.wait()
+
+# Фоновая задача: старт, опрос журнала по смещению, итог
+r = api("job", "start", "diag", "dpi-hint")
+jid = (r.get("data") or {}).get("id", "")
+chk("api job start", r.get("ok") and re.match(r"^\d{8}-\d{6}-[0-9a-f]{4}$", jid), r)
+st, log, off = {}, "", 0
+for _ in range(60):
+    st = api("job", "status", jid, str(off)).get("data") or {}
+    log += st.get("log", "")
+    off = st.get("offset", off)
+    if st.get("state") != "running":
+        break
+    time.sleep(0.5)
+chk("задача завершилась", st.get("state") == "done" and st.get("ok") is True and st.get("rc") == 0, st)
+chk("журнал задачи без цвета", "dpi-detector" in log and "\x1b[" not in log, log[:200])
+r = api("job", "list")
+chk("api job list", r.get("ok") and r["data"] and r["data"][0]["id"] == jid and r["data"][0]["state"] == "done", r)
+r = api("job", "start", "bogus")
+jid = (r.get("data") or {}).get("id", "")
+for _ in range(60):
+    st = api("job", "status", jid).get("data") or {}
+    if st.get("state") != "running":
+        break
+    time.sleep(0.5)
+chk("ошибка задачи в итоге", st.get("state") == "done" and st.get("ok") is False and st.get("rc") == 2, st)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\nпроверок: {checks}, провалов: {fails}")
 sys.exit(1 if fails else 0)

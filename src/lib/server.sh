@@ -126,7 +126,7 @@ do_install() {
     warn "Нужна перезагрузка: $why"
     if [[ "$why" == *"перезагрузка модуля"* ]]; then
       mod_reload || true
-    elif ask_yes "  Перезагрузить сервер сейчас? [Y/n]: " y; then
+    elif (( ! AUTO_MODE )) && ask_yes "  Перезагрузить сервер сейчас? [Y/n]: " y; then
       ok "Перезагружаюсь. После — sudo awg2 → Сервер → Создать сервер"
       sleep 2; reboot
     fi
@@ -432,22 +432,82 @@ _choose_endpoint() {
   S_ENDPOINT_DOMAIN="$d"
 }
 
-do_create_server() {
-  local why
+# Можно ли создавать сервер. Предупреждение о перезагрузке — в REBOOT_WHY.
+REBOOT_WHY=""
+server_create_ready() {
   command -v awg &>/dev/null || { err "Компоненты не установлены — Сервер → 1"; return 1; }
   if server_exists; then
-    warn "Сервер уже создан (профиль $(profile_label), AWG $(server_proto))"
-    info "Сменить версию или параметры: Сервер → Протокол и параметры; всё заново — сброс сервера"
-    return 0
+    err "Сервер уже создан (профиль $(profile_label), AWG $(server_proto))"
+    info "Сменить версию или параметры: Сервер → Протокол; всё заново — сброс сервера"
+    return 1
   fi
-  why=$(reboot_reason)
-  if [[ "$why" == *modprobe* ]]; then modprobe "$MOD_NAME" 2>/dev/null; why=$(reboot_reason); fi
-  if [[ "$why" == *"не собран"* ]]; then
+  REBOOT_WHY=$(reboot_reason)
+  if [[ "$REBOOT_WHY" == *modprobe* ]]; then modprobe "$MOD_NAME" 2>/dev/null; REBOOT_WHY=$(reboot_reason); fi
+  if [[ "$REBOOT_WHY" == *"не собран"* ]]; then
     err "Модуль не собран под работающее ядро $(uname -r) — Сервер → 1 (установка)"
     return 1
   fi
-  if [[ -n "$why" ]]; then
-    warn "$why"
+  return 0
+}
+
+# Создание из S_* и выбранной мимикрии.
+server_create() {
+  server_write || return 1
+  if ! server_start_new; then
+    err "Сервер не поднялся — конфиг сохранён: $SERVER_CONF"
+    return 1
+  fi
+  success_box "Сервер создан: AWG $S_PROTO, клиент $S_FIRST_CLIENT"
+  echo "Файл конфигурации: $(client_file "$S_FIRST_CLIENT")"
+  mimicry_module_warnings
+}
+
+# Создание без вопросов: server_create_opts ключ=значение...
+#   profile=lite|pro  proto=2.0|3.1  region=world|ru  dns="1.1.1.1, 1.0.0.1"
+#   mtu=  port=  net=10.x.y.0/24  endpoint=домен  client=имя  mimicry=строка
+# Не заданное — как у «AmneziaVPN»: версия 3.1, если компоненты её умеют.
+server_create_opts() {
+  local kv k v mim=""
+  server_create_ready || return 1
+  [[ -n "$REBOOT_WHY" ]] && warn "$REBOOT_WHY"
+  S_PROFILE=lite; S_PROTO=""; S_REGION=world; S_DNS="1.1.1.1, 1.0.0.1"; MTU=""
+  S_PORT=""; S_NET=""; S_ENDPOINT_DOMAIN=""; S_FIRST_CLIENT=""
+  for kv in "$@"; do
+    k="${kv%%=*}"; v="${kv#*=}"
+    case "$k" in
+      profile) [[ "$v" =~ ^(lite|pro)$ ]] || { err "profile: lite | pro"; return 1; }; S_PROFILE="$v" ;;
+      proto) [[ "$v" =~ ^(2\.0|3\.1)$ ]] || { err "proto: 2.0 | 3.1"; return 1; }; S_PROTO="$v" ;;
+      region) [[ "$v" =~ ^(world|ru)$ ]] || { err "region: world | ru"; return 1; }; S_REGION="$v" ;;
+      dns) [[ "$v" =~ ^[0-9.,[:space:]]+$ ]] || { err "dns: IPv4 через запятую"; return 1; }; S_DNS="$v" ;;
+      mtu) [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1280 && v <= 1500 )) || { err "mtu: 1280-1500"; return 1; }; MTU="$v" ;;
+      port) valid_port "$v" && (( v >= 1024 )) || { err "port: 1024-65535"; return 1; }
+            udp_port_busy "$v" && { err "UDP $v занят"; return 1; }; S_PORT="$v" ;;
+      net) valid_cidr "$v" && [[ "${v#*/}" == 24 ]] || { err "net: сеть /24"; return 1; }
+           v="${v%.*}.0/24"
+           taken_networks | py net-overlaps "$v" >/dev/null && { err "Сеть $v пересекается с адресами сервера"; return 1; }
+           S_NET="$v" ;;
+      endpoint) [[ -z "$v" ]] || valid_domain "$v" || { err "endpoint: домен"; return 1; }; S_ENDPOINT_DOMAIN="${v,,}" ;;
+      client) _name_free "$v" || { err "Имя клиента недопустимо"; return 1; }; S_FIRST_CLIENT="$v" ;;
+      mimicry) mim="$v" ;;
+      *) err "Неизвестный параметр: $k"; return 1 ;;
+    esac
+  done
+  if [[ -z "$S_PROTO" ]]; then
+    if proto_supported 3.1; then S_PROTO=3.1; else S_PROTO=2.0; fi
+  fi
+  [[ -n "$MTU" ]] || { [[ "$S_PROFILE" == pro ]] && MTU=1320 || MTU=1280; }
+  [[ -n "$mim" ]] || { [[ "$S_PROFILE" == pro ]] && mim="dns:3" || mim=none; }
+  [[ -n "$S_NET" ]] || S_NET=$(pick_awg_net) || { err "Нет свободной подсети"; return 1; }
+  [[ -n "$S_PORT" ]] || S_PORT=$(random_free_udp_port) || { err "Нет свободного UDP-порта"; return 1; }
+  [[ -n "$S_FIRST_CLIENT" ]] || S_FIRST_CLIENT=$(rand_name)
+  mimicry_from_spec "$mim" || return 1
+  server_create
+}
+
+do_create_server() {
+  if ! server_create_ready; then return 1; fi
+  if [[ -n "$REBOOT_WHY" ]]; then
+    warn "$REBOOT_WHY"
     ask_yes "  Продолжить без перезагрузки? [y/N]: " n || return 0
   fi
 
@@ -470,16 +530,7 @@ do_create_server() {
   echo -e "  Подсеть  : ${W}$S_NET${N}, MTU ${W}$MTU${N}, DNS ${W}$S_DNS${N}"
   echo -e "  Endpoint : ${W}${S_ENDPOINT_DOMAIN:-$(public_ip_cached)}:$S_PORT${N}"
   ask_yes "  Создать? [Y/n]: " y || { info "Отменено"; return 0; }
-
-  server_write || return 1
-  if ! server_start_new; then
-    err "Сервер не поднялся — конфиг сохранён: $SERVER_CONF"
-    return 1
-  fi
-  share_config "$(client_file "$S_FIRST_CLIENT")"
-  success_box "Сервер создан: AWG $S_PROTO, клиент $S_FIRST_CLIENT"
-  echo -e "  Конфиг клиента: ${W}$(client_file "$S_FIRST_CLIENT")${N}"
-  mimicry_module_warnings
+  server_create && share_config "$(client_file "$S_FIRST_CLIENT")"
 }
 
 # Неинтерактивная установка: компоненты, сервер и client1.
@@ -492,24 +543,20 @@ do_autoinstall() {
     [[ -f "$(client_file client1)" ]] && cat "$(client_file client1)"
     return 0
   fi
-  S_PROFILE="${AWG_PROFILE:-lite}"
-  [[ "$S_PROFILE" =~ ^(lite|pro)$ ]] || S_PROFILE=lite
-  if [[ -n "${AWG_PROTO:-}" ]]; then S_PROTO="$AWG_PROTO"
-  elif proto_supported 3.1; then S_PROTO=3.1
-  else S_PROTO=2.0; fi
-  S_REGION=world; S_DNS="1.1.1.1, 1.0.0.1"; S_FIRST_CLIENT=client1; S_ENDPOINT_DOMAIN=""
-  I_LINES=(); CPS_DOMAIN=""
-  if [[ "$S_PROFILE" == pro ]]; then
-    MTU=1320; OBF_LEVEL=3; MIMICRY=dns; CPS_BUDGET=1500
-    gen_chain dns "" || { MIMICRY=none; OBF_LEVEL=1; }
-  else
-    MTU=1280; OBF_LEVEL=1; MIMICRY=none; CPS_BUDGET=0
-  fi
-  S_NET=$(pick_awg_net) || { err "Нет свободной подсети"; exit 1; }
-  S_PORT="${AWG_PORT:-$(random_free_udp_port)}"
-  server_write && server_start_new || exit 1
-  success_box "Сервер создан: AWG $S_PROTO, порт $S_PORT"
+  local opts=(client=client1)
+  [[ "${AWG_PROFILE:-}" == pro ]] && opts+=(profile=pro)
+  [[ -n "${AWG_PROTO:-}" ]] && opts+=("proto=$AWG_PROTO")
+  [[ -n "${AWG_PORT:-}" ]] && opts+=("port=$AWG_PORT")
+  server_create_opts "${opts[@]}" || exit 1
   cat "$(client_file client1)"
+}
+
+# Перезагрузка через 5 секунд: вызвавший (бот) успевает получить ответ.
+server_reboot() {
+  systemd-run --on-active=5 --unit=awg2-reboot --collect /bin/systemctl reboot &>/dev/null \
+    || { err "systemd-run не сработал"; return 1; }
+  log_warn "перезагрузка сервера"
+  ok "Сервер перезагрузится через 5 секунд"
 }
 
 # ── Перезапуск и ремонт ───────────────────────────────────
@@ -694,9 +741,27 @@ do_proto_menu() {
 }
 
 # ── Endpoint ──────────────────────────────────────────────
+# endpoint_set ДОМЕН|"" [переписать_выданные 1|0] — пусто = публичный IP.
+endpoint_set() {
+  local d="${1,,}" rw="${2:-1}" ep port f
+  server_exists || { err "Сервер не создан"; return 1; }
+  port=$(server_port)
+  if [[ -n "$d" ]]; then
+    valid_domain "$d" || { err "Нужно имя вида vpn.example.com"; return 1; }
+    conf_marker_set AWG_ENDPOINT "$d"; ep="$d:$port"
+  else
+    conf_marker_del AWG_ENDPOINT; ep="$(public_ip_cached):$port"
+  fi
+  ok "Endpoint для новых конфигов: $ep"
+  if [[ "$rw" == 1 ]]; then
+    while read -r f; do sed -i "s|^Endpoint = .*|Endpoint = $ep|" "$f"; done < <(client_files)
+    ok "Выданные конфиги обновлены — клиентам нужно забрать новые"
+  fi
+}
+
 do_endpoint_menu() {
   server_exists || { err "Сервер не создан"; return 1; }
-  local cur port c d ep
+  local cur port c d rw
   cur=$(endpoint_domain); port=$(server_port)
   echo ""
   hdr "Endpoint для клиентов"
@@ -712,18 +777,14 @@ do_endpoint_menu() {
          valid_domain "$d" && break
          warn "Нужно имя вида vpn.example.com"
        done
-       domain_points_here "$d" || ask_yes "  Всё равно задать? [y/N]: " n || return 0
-       conf_marker_set AWG_ENDPOINT "$d"; ep="$d:$port" ;;
+       domain_points_here "$d" || ask_yes "  Всё равно задать? [y/N]: " n || return 0 ;;
     2) [[ -n "$cur" ]] || { info "Уже IP"; return 0; }
-       conf_marker_del AWG_ENDPOINT; ep="$(public_ip_cached):$port" ;;
+       d="" ;;
     *) return 0 ;;
   esac
-  ok "Endpoint для новых конфигов: $ep"
-  (( $(client_files | wc -l) )) || return 0
-  if ask_yes "  Переписать Endpoint в уже выданных конфигах? [Y/n]: " y; then
-    client_files | while read -r f; do sed -i "s|^Endpoint = .*|Endpoint = $ep|" "$f"; done
-    ok "Конфиги обновлены — клиентам нужно забрать новые"
-  fi
+  rw=0
+  (( $(client_files | wc -l) )) && ask_yes "  Переписать Endpoint в уже выданных конфигах? [Y/n]: " y && rw=1
+  endpoint_set "$d" "$rw"
 }
 
 # ── Сброс ─────────────────────────────────────────────────
@@ -734,6 +795,12 @@ do_reset_server() {
   warn "Будут удалены awg0, $SERVER_CONF и все клиенты ($(client_files | wc -l))."
   info "Компоненты и бэкапы остаются; авто-бэкап будет сделан."
   read_confirm "${R}  Подтверди сброс (введи yes): ${N}" || { info "Отменено"; return 0; }
+  server_reset
+}
+
+# Удаляет сервер и клиентов (компоненты и бэкапы остаются).
+server_reset() {
+  server_exists || { info "Сервер не создан"; return 0; }
   auto_backup reset || warn "Авто-бэкап не удался"
   tunnels_panic_reset quiet
   awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true

@@ -77,12 +77,17 @@ _wgcf_generate() {
 warp_wg_install() { _warp_deps && _wgcf_install && _wgcf_register && _wgcf_generate; }
 
 warp_license() {
-  local key type
-  [[ -f "$WARP_ACCOUNT" ]] && grep -q '^license_key\|^access_token\|^device_id' "$WARP_ACCOUNT" \
-    || { err "Сначала зарегистрируй аккаунт (пункт 1)"; return 1; }
+  local key
   info "Ключ Warp+ — в приложении 1.1.1.1: Аккаунт → Ключ (формат xxxx-xxxx-xxxx)"
   read_line key "${C}  Ключ (Enter — отмена): ${N}"
   [[ -z "$key" ]] && return 0
+  warp_license_set "$key"
+}
+
+warp_license_set() {  # ключ
+  local key="$1" type
+  [[ -f "$WARP_ACCOUNT" ]] && grep -q '^license_key\|^access_token\|^device_id' "$WARP_ACCOUNT" \
+    || { err "Сначала зарегистрируй аккаунт WARP"; return 1; }
   [[ "$key" =~ ^[A-Za-z0-9]+-[A-Za-z0-9]+-[A-Za-z0-9]+$ ]] || { err "Неверный формат ключа"; return 1; }
   if grep -q '^license_key' "$WARP_ACCOUNT"; then sed -i "s|^license_key = .*|license_key = \"$key\"|" "$WARP_ACCOUNT"
   else echo "license_key = \"$key\"" >> "$WARP_ACCOUNT"; fi
@@ -363,44 +368,66 @@ _warpscout_ready() {
     || { err "Регистрация warpscout не удалась"; return 1; }
 }
 
-warp_find_endpoint() {
-  local c country best rep lines=() i pub
-  [[ "$(warp_backend)" == wg ]] || { warn "Только для бэкенда wg"; return 0; }
+# Лучший endpoint по замерам warpscout → сразу в профиль. $1 — страна (DE, NL...).
+warp_endpoint_best() {
+  local best
+  [[ "$(warp_backend)" == wg ]] || { err "Только для бэкенда wg"; return 1; }
+  [[ -z "${1:-}" || "$1" =~ ^[A-Za-z]{2}$ ]] || { err "Страна — две буквы (DE, NL)"; return 1; }
   _warpscout_ready || return 1
+  info "Сканирую (до минуты)..."
+  best=$("$WARPSCOUT_BIN" scan -p awg -a "$WARPSCOUT_ACCOUNT" -best ${1:+-country "${1^^}"} 2>/dev/null | tail -1)
+  warp_endpoint_set "$best"
+}
+
+warp_endpoint_set() {  # ip:порт
+  local pub
+  [[ "$1" =~ ^[0-9.]+:[0-9]+$ ]] || { err "Ни один endpoint не прошёл проверку — UDP к Cloudflare, похоже, режут"; return 1; }
+  sed -i "s|^Endpoint = .*|Endpoint = $1|" "$WARP_CONF" "$WARP_PROFILE" 2>/dev/null
+  if warp_is_up; then
+    pub=$(wg show "$WARP_IF" peers | head -1)
+    [[ -n "$pub" ]] && wg set "$WARP_IF" peer "$pub" endpoint "$1"
+  fi
+  ok "Endpoint: $1"
+}
+
+warp_find_endpoint() {
+  local c country rep lines=() i
+  [[ "$(warp_backend)" == wg ]] || { warn "Только для бэкенда wg"; return 0; }
   echo -e "  ${C}1)${N} Найти лучший и применить"
   echo -e "  ${C}2)${N} Показать список и выбрать"
   read_choice c "${C}  Выбор [1-2] (Enter = 1): ${N}" 1 2 1
-  info "Сканирую (до минуты)..."
   if [[ "$c" == 1 ]]; then
     read_line country "${C}  Страна выхода (DE,NL..., Enter — любая): ${N}"
-    best=$("$WARPSCOUT_BIN" scan -p awg -a "$WARPSCOUT_ACCOUNT" -best ${country:+-country "$country"} 2>/dev/null | tail -1)
-  else
-    mktmp rep || return 1
-    "$WARPSCOUT_BIN" scan -p awg -a "$WARPSCOUT_ACCOUNT" -plain -o "$rep" 2>/dev/null
-    mapfile -t lines < <(grep -oE '[0-9.]+:[0-9]+' "$rep" | sort -u)
-    (( ${#lines[@]} )) || { err "Рабочих endpoint не найдено"; return 1; }
-    for i in "${!lines[@]}"; do printf "  %2d) %s\n" "$((i + 1))" "${lines[$i]}"; done
-    read_choice c "${C}  Выбор (0 — отмена): ${N}" 0 "${#lines[@]}" 0
-    (( c == 0 )) && return 0
-    best="${lines[$((c - 1))]}"
+    warp_endpoint_best "$country"
+    return
   fi
-  [[ "$best" =~ ^[0-9.]+:[0-9]+$ ]] || { err "Ни один endpoint не прошёл проверку — UDP к Cloudflare, похоже, режут"; return 1; }
-  sed -i "s|^Endpoint = .*|Endpoint = $best|" "$WARP_CONF" "$WARP_PROFILE" 2>/dev/null
-  if warp_is_up; then
-    pub=$(wg show "$WARP_IF" peers | head -1)
-    [[ -n "$pub" ]] && wg set "$WARP_IF" peer "$pub" endpoint "$best"
-  fi
-  ok "Endpoint: $best"
+  _warpscout_ready || return 1
+  info "Сканирую (до минуты)..."
+  mktmp rep || return 1
+  "$WARPSCOUT_BIN" scan -p awg -a "$WARPSCOUT_ACCOUNT" -plain -o "$rep" 2>/dev/null
+  mapfile -t lines < <(grep -oE '[0-9.]+:[0-9]+' "$rep" | sort -u)
+  (( ${#lines[@]} )) || { err "Рабочих endpoint не найдено"; return 1; }
+  for i in "${!lines[@]}"; do printf "  %2d) %s\n" "$((i + 1))" "${lines[$i]}"; done
+  read_choice c "${C}  Выбор (0 — отмена): ${N}" 0 "${#lines[@]}" 0
+  (( c == 0 )) && return 0
+  warp_endpoint_set "${lines[$((c - 1))]}"
 }
 
 # ── Бэкенд, статус, удаление ──────────────────────────────
 warp_switch_backend() {
-  local cur target was_up=0
+  local target=wg
+  [[ "$(warp_backend)" == wg ]] && target=usque
+  ask_yes "  Переключить бэкенд $(warp_backend) → $target? Туннель прервётся на несколько секунд [y/N]: " n || return 0
+  warp_set_backend "$target"
+}
+
+warp_set_backend() {  # wg|usque — с установкой, если нужно
+  local cur target="$1" was_up=0
   cur=$(warp_backend)
-  [[ "$cur" == wg ]] && target=usque || target=wg
+  [[ "$target" == wg || "$target" == usque ]] || { err "Бэкенд: wg | usque"; return 1; }
+  [[ "$target" == "$cur" ]] && { ok "Бэкенд уже $cur"; return 0; }
   if [[ "$target" == wg ]] && ! warp_wg_possible; then err "Нет модуля ядра wireguard"; return 1; fi
   if [[ "$target" == usque ]] && ! warp_usque_possible; then err "usque здесь не работает (нет /dev/net/tun или архитектура)"; return 1; fi
-  ask_yes "  Переключить бэкенд $cur → $target? Туннель прервётся на несколько секунд [y/N]: " n || return 0
   warp_is_up && { was_up=1; warp_down quiet; }
   echo "$target" | write_file "$WARP_BACKEND_FILE" 644
   if ! "warp_${target}_install"; then
@@ -438,6 +465,10 @@ warp_status() {
 
 warp_remove() {
   read_confirm "${R}  Удалить WARP (аккаунт, профиль, службы)? (введи yes): ${N}" || return 0
+  warp_uninstall
+}
+
+warp_uninstall() {
   warp_down quiet
   warp_health_off
   remove_unit awg-warp.service awg-usque.service
