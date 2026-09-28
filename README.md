@@ -261,6 +261,14 @@ sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/pumbaX/awg-multi-scri
 
 ---
 
+## Разработка
+
+Исходники новой версии — в `src/` (модули `src/lib/*.sh`, встроенный Python — `src/py/`).
+Один файл для установки собирает `./build.sh` → `dist/awg2.sh`.
+Тесты собранного файла без root и сети: `python3 tests/test_toolza.py`, `python3 tests/test_cps.py dist/awg2.sh`.
+
+---
+
 ## Поддержать
 
 **Boosty:** https://boosty.to/awgtoolza/donate

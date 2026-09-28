@@ -1,0 +1,734 @@
+# Сервер awg0: установка компонентов, создание, запуск, ремонт,
+# перегенерация параметров и смена версии протокола.
+
+# ── Установка компонентов ─────────────────────────────────
+BASE_PKGS=(ca-certificates curl gnupg iproute2 iptables python3 python3-cryptography
+           qrencode git build-essential dkms libmnl-dev pkg-config iputils-ping)
+
+# Остатки APT-репозиториев эпохи установки через PPA ломают apt-get update.
+_purge_legacy_ppa() {
+  local f found=1
+  for f in /etc/apt/sources.list.d/amnezia*.{list,sources} \
+           /etc/apt/sources.list.d/canonical-kernel-team*.{list,sources} \
+           /etc/apt/trusted.gpg.d/amnezia*.gpg /etc/apt/keyrings/amnezia*.gpg; do
+    [[ -e "$f" ]] && { rm -f "$f"; found=0; }
+  done
+  return "$found"
+}
+
+# github.com не резолвится — чиним DNS сервера бережно: при systemd-resolved
+# добавляем drop-in, а не затираем /etc/resolv.conf (там символьная ссылка).
+_ensure_dns() {
+  getent hosts github.com &>/dev/null && return 0
+  warn "github.com не резолвится с этого сервера"
+  if unit_active systemd-resolved; then
+    mkdir -p /etc/systemd/resolved.conf.d
+    printf '[Resolve]\nDNS=1.1.1.1 8.8.8.8\nFallbackDNS=9.9.9.9\n' \
+      | write_file /etc/systemd/resolved.conf.d/awg2-dns.conf 644
+    systemctl restart systemd-resolved
+    info "Добавлены DNS 1.1.1.1 и 8.8.8.8 (/etc/systemd/resolved.conf.d/awg2-dns.conf)"
+  elif [[ ! -L /etc/resolv.conf ]]; then
+    [[ -f /etc/resolv.conf.awg-backup ]] || cp /etc/resolv.conf /etc/resolv.conf.awg-backup 2>/dev/null || true
+    printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+    info "resolv.conf заменён (копия: /etc/resolv.conf.awg-backup)"
+  fi
+  getent hosts github.com &>/dev/null && { ok "DNS работает"; return 0; }
+  err "DNS не работает: проверь ping 1.1.1.1 и настройки сети"
+  return 1
+}
+
+# Заголовков под работающее ядро в зеркале уже нет (так бывает со старыми
+# облачными образами) — ставим актуальное ядро с заголовками и собираем
+# модуль под него; работать всё начнёт после перезагрузки.
+_install_current_kernel() {
+  local arch pkgs
+  os_detect
+  arch=$(dpkg --print-architecture)
+  if [[ "$OS_ID" == debian ]]; then
+    if [[ "$(uname -r)" == *-cloud-* ]]; then pkgs=("linux-image-cloud-$arch" "linux-headers-cloud-$arch")
+    else pkgs=("linux-image-$arch" "linux-headers-$arch"); fi
+  else
+    pkgs=(linux-generic)
+    dpkg -s linux-virtual &>/dev/null && pkgs=(linux-virtual linux-headers-virtual)
+  fi
+  run_step "Установка ядра: ${pkgs[*]}" apt_install "${pkgs[@]}"
+}
+
+do_install() {
+  local why tag cur running k
+  echo ""
+  hdr "Установка AmneziaWG"
+  if ! why=$(os_supported); then
+    err "$why"
+    [[ -n "${AWG2_ANY_OS:-}" ]] || return 1
+    warn "AWG2_ANY_OS=1 — продолжаю на свой риск"
+  else
+    ok "ОС: $OS_LABEL"
+  fi
+  : > "$INSTALL_LOG"; chmod 600 "$INSTALL_LOG"
+  info "Подробный вывод шагов: $INSTALL_LOG"
+  _purge_legacy_ppa && ok "Удалены остатки старых PPA"
+  _ensure_dns || return 1
+
+  export DEBIAN_FRONTEND=noninteractive
+  run_step "Обновление списка пакетов" apt-get update -q || return 1
+  if ask_yes "  Обновить пакеты системы (apt upgrade)? [Y/n]: " y; then
+    run_step "Обновление системы" apt-get upgrade -y -q -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold || warn "apt upgrade с ошибкой — продолжаю"
+  fi
+  run_step "Пакеты (${#BASE_PKGS[@]})" apt_install "${BASE_PKGS[@]}" || { apt_errors; return 1; }
+
+  running=$(uname -r)
+  if ! run_step "Заголовки ядра $running" ensure_headers "$running"; then
+    warn "Заголовков под ядро $running в репозитории нет"
+    if ask_yes "  Поставить актуальное ядро с заголовками (понадобится перезагрузка)? [Y/n]: " y; then
+      _install_current_kernel || return 1
+    else
+      kernel_headers_help
+      return 1
+    fi
+  fi
+
+  if [[ -d "/lib/modules/$running/build" ]]; then
+    cur=$(mod_tag)
+    tag=$(resolve_tag mod)
+    if [[ "${cur#≈}" == "$tag" ]] && mod_built_for "$running"; then
+      ok "Модуль $tag уже установлен"
+    else
+      mod_install_tag "$tag" || return 1
+    fi
+  else
+    # Собираем только под новое ядро: работающему заголовков нет
+    tag=$(resolve_tag mod)
+    k=$(installed_kernels | tail -1)
+    info "Модуль будет собран под $k — он загрузится после перезагрузки"
+    mod_install_tag "$tag" || true
+  fi
+
+  tag=$(resolve_tag tools)
+  if [[ "$(tools_tag)" == "$tag" ]] && command -v awg &>/dev/null; then
+    ok "amneziawg-tools $tag уже установлены"
+  else
+    tools_install_tag "$tag" || return 1
+  fi
+
+  modprobe "$MOD_NAME" 2>/dev/null || true
+  mod_autoload
+  ip_forward_enable
+  mkdir -p "$AWG_DIR" && chmod 700 "$AWG_DIR"
+  expire_install
+  success_box "Компоненты установлены"
+  components_report
+
+  why=$(reboot_reason)
+  if [[ -n "$why" && "$why" != *modprobe* ]]; then
+    echo ""
+    warn "Нужна перезагрузка: $why"
+    if [[ "$why" == *"перезагрузка модуля"* ]]; then
+      mod_reload || true
+    elif ask_yes "  Перезагрузить сервер сейчас? [Y/n]: " y; then
+      ok "Перезагружаюсь. После — sudo awg2 → Сервер → Создать сервер"
+      sleep 2; reboot
+    fi
+  else
+    info "Следующий шаг: Сервер → Создать сервер"
+  fi
+}
+
+# ── Запуск awg0 с разбором ошибки ─────────────────────────
+# Сообщения awg-quick короткие, но однозначные — каждому соответствует одно
+# действие. Разбор избавляет от гадания по «awg-quick up провалился».
+awg_diagnose_up() {
+  local out="$1" low bad p holder
+  low="${out,,}"
+  if [[ "$low" == *"line unrecognized"* ]]; then
+    bad=$(grep -oiE 'line unrecognized: .?[A-Za-z0-9_]+' <<< "$out" | head -1 | grep -oE '[A-Za-z0-9_]+$')
+    err "amneziawg-tools не знают параметра ${bad:-из конфига}"
+    if [[ "$bad" =~ ^${AWG3_KEYS_RE}$ ]]; then
+      info "Это параметр AWG 3.x — обнови компоненты: Сервер → Модуль ядра"
+      info "или верни сервер на 2.0: Сервер → Протокол и параметры"
+    fi
+  elif [[ "$low" == *"invalid argument"* || "$low" == *"unable to modify interface"* ]]; then
+    err "Ядро отвергло параметры интерфейса"
+    bad=$(conf_hp_min_s_violations)
+    if [[ -n "$bad" ]]; then
+      info "AWG 3.x требует S1-S4 ≥ $AWG_HP_MIN_S, а в конфиге: $bad"
+      info "Лечится перегенерацией: Сервер → Протокол и параметры"
+    elif server_params | grep -qE "^${AWG3_KEYS_RE}"; then
+      if mod_stale; then info "В памяти прежняя сборка модуля — Сервер → Модуль ядра → перезагрузить модуль"
+      else info "Модуль не поддерживает параметры 3.x — Сервер → Модуль ядра → обновить"; fi
+    else
+      info "Смотри: dmesg | tail -20"
+    fi
+  elif [[ "$low" == *"unknown device type"* || "$low" == *"protocol not supported"* || "$low" == *"operation not supported"* ]]; then
+    err "Ядро не умеет интерфейсы amneziawg — модуль не загружен или собран под другое ядро"
+    info "Сервер → Модуль ядра (там же пересборка под все ядра)"
+  elif [[ "$low" == *"address already in use"* ]]; then
+    p=$(server_port)
+    err "UDP-порт ${p:-?} занят"
+    holder=$(ss -lunp 2>/dev/null | grep -E "[:.]${p}\b" || true)
+    [[ -n "$holder" ]] && sed 's/^/    /' <<< "$holder"
+  elif [[ "$low" == *iptables* ]]; then
+    err "Правила iptables из PostUp не применились — проверь: iptables -V"
+  elif [[ "$low" == *resolvconf* ]]; then
+    err "В серверном конфиге строка DNS — awg-quick ищет resolvconf. Убери DNS из [Interface]"
+  else
+    warn "Причина не распознана — смотри вывод выше и dmesg | tail -20"
+  fi
+}
+
+awg_up_diag() {
+  local out rc=0
+  out=$(awg-quick up "$SERVER_CONF" 2>&1) || rc=$?
+  if (( rc != 0 )) && [[ "$out" == *"already exists"* ]] && iface_up; then
+    awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true
+    rc=0; out=$(awg-quick up "$SERVER_CONF" 2>&1) || rc=$?
+  fi
+  (( rc == 0 )) && { log_info "awg0 поднят"; return 0; }
+  log_err "awg-quick up rc=$rc: $(tr '\n' ';' <<< "$out")"
+  echo -e "  ${D}── awg-quick up ──${N}"
+  sed 's/^/  │ /' <<< "$out"
+  awg_diagnose_up "$out"
+  return "$rc"
+}
+
+setup_autostart() {
+  mkdir -p "$AUTOSTART_DROPIN"
+  printf '[Service]\nExecStart=\nExecStart=/usr/bin/awg-quick up awg0\n' \
+    | write_file "$AUTOSTART_DROPIN/override.conf" 644
+  systemctl daemon-reload
+  systemctl enable awg-quick@awg0 &>/dev/null || warn "Не удалось включить автозапуск awg0"
+  mod_autoload
+}
+
+# ── Запись конфигов ───────────────────────────────────────
+# Параметры создаваемого сервера (заполняются меню или --auto).
+S_PROFILE=lite S_PROTO=2.0 S_REGION=world S_DNS="1.1.1.1, 1.0.0.1" MTU=1280
+S_NET="" S_PORT="" S_ENDPOINT_DOMAIN="" S_FIRST_CLIENT=""
+
+_postup_lines() {
+  local net="$1" dev="$2"
+  echo "PostUp = echo 1 > /proc/sys/net/ipv4/ip_forward; iptables -t nat -C POSTROUTING -s $net -o $dev -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s $net -o $dev -j MASQUERADE; iptables -C FORWARD -i awg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD -i awg0 -j ACCEPT; iptables -C FORWARD -o awg0 -j ACCEPT 2>/dev/null || iptables -I FORWARD -o awg0 -j ACCEPT"
+  echo "PostDown = iptables -t nat -D POSTROUTING -s $net -o $dev -j MASQUERADE 2>/dev/null || true; iptables -D FORWARD -i awg0 -j ACCEPT 2>/dev/null || true; iptables -D FORWARD -o awg0 -j ACCEPT 2>/dev/null || true"
+}
+
+# Клиентский конфиг. $1 файл, $2 приватный ключ, $3 адрес, $4 psk, $5 DNS, $6 MTU.
+write_client_conf() {
+  local f="$1" priv="$2" addr="$3" psk="$4" dns="$5" mtu="$6" srv_pub
+  srv_pub=$(conf_iface_get PrivateKey | awg pubkey) || return 1
+  {
+    echo "[Interface]"
+    echo "PrivateKey = $priv"
+    echo "Address = $addr"
+    echo "DNS = $dns"
+    echo "MTU = $mtu"
+    server_params
+    i_lines_block
+    echo ""
+    echo "[Peer]"
+    echo "PublicKey = $srv_pub"
+    echo "PresharedKey = $psk"
+    echo "Endpoint = $(endpoint_host):$(server_port)"
+    echo "AllowedIPs = 0.0.0.0/0, ::/0"
+    echo "PersistentKeepalive = $(keepalive_for "$(server_proto)")"
+  } | write_file "$f" 600
+}
+
+# Создаёт awg0.conf и первого клиента из S_* и выбранной мимикрии.
+server_write() {
+  local net="$S_NET" base srv_priv cli_priv psk dev
+  base="${net%.*}"
+  dev=$(uplink_iface) || { err "Не найден интерфейс маршрута по умолчанию"; return 1; }
+  gen_awg_params "$S_PROFILE" "$S_PROTO" || return 1
+  srv_priv=$(awg genkey); cli_priv=$(awg genkey); psk=$(awg genpsk)
+  mkdir -p "$AWG_DIR" && chmod 700 "$AWG_DIR"
+  {
+    echo "# AWG_PROFILE=$S_PROFILE"
+    echo "# AmneziaWG Toolza — AWG $S_PROTO server config"
+    echo "# Region: $S_REGION"
+    echo "# AWG_PROTO=$S_PROTO"
+    echo "# AWG_OBF_LEVEL=$OBF_LEVEL"
+    echo "# AWG_CPS_BUDGET=$CPS_BUDGET"
+    echo "# AWG_MIMICRY=$MIMICRY"
+    [[ -n "$CPS_DOMAIN" && "$MIMICRY" != none ]] && echo "# AWG_MIMICRY_DOMAIN=$CPS_DOMAIN"
+    [[ -n "$S_ENDPOINT_DOMAIN" ]] && echo "# AWG_ENDPOINT=$S_ENDPOINT_DOMAIN"
+    echo "[Interface]"
+    echo "PrivateKey = $srv_priv"
+    echo "Address = ${base}.1/24"
+    echo "ListenPort = $S_PORT"
+    echo "MTU = $MTU"
+    echo "$AWG_PARAMS"
+    echo ""
+    _postup_lines "$net" "$dev"
+    echo ""
+    echo "[Peer]"
+    echo "# $S_FIRST_CLIENT"
+    echo "# mimicry=$(mimicry_tag)"
+    echo "PublicKey = $(awg pubkey <<< "$cli_priv")"
+    echo "PresharedKey = $psk"
+    echo "AllowedIPs = ${base}.2/32"
+  } | write_file "$SERVER_CONF" 600
+  write_client_conf "$(client_file "$S_FIRST_CLIENT")" "$cli_priv" "${base}.2/32" "$psk" "$S_DNS" "$MTU"
+}
+
+# Поднять созданный сервер, открыть порт, включить автозапуск.
+server_start_new() {
+  awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true
+  awg_up_diag || return 1
+  if ufw_active; then
+    ufw_allow "$S_PORT/udp" AmneziaWG && ok "UFW: открыт $S_PORT/udp"
+    if grep -q '^DEFAULT_FORWARD_POLICY="DROP"' /etc/default/ufw 2>/dev/null; then
+      sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+      ufw reload &>/dev/null || true
+      info "UFW: DEFAULT_FORWARD_POLICY=ACCEPT (нужно для выхода клиентов в интернет)"
+    fi
+  fi
+  setup_autostart
+  expire_install
+  log_info "сервер создан: AWG $S_PROTO, профиль $S_PROFILE, порт $S_PORT"
+}
+
+pick_awg_net() { taken_networks | py pick-net awg; }
+
+# ── Создание сервера (меню) ───────────────────────────────
+_choose_dns() {
+  local c d
+  echo -e "  1) Cloudflare 1.1.1.1   2) Google 8.8.8.8   3) Quad9 9.9.9.9"
+  echo -e "  4) Яндекс 77.88.8.8     5) Вручную"
+  read_choice c "${C}  DNS клиентов [1-5] (Enter = 1): ${N}" 1 5 1
+  case "$c" in
+    1) S_DNS="1.1.1.1, 1.0.0.1" ;; 2) S_DNS="8.8.8.8, 8.8.4.4" ;;
+    3) S_DNS="9.9.9.9, 149.112.112.112" ;; 4) S_DNS="77.88.8.8, 77.88.8.1" ;;
+    5) while true; do
+         read_line d "${C}  DNS через запятую: ${N}"
+         [[ "$d" =~ ^[0-9.,[:space:]]+$ ]] && { S_DNS="$d"; break; }
+         warn "Нужны IPv4-адреса через запятую"
+       done ;;
+  esac
+}
+
+_choose_mtu() {  # $1 — значение по умолчанию
+  local c v
+  echo -e "  1) $1 (рекомендуется)  2) 1420  3) 1380  4) 1320  5) 1280  6) вручную"
+  read_choice c "${C}  MTU [1-6] (Enter = 1): ${N}" 1 6 1
+  case "$c" in
+    1) MTU=$1 ;; 2) MTU=1420 ;; 3) MTU=1380 ;; 4) MTU=1320 ;; 5) MTU=1280 ;;
+    6) while true; do
+         read_line v "${C}  MTU (1280-1500): ${N}"
+         [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1280 && v <= 1500 )) && { MTU=$v; break; }
+         warn "Число 1280-1500"
+       done ;;
+  esac
+}
+
+# Версия протокола нового сервера. 3.1 по умолчанию, если компоненты её умеют.
+_choose_proto() {
+  local c def=2 rc=0
+  proto_supported 3.1 || rc=$?
+  echo ""
+  hdr "Версия протокола"
+  echo -e "  ${G}1${N} AWG 2.0 ${D}— любой клиент AmneziaWG; H-диапазоны режут скорость${N}"
+  echo -e "  ${G}2${N} AWG 3.1 ${D}— шифрованные заголовки, паддинг, случайные таймеры, быстрее${N}"
+  echo -e "  ${Y}  Версия на весь сервер. Для 3.1 нужен AmneziaVPN 5.0.1.5+ / AmneziaWG с 3.1.${N}"
+  if (( rc == 1 )); then
+    def=1
+    warn "Установленные модуль/tools не умеют 3.1 — Сервер → Модуль ядра → обновить"
+  fi
+  read_choice c "${C}  Выбор [1-2] (Enter = $def): ${N}" 1 2 "$def"
+  if [[ "$c" == 2 ]]; then
+    if (( rc == 1 )); then
+      ask_yes "  Обновить модуль и tools сейчас? [Y/n]: " y || { S_PROTO=2.0; return 0; }
+      mod_update_flow && tools_update_flow
+      proto_supported 3.1 || { err "3.1 по-прежнему не поддерживается — остаюсь на 2.0"; S_PROTO=2.0; return 0; }
+    fi
+    S_PROTO=3.1
+  else
+    S_PROTO=2.0
+  fi
+}
+
+_choose_profile() {
+  local c
+  echo ""
+  hdr "Профиль"
+  echo -e "  ${G}1${N} AmneziaVPN ${D}— как официальный клиент: MTU 1280, без I1-I5, полная скорость${N} ${C}(рекомендуется)${N}"
+  echo -e "  ${G}2${N} Мощный ${D}— широкие диапазоны и цепочка I1-I5, сильнее против DPI${N}"
+  echo -e "  ${D}0 назад${N}"
+  read_choice c "${C}  Выбор [0-2] (Enter = 1): ${N}" 0 2 1
+  case "$c" in
+    0) return 1 ;;
+    1) S_PROFILE=lite; MIMICRY=none; OBF_LEVEL=1; CPS_BUDGET=0; CPS_DOMAIN=""; I_LINES=()
+       # Один компактный I1 (DNS) — только по согласию: у официальной Amnezia строк I нет
+       if ask_yes "  Добавить один компактный пакет мимикрии I1 (DNS, ~90 симв)? [y/N]: " n; then
+         OBF_LEVEL=2; MIMICRY=dns
+         choose_cps_domain
+         gen_chain dns "$CPS_DOMAIN" --only-i1 || { MIMICRY=none; OBF_LEVEL=1; }
+       fi ;;
+    2) S_PROFILE=pro
+       choose_and_gen_chain || return 1 ;;
+  esac
+}
+
+_choose_net() {
+  local c v
+  echo -e "  1) Случайная 10.x.y.0/24 без пересечений ${C}(рекомендуется)${N}   2) Вручную"
+  read_choice c "${C}  Подсеть [1-2] (Enter = 1): ${N}" 1 2 1
+  if [[ "$c" == 1 ]]; then
+    S_NET=$(pick_awg_net) || { err "Не нашёл свободную /24"; return 1; }
+    return 0
+  fi
+  while true; do
+    read_line v "${C}  Подсеть вида 10.8.0.0/24: ${N}"
+    if valid_cidr "$v" && [[ "${v#*/}" == 24 ]]; then
+      v="${v%.*}.0/24"
+      if taken_networks | py net-overlaps "$v" >/dev/null; then
+        warn "Пересекается с адресами или маршрутами сервера"
+      else
+        S_NET="$v"; return 0
+      fi
+    else
+      warn "Нужна сеть /24, например 10.8.0.0/24"
+    fi
+  done
+}
+
+_choose_port() {
+  local v
+  while true; do
+    read_line v "${C}  UDP-порт [Enter = случайный]: ${N}"
+    v="${v// /}"
+    if [[ -z "$v" ]]; then S_PORT=$(random_free_udp_port) || return 1; return 0; fi
+    if [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1024 && v <= 65535 )); then
+      udp_port_busy "$v" && { warn "Порт $v занят"; continue; }
+      S_PORT=$v; return 0
+    fi
+    warn "Порт — число 1024-65535"
+  done
+}
+
+_choose_endpoint() {
+  local d
+  S_ENDPOINT_DOMAIN=""
+  ask_yes "  Использовать в конфигах домен вместо IP (переезд без перевыдачи)? [y/N]: " n || return 0
+  while true; do
+    read_line d "${C}  Домен (Enter — отмена): ${N}"
+    d="${d// /}"
+    [[ -z "$d" ]] && return 0
+    valid_domain "$d" && break
+    warn "Нужно имя вида vpn.example.com"
+  done
+  domain_points_here "$d" || ask_yes "  Всё равно использовать? [y/N]: " n || return 0
+  S_ENDPOINT_DOMAIN="$d"
+}
+
+do_create_server() {
+  local why
+  command -v awg &>/dev/null || { err "Компоненты не установлены — Сервер → 1"; return 1; }
+  if server_exists; then
+    warn "Сервер уже создан (профиль $(profile_label), AWG $(server_proto))"
+    info "Сменить версию или параметры: Сервер → Протокол и параметры; всё заново — сброс сервера"
+    return 0
+  fi
+  why=$(reboot_reason)
+  if [[ "$why" == *modprobe* ]]; then modprobe "$MOD_NAME" 2>/dev/null; why=$(reboot_reason); fi
+  if [[ "$why" == *"не собран"* ]]; then
+    err "Модуль не собран под работающее ядро $(uname -r) — Сервер → 1 (установка)"
+    return 1
+  fi
+  if [[ -n "$why" ]]; then
+    warn "$why"
+    ask_yes "  Продолжить без перезагрузки? [y/N]: " n || return 0
+  fi
+
+  echo ""
+  hdr "Создание сервера"
+  if ask_yes "  Сервер в России (пулы доменов мимикрии под РФ)? [y/N]: " n; then S_REGION=ru; else S_REGION=world; fi
+  _choose_dns
+  _choose_profile || return 0
+  if [[ "$S_PROFILE" == lite ]]; then _choose_mtu 1280; else _choose_mtu 1320; fi
+  _choose_proto
+  _choose_net || return 1
+  _choose_port || { err "Нет свободного UDP-порта"; return 1; }
+  _choose_endpoint
+  S_FIRST_CLIENT=$(rand_name)
+
+  echo ""
+  hdr "Итог"
+  echo -e "  Версия   : ${W}AWG $S_PROTO${N}, профиль ${W}$(profile_label "$S_PROFILE")${N}"
+  echo -e "  Мимикрия : ${W}$MIMICRY${N}${CPS_DOMAIN:+ ($CPS_DOMAIN)}"
+  echo -e "  Подсеть  : ${W}$S_NET${N}, MTU ${W}$MTU${N}, DNS ${W}$S_DNS${N}"
+  echo -e "  Endpoint : ${W}${S_ENDPOINT_DOMAIN:-$(public_ip_cached)}:$S_PORT${N}"
+  ask_yes "  Создать? [Y/n]: " y || { info "Отменено"; return 0; }
+
+  server_write || return 1
+  if ! server_start_new; then
+    err "Сервер не поднялся — конфиг сохранён: $SERVER_CONF"
+    return 1
+  fi
+  share_config "$(client_file "$S_FIRST_CLIENT")"
+  success_box "Сервер создан: AWG $S_PROTO, клиент $S_FIRST_CLIENT"
+  echo -e "  Конфиг клиента: ${W}$(client_file "$S_FIRST_CLIENT")${N}"
+  mimicry_module_warnings
+}
+
+# Неинтерактивная установка: компоненты, сервер и client1.
+# Переменные окружения: AWG_PROFILE=lite|pro, AWG_PROTO=2.0|3.1, AWG_PORT.
+do_autoinstall() {
+  AUTO_MODE=1
+  command -v awg &>/dev/null || do_install || exit 1
+  if server_exists; then
+    warn "Сервер уже создан — вывожу конфиг client1"
+    [[ -f "$(client_file client1)" ]] && cat "$(client_file client1)"
+    return 0
+  fi
+  S_PROFILE="${AWG_PROFILE:-lite}"
+  [[ "$S_PROFILE" =~ ^(lite|pro)$ ]] || S_PROFILE=lite
+  if [[ -n "${AWG_PROTO:-}" ]]; then S_PROTO="$AWG_PROTO"
+  elif proto_supported 3.1; then S_PROTO=3.1
+  else S_PROTO=2.0; fi
+  S_REGION=world; S_DNS="1.1.1.1, 1.0.0.1"; S_FIRST_CLIENT=client1; S_ENDPOINT_DOMAIN=""
+  I_LINES=(); CPS_DOMAIN=""
+  if [[ "$S_PROFILE" == pro ]]; then
+    MTU=1320; OBF_LEVEL=3; MIMICRY=dns; CPS_BUDGET=1500
+    gen_chain dns "" || { MIMICRY=none; OBF_LEVEL=1; }
+  else
+    MTU=1280; OBF_LEVEL=1; MIMICRY=none; CPS_BUDGET=0
+  fi
+  S_NET=$(pick_awg_net) || { err "Нет свободной подсети"; exit 1; }
+  S_PORT="${AWG_PORT:-$(random_free_udp_port)}"
+  server_write && server_start_new || exit 1
+  success_box "Сервер создан: AWG $S_PROTO, порт $S_PORT"
+  cat "$(client_file client1)"
+}
+
+# ── Перезапуск и ремонт ───────────────────────────────────
+do_restart() {
+  server_exists || { err "Сервер не создан"; return 1; }
+  info "Перезапуск awg0..."
+  server_restart && ok "awg0 перезапущен"
+}
+
+REPAIR_ISSUES=0 REPAIR_FIXED=0
+_issue() { REPAIR_ISSUES=$((REPAIR_ISSUES + 1)); warn "$1"; }
+_fixed() { REPAIR_FIXED=$((REPAIR_FIXED + 1)); ok "$1"; }
+
+do_repair() {
+  local bad conf_n live_n dev net perm rc
+  REPAIR_ISSUES=0 REPAIR_FIXED=0
+  echo ""
+  hdr "Проверка и ремонт"
+
+  if mod_loaded; then ok "Модуль загружен"
+  else
+    _issue "Модуль не загружен"
+    if modprobe "$MOD_NAME" 2>/dev/null; then _fixed "modprobe amneziawg"
+    elif secure_boot_on; then err "Secure Boot отвергает неподписанный модуль"
+    elif command -v dkms &>/dev/null && ensure_headers "$(uname -r)" \
+         && run_step "Пересборка модуля под $(uname -r)" _mod_dkms_install_all \
+         && modprobe "$MOD_NAME" 2>/dev/null; then _fixed "Модуль пересобран и загружен"
+    else err "Не удалось — Сервер → Модуль ядра"; fi
+  fi
+  mod_stale && _issue "В памяти прежняя сборка модуля — Сервер → Модуль ядра → перезагрузить модуль"
+  if grep -qs "^$MOD_NAME" "$MODULES_LOAD_FILE"; then ok "Автозагрузка модуля"
+  else _issue "Нет автозагрузки модуля"; mod_autoload && _fixed "Автозагрузка настроена"; fi
+
+  server_exists || { err "Сервер не создан"; return 1; }
+  if [[ -z "$(conf_marker AWG_OBF_LEVEL)" ]]; then
+    # Бот по этой метке решает, сколько пакетов I1-I5 выдать клиенту
+    if grep -qsE '^I[2-5] = ' "$CLIENT_DIR"/*_awg[23].conf; then conf_marker_set AWG_OBF_LEVEL 3
+    elif grep -qsE '^I1 = ' "$CLIENT_DIR"/*_awg[23].conf; then conf_marker_set AWG_OBF_LEVEL 2; fi
+    [[ -n "$(conf_marker AWG_OBF_LEVEL)" ]] && ok "Восстановлена метка AWG_OBF_LEVEL по конфигам клиентов"
+  fi
+  bad=$(conf_hp_min_s_violations)
+  [[ -n "$bad" ]] && _issue "S ниже $AWG_HP_MIN_S при защите заголовков: $bad — Сервер → Протокол и параметры"
+  if [[ "$(server_proto)" == 3* ]]; then
+    rc=0; proto_supported "$(server_proto)" || rc=$?
+    (( rc == 1 )) && _issue "Сервер на AWG $(server_proto), а компоненты её не умеют — Сервер → Модуль ядра"
+  fi
+  if [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" == 1 ]]; then ok "IP forwarding"
+  else _issue "IP forwarding выключен"; ip_forward_enable && _fixed "IP forwarding включён"; fi
+
+  if ! iface_up; then
+    _issue "awg0 не поднят"
+    awg_up_diag && _fixed "awg0 поднят"
+  else
+    conf_n=$(grep -c '^\[Peer\]' "$SERVER_CONF" || true)
+    live_n=$(awg show "$AWG_IF" peers 2>/dev/null | wc -l)
+    if [[ "$conf_n" != "$live_n" ]]; then
+      _issue "Пиров в конфиге $conf_n, в ядре $live_n"
+      server_restart && _fixed "awg0 перезапущен"
+    else ok "awg0 работает, пиров: $live_n"; fi
+  fi
+  dev=$(uplink_iface || true); net=$(server_net || true)
+  if [[ -n "$dev" && -n "$net" ]]; then
+    if iptables -t nat -C POSTROUTING -s "$net" -o "$dev" -j MASQUERADE 2>/dev/null; then ok "NAT на $dev"
+    else _issue "Нет NAT для $net на $dev"; ipt_add -t nat POSTROUTING -s "$net" -o "$dev" -j MASQUERADE && _fixed "NAT добавлен"; fi
+  fi
+  perm=$(stat -c %a "$SERVER_CONF")
+  [[ "$perm" == 600 ]] || { _issue "Права $SERVER_CONF = $perm"; chmod 600 "$SERVER_CONF" && _fixed "Права 600"; }
+  perm=$(stat -c %a "$AWG_DIR")
+  [[ "$perm" == 700 ]] || { _issue "Права $AWG_DIR = $perm"; chmod 700 "$AWG_DIR" && _fixed "Права 700"; }
+  unit_enabled awg-quick@awg0 || { _issue "Нет автозапуска awg0"; setup_autostart && _fixed "Автозапуск включён"; }
+
+  echo ""
+  if (( REPAIR_ISSUES == 0 )); then success_box "Всё в порядке"
+  elif (( REPAIR_FIXED == REPAIR_ISSUES )); then success_box "Найдено проблем: $REPAIR_ISSUES, все исправлены"
+  else warn "Найдено проблем: $REPAIR_ISSUES, исправлено: $REPAIR_FIXED"; fi
+}
+
+# ── Протокол и параметры ──────────────────────────────────
+# Предупреждения про модуль, влияющие на мимикрию I1-I5.
+mimicry_module_warnings() {
+  local n=0
+  if [[ "$(server_proto)" == 3.1 ]] && grep -qsE '^I1 = ' "$CLIENT_DIR"/*_awg3.conf; then
+    mod_trailer_fix || { [[ $? -eq 1 ]] && warn "Модуль дописывает хвост к I1-I5 — мимикрия слабее. Обнови модуль (Сервер → Модуль ядра)"; }
+  fi
+  n=$(awk -F' = ' '/^I[1-5] = /{n += length($2)} END{print n+0}' "$CLIENT_DIR"/*_awg[23].conf 2>/dev/null | sort -n | tail -1)
+  (( ${n:-0} > 3598 )) && warn "Цепочка I1-I5 длиннее $n симв — выше предела awg-tools (буфер 4 КБ)"
+  return 0
+}
+
+# Подсказка для шапки: предложить переход на 3.1.
+proto_upgrade_hint() {
+  server_exists || return 0
+  [[ "$(server_proto)" == 3.1 ]] && return 0
+  if proto_supported 3.1; then
+    echo -e "${G}⬆ доступен переход на AWG 3.1${N} ${D}— Сервер → 4${N}"
+  else
+    echo -e "${Y}для AWG 3.1 обнови модуль${N} ${D}— Сервер → 5${N}"
+  fi
+}
+
+# Перегенерация параметров обфускации с переходом на версию $1.
+# Ключи, адреса, имена, сроки и I1-I5 сохраняются. Все клиенты получают
+# новые конфиги — старые перестают подключаться.
+server_regen_params() {
+  local target="$1" cur profile snap f n=0 ka
+  cur=$(server_proto)
+  profile=$(server_profile)
+  if [[ "$target" == 3* ]]; then
+    local rc=0
+    proto_supported "$target" || rc=$?
+    if (( rc == 1 )); then
+      warn "Установленные модуль или tools не умеют AWG $target"
+      ask_yes "  Обновить компоненты сейчас? [Y/n]: " y || return 1
+      mod_update_flow || return 1
+      tools_update_flow || return 1
+      proto_supported "$target" || { err "AWG $target всё ещё не поддерживается"; return 1; }
+    fi
+  fi
+
+  auto_backup regen || warn "Авто-бэкап не удался"
+  mktmp snap -d || return 1
+  mkdir -p "$snap/clients"
+  cp -a "$SERVER_CONF" "$snap/"
+  while read -r f; do cp -a "$f" "$snap/clients/"; done < <(client_files)
+
+  MTU=$(conf_iface_get MTU)
+  gen_awg_params "$profile" "$target" || return 1
+  py params-replace "$SERVER_CONF" <<< "$AWG_PARAMS" || { err "Не удалось обновить $SERVER_CONF"; return 1; }
+  [[ -n "$MTU" && "$MTU" != "$(conf_iface_get MTU)" ]] && sed -i "s/^MTU = .*/MTU = $MTU/" "$SERVER_CONF"
+  conf_marker_set AWG_PROTO "$target"
+  sed -i "s/^# AmneziaWG Toolza — AWG .* server config/# AmneziaWG Toolza — AWG $target server config/" "$SERVER_CONF"
+  ka=$(keepalive_for "$target")
+  while read -r f; do
+    py params-replace "$f" <<< "$AWG_PARAMS" && py keepalive-set "$f" "$ka" && n=$((n + 1))
+  done < <(client_files)
+  client_files_sync_suffix
+
+  # Параметры [Interface] syncconf не применяет — только down/up.
+  if ! server_restart; then
+    err "awg0 не поднялся с новыми параметрами — возвращаю прежние"
+    cp -a "$snap/${SERVER_CONF##*/}" "$SERVER_CONF"
+    rm -f "$CLIENT_DIR"/*_awg[23].conf
+    cp -a "$snap/clients/." "$CLIENT_DIR/"
+    server_restart && ok "Прежняя конфигурация восстановлена"
+    return 1
+  fi
+  log_info "параметры перегенерированы: $cur → $target, клиентов $n"
+  success_box "AWG $target: параметры обновлены, клиентов $n"
+  warn "Каждому клиенту нужен новый конфиг — до замены он не подключится"
+  (( n > 0 )) && info "Все конфиги архивом: Клиенты → Экспорт; по одному — QR/текст или бот"
+  [[ "$target" == 3.1 && "$cur" != 3.1 ]] && info "Клиентам нужен AmneziaVPN 5.0.1.5+ или AmneziaWG с поддержкой 3.1"
+  mimicry_module_warnings
+}
+
+do_proto_menu() {
+  server_exists || { err "Сервер не создан"; return 1; }
+  local cur c target n
+  cur=$(server_proto)
+  n=$(client_files | wc -l)
+  echo ""
+  hdr "Протокол и параметры"
+  echo -e "  Сейчас: ${W}AWG $cur${N}, профиль ${W}$(profile_label)${N}, клиентов ${W}$n${N}"
+  echo ""
+  if [[ "$cur" != 3.1 ]]; then
+    echo -e "  ${G}1)${N} Перейти на AWG 3.1 ${D}— шифрованные заголовки, паддинг, быстрее 2.0${N}"
+  else
+    echo -e "  ${C}1)${N} Перегенерировать параметры AWG 3.1 ${D}— если конфиг утёк${N}"
+  fi
+  if [[ "$cur" == 2.0 ]]; then
+    echo -e "  ${C}2)${N} Перегенерировать параметры AWG 2.0"
+  else
+    echo -e "  ${Y}2)${N} Вернуться на AWG 2.0 ${D}— для старых клиентов${N}"
+  fi
+  echo -e "  ${W}0)${N} ← Назад"
+  read_choice c "${C}  Выбор [0-2]: ${N}" 0 2 0
+  case "$c" in 1) target=3.1 ;; 2) target=2.0 ;; *) return 0 ;; esac
+  echo ""
+  warn "Все клиенты ($n) потеряют связь до получения нового конфига"
+  [[ "$target" != "$cur" ]] && warn "Версия меняется: AWG $cur → AWG $target"
+  read_confirm "${R}  Продолжить? (введи yes): ${N}" || { info "Отменено"; return 0; }
+  server_regen_params "$target"
+}
+
+# ── Endpoint ──────────────────────────────────────────────
+do_endpoint_menu() {
+  server_exists || { err "Сервер не создан"; return 1; }
+  local cur port c d ep
+  cur=$(endpoint_domain); port=$(server_port)
+  echo ""
+  hdr "Endpoint для клиентов"
+  echo -e "  Сейчас: ${W}${cur:-$(public_ip_cached)}:$port${N} ${D}(${cur:+домен}${cur:-IP})${N}"
+  echo -e "  ${C}1)${N} Задать домен   ${C}2)${N} Вернуться на IP   ${W}0)${N} Назад"
+  read_choice c "${C}  Выбор [0-2]: ${N}" 0 2 0
+  case "$c" in
+    1) while true; do
+         read_line d "${C}  Домен (Enter — отмена): ${N}"; d="${d// /}"
+         [[ -z "$d" ]] && return 0
+         valid_domain "$d" && break
+         warn "Нужно имя вида vpn.example.com"
+       done
+       domain_points_here "$d" || ask_yes "  Всё равно задать? [y/N]: " n || return 0
+       conf_marker_set AWG_ENDPOINT "$d"; ep="$d:$port" ;;
+    2) [[ -n "$cur" ]] || { info "Уже IP"; return 0; }
+       conf_marker_del AWG_ENDPOINT; ep="$(public_ip_cached):$port" ;;
+    *) return 0 ;;
+  esac
+  ok "Endpoint для новых конфигов: $ep"
+  (( $(client_files | wc -l) )) || return 0
+  if ask_yes "  Переписать Endpoint в уже выданных конфигах? [Y/n]: " y; then
+    client_files | while read -r f; do sed -i "s|^Endpoint = .*|Endpoint = $ep|" "$f"; done
+    ok "Конфиги обновлены — клиентам нужно забрать новые"
+  fi
+}
+
+# ── Сброс ─────────────────────────────────────────────────
+do_reset_server() {
+  server_exists || { info "Сервер не создан"; return 0; }
+  echo ""
+  hdr "Сброс сервера"
+  warn "Будут удалены awg0, $SERVER_CONF и все клиенты ($(client_files | wc -l))."
+  info "Компоненты и бэкапы остаются; авто-бэкап будет сделан."
+  read_confirm "${R}  Подтверди сброс (введи yes): ${N}" || { info "Отменено"; return 0; }
+  auto_backup reset || warn "Авто-бэкап не удался"
+  tunnels_panic_reset quiet
+  awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true
+  rm -f "$SERVER_CONF" "$SERVER_CONF".bak.* "$SERVER_CONF".pre_* "$CLIENT_DIR"/*_awg[23].conf
+  ufw_delete_matching AmneziaWG
+  : > "$WARP_PEERS" 2>/dev/null || true
+  : > "$XRAY_PEERS" 2>/dev/null || true
+  : > "$EXITS_PEERS" 2>/dev/null || true
+  ok "Сервер сброшен. Создать новый: Сервер → Создать сервер"
+  log_info "сервер сброшен"
+}
