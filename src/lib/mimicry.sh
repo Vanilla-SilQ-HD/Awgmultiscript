@@ -129,15 +129,15 @@ choose_mimicry() {
   (( OBF_LEVEL == 1 )) && return 0
   echo ""
   hdr "Профиль мимикрии"
-  echo -e "  ${G}1${N} QUIC       Initial 1200 Б, ClientHello Chrome, шифрован по RFC 9001"
-  echo -e "  ${G}2${N} cURL QUIC  отпечаток curl --http3, SNI спрятан в ECH"
-  echo -e "  ${G}3${N} DNS        запрос с EDNS0, самый короткий — плотный QR"
-  echo -e "  ${G}4${N} STUN       Binding / TURN Allocate к ICE-провайдеру"
-  echo -e "  ${G}5${N} WebRTC     STUN + DTLS + RTP + RTCP — начало звонка"
-  echo -e "  ${Y}6${N} SIP        OPTIONS/REGISTER/INVITE, открытый текст"
-  echo -e "  ${Y}7${N} NTP        48 Б, беден на детали"
-  echo -e "  ${Y}8${N} RTP        медиапоток без сигналинга"
-  echo -e "  ${Y}9${N} SSDP       локальный протокол, наружу ходит редко"
+  echo -e "  ${G}1${N} QUIC       ${D}Chrome, HTTP/3${N}"
+  echo -e "  ${G}2${N} cURL QUIC  ${D}curl, SNI в ECH${N}"
+  echo -e "  ${G}3${N} DNS        ${D}короткий, плотный QR${N}"
+  echo -e "  ${G}4${N} STUN       ${D}ICE-провайдер${N}"
+  echo -e "  ${G}5${N} WebRTC     ${D}начало звонка${N}"
+  echo -e "  ${Y}6${N} SIP        ${D}открытый текст${N}"
+  echo -e "  ${Y}7${N} NTP        ${D}48 байт, мало деталей${N}"
+  echo -e "  ${Y}8${N} RTP        ${D}медиа без сигналинга${N}"
+  echo -e "  ${Y}9${N} SSDP       ${D}наружу ходит редко${N}"
   echo -e "  ${D}0 назад${N}"
   # Цепочка уходит залпом за микросекунды. Пять пакетов подряд естественны
   # для DNS (A/AAAA/HTTPS), RTP и ICE-сбора STUN; пять QUIC Initial в одну
@@ -168,7 +168,7 @@ choose_cps_budget() {
   echo -e "  ${D}Профиль $MIMICRY: пакет ~$pkt символов, режется целыми пакетами.${N}"
   echo -e "  ${G}1${N} Компактная ~1500 — влезает в QR → $(_cps_fit 1500 "$pkt") из 5"
   echo -e "  ${G}2${N} Средняя ~3000 → $(_cps_fit 3000 "$pkt") из 5"
-  echo -e "  ${G}3${N} Максимум $CPS_HARD_LIMIT (предел awg-tools) → $(_cps_fit "$CPS_HARD_LIMIT" "$pkt") из 5"
+  echo -e "  ${G}3${N} Максимум $CPS_HARD_LIMIT → $(_cps_fit "$CPS_HARD_LIMIT" "$pkt") из 5"
   read_choice c "${C}  Выбор [1-3] (Enter = $def): ${N}" 1 3 "$def"
   case "$c" in 1) CPS_BUDGET=1500 ;; 2) CPS_BUDGET=3000 ;; *) CPS_BUDGET=$CPS_HARD_LIMIT ;; esac
 }
@@ -185,8 +185,9 @@ choose_cps_domain() {
   else
     echo ""
     hdr "Домен мимикрии (один на все I1-I5)"
-    echo -e "  ${G}1${N} Ввести свой ${D}— живой сайт, куда ходят с устройства${N} ${C}(рекомендуется)${N}"
-    echo -e "  ${G}2${N} Из встроенного пула ${D}— с проверкой доступности${N}"
+    echo -e "  ${G}1${N} Ввести свой ${C}(рекомендуется)${N}"
+    echo -e "  ${G}2${N} Из встроенного пула"
+    echo -e "  ${D}  Свой — живой сайт, куда ходят с устройства клиента.${N}"
     [[ "$MIMICRY" == *quic ]] && echo -e "  ${Y}  Для QUIC сайт должен отдавать HTTP/3.${N}"
     read_choice c "${C}  Выбор [1-2] (Enter = 1): ${N}" 1 2 1
     [[ "$c" == 2 ]] && ask_own=0

@@ -103,7 +103,9 @@ _cascade_port_conflict() {  # proto порт → причина в stdout
 cascade_add() {
   local mode="$1" proto p protos in out dst comment why added=0
   echo -e "  ${D}Клиент подключается к этому серверу, трафик уходит на конечный.${N}"
-  echo -e "  1) UDP   2) TCP   3) UDP + TCP"
+  echo -e "  ${C}1)${N} UDP"
+  echo -e "  ${C}2)${N} TCP"
+  echo -e "  ${C}3)${N} UDP + TCP"
   read_choice p "${C}  Протокол [1-3] (Enter = 1): ${N}" 1 3 1
   case "$p" in 1) protos=(udp) ;; 2) protos=(tcp) ;; 3) protos=(udp tcp) ;; esac
   while true; do
@@ -254,11 +256,16 @@ do_cascade_menu() {
     hdr "Каскад портов"
     echo -e "  Правил: ${W}$(cascade_count)${N}   Служба: $(unit_enabled awg-cascade.service && echo -e "${G}● автозапуск${N}" || echo -e "${D}○ нет${N}")"
     echo ""
-    echo -e "  ${C}1)${N} Добавить (один порт)     ${C}2)${N} Добавить (разные порты)"
-    echo -e "  ${C}3)${N} Список                   ${C}4)${N} Удалить правило"
-    echo -e "  ${C}5)${N} Переприменить правила    ${C}6)${N} Диагностика"
-    echo -e "  ${C}7)${N} Отчёт в файл             ${Y}8)${N} Удалить все правила"
-    echo -e "  ${R}d)${N} Удалить каскад полностью  ${W}0)${N} ← Назад"
+    echo -e "  ${C}1)${N} Добавить (один порт)"
+    echo -e "  ${C}2)${N} Добавить (разные порты)"
+    echo -e "  ${C}3)${N} Список"
+    echo -e "  ${C}4)${N} Удалить правило"
+    echo -e "  ${C}5)${N} Переприменить правила"
+    echo -e "  ${C}6)${N} Диагностика"
+    echo -e "  ${C}7)${N} Отчёт в файл"
+    echo -e "  ${Y}8)${N} Удалить все правила"
+    echo -e "  ${R}d)${N} Удалить каскад полностью"
+    echo -e "  ${W}0)${N} ← Назад"
     read_choice c "${C}  Выбор: ${N}" 0 8 0 "d"
     case "$c" in
       1) cascade_add same || true ;;

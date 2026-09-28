@@ -59,7 +59,15 @@ _name_free() { valid_client_name "$1" && ! client_exists "$1" && [[ ! -e "$CLIEN
 
 _ask_expire() {  # → unix-время в stdout или пусто
   local c d ts=""
-  echo -e "  Срок действия: 1) бессрочно  2) 1 час  3) 1 день  4) 7 дней  5) 30 дней  6) дата" >&2
+  {
+    echo -e "  Срок действия:"
+    echo -e "  ${C}1)${N} Бессрочно"
+    echo -e "  ${C}2)${N} 1 час"
+    echo -e "  ${C}3)${N} 1 день"
+    echo -e "  ${C}4)${N} 7 дней"
+    echo -e "  ${C}5)${N} 30 дней"
+    echo -e "  ${C}6)${N} До даты"
+  } >&2
   read_choice c "${C}  Выбор [1-6] (Enter = 1): ${N}" 1 6 1 >&2
   case "$c" in
     2) ts=$(date -d '+1 hour' +%s) ;; 3) ts=$(date -d '+1 day' +%s) ;;
@@ -82,7 +90,10 @@ _client_mimicry() {
       gen_chain quic "${SCAN_OK[0]:-}" --only-i1 || MIMICRY=none ;;
     *)
       c=$(conf_marker AWG_MIMICRY)
-      echo -e "  Мимикрия I1-I5: 1) как у сервера (${c:-none})  2) выбрать  3) без I1-I5"
+      echo -e "  Мимикрия I1-I5:"
+      echo -e "  ${C}1)${N} Как у сервера ${D}(${c:-none})${N}"
+      echo -e "  ${C}2)${N} Выбрать"
+      echo -e "  ${C}3)${N} Без I1-I5"
       read_choice c "${C}  Выбор [1-3] (Enter = 1): ${N}" 1 3 1
       case "$c" in
         1) gen_chain_from_server ;;
@@ -143,7 +154,8 @@ do_bulk_add() {
   server_exists || { err "Сервер не создан"; return 1; }
   local c raw prefix count names=() n i addr expire created=0 part
   local -a parts=()
-  echo -e "  1) Префикс + количество (user-001, user-002 ...)  2) Список имён через запятую"
+  echo -e "  ${C}1)${N} Префикс + количество ${D}(user-001...)${N}"
+  echo -e "  ${C}2)${N} Имена через запятую"
   read_choice c "${C}  Выбор [1-2] (Enter = 1): ${N}" 1 2 1
   if [[ "$c" == 2 ]]; then
     read_line raw "${C}  Имена через запятую: ${N}"
@@ -203,7 +215,8 @@ do_delete_client() {
   server_exists || { err "Сервер не создан"; return 1; }
   local c raw n pubs=() names=() row pub
   local -a parts=()
-  echo -e "  1) Одного по номеру  2) Несколько по именам через запятую"
+  echo -e "  ${C}1)${N} Одного по номеру"
+  echo -e "  ${C}2)${N} Несколько по именам"
   read_choice c "${C}  Выбор [1-2] (Enter = 1): ${N}" 1 2 1
   if [[ "$c" == 1 ]]; then
     _pick_client || return 0
@@ -329,11 +342,16 @@ do_clients_menu() {
   while true; do
     echo ""
     hdr "Клиенты ($(clients_tsv | wc -l))"
-    echo -e "  ${G}1)${N} Добавить клиента          ${G}6)${N} Создать несколько сразу"
-    echo -e "  ${C}2)${N} Активность и трафик       ${C}7)${N} Срок действия"
-    echo -e "  ${C}3)${N} Показать конфиг (текст)   ${C}8)${N} Экспорт всех конфигов (zip)"
-    echo -e "  ${C}4)${N} Показать QR               ${C}9)${N} Сменить мимикрию клиента"
-    echo -e "  ${C}5)${N} Переименовать             ${R}10)${N} Удалить"
+    echo -e "  ${G}1)${N} Добавить клиента"
+    echo -e "  ${C}2)${N} Активность и трафик"
+    echo -e "  ${C}3)${N} Показать конфиг"
+    echo -e "  ${C}4)${N} Показать QR"
+    echo -e "  ${C}5)${N} Переименовать"
+    echo -e "  ${G}6)${N} Создать несколько"
+    echo -e "  ${C}7)${N} Срок действия"
+    echo -e "  ${C}8)${N} Экспорт всех (zip)"
+    echo -e "  ${C}9)${N} Сменить мимикрию"
+    echo -e "  ${R}10)${N} Удалить"
     echo -e "  ${W}0)${N} ← Назад"
     read_choice c "${C}  Выбор [0-10]: ${N}" 0 10 0
     case "$c" in

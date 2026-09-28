@@ -188,7 +188,8 @@ exits_add() {
   f="$EXITS_DIR/awg-exit-$name.conf"
   [[ -f "$f" ]] && { err "Нода $name уже есть"; return 1; }
   mktmp tmp || return 1
-  echo -e "  1) Вставить текст конфига   2) Путь к файлу .conf"
+  echo -e "  ${C}1)${N} Вставить текст конфига"
+  echo -e "  ${C}2)${N} Путь к файлу .conf"
   read_choice c "${C}  Выбор [1-2] (Enter = 1): ${N}" 1 2 1
   if [[ "$c" == 1 ]]; then
     echo -e "  Вставь клиентский конфиг AWG/WG целиком, затем Enter и Ctrl+D:"
@@ -276,8 +277,8 @@ exits_balancer_menu() {
   mapfile -t up < <(exits_up_nodes)
   (( ${#up[@]} )) || { warn "Ни одна нода не поднята"; return 0; }
   echo -e "  Сейчас: ${W}$(exits_state_get balancer)${N} $(exits_state_get single_exit)"
-  echo -e "  1) Одна нода"
-  if (( ${#up[@]} > 1 )); then echo -e "  2) ECMP — все поднятые ноды, соединения делятся между ними"
+  echo -e "  ${C}1)${N} Одна нода"
+  if (( ${#up[@]} > 1 )); then echo -e "  ${C}2)${N} ECMP ${D}— все поднятые ноды${N}"
   else echo -e "  ${D}2) ECMP — нужны две поднятые ноды${N}"; fi
   read_choice c "${C}  Выбор (0 — отмена): ${N}" 0 2 0
   case "$c" in
@@ -295,7 +296,8 @@ exits_balancer_menu() {
 exits_toggle() {
   local c
   if exits_is_up; then exits_down; return; fi
-  echo -e "  1) Все клиенты   2) Выборочно (список клиентов)"
+  echo -e "  ${C}1)${N} Все клиенты"
+  echo -e "  ${C}2)${N} Выборочно"
   read_choice c "${C}  Кого вести через exit-ноды [1-2] (Enter = 1): ${N}" 1 2 1
   if [[ "$c" == 1 ]]; then exits_up all; else exits_up peers; fi
 }
@@ -341,8 +343,11 @@ exits_peers_menu() {
         echo -e "  ${D}$((i + 1))) $name $ip  напрямую${N}"
       fi
     done
-    echo -e "  ${W}e${N} — назначить ноду, ${W}a${N} — все, ${W}n${N} — никого, ${W}0${N} — назад"
-    read_choice c "${C}  Номер клиента для переключения: ${N}" 0 "${#rows[@]}" 0 "e|a|n"
+    echo -e "  ${C}e)${N} Назначить ноду"
+    echo -e "  ${C}a)${N} Все через exit-ноды"
+    echo -e "  ${C}n)${N} Все напрямую"
+    echo -e "  ${W}0)${N} ← Назад"
+    read_choice c "${C}  Номер — вкл/выкл: ${N}" 0 "${#rows[@]}" 0 "e|a|n"
     case "$c" in
       0) return 0 ;;
       a) clients_name_ip | cut -d'|' -f2 > "$EXITS_PEERS" ;;
@@ -379,8 +384,12 @@ do_exits_menu() {
     hdr "AWG exit-ноды"
     exits_status
     echo ""
-    echo -e "  ${C}1)${N} Добавить ноду     ${C}2)${N} Список и проверка   ${C}3)${N} Удалить ноду"
-    echo -e "  ${C}4)${N} Вкл/выкл маршруты ${C}5)${N} Балансировка        ${C}6)${N} Клиенты"
+    echo -e "  ${C}1)${N} Добавить ноду"
+    echo -e "  ${C}2)${N} Список и проверка"
+    echo -e "  ${C}3)${N} Удалить ноду"
+    echo -e "  ${C}4)${N} Вкл/выкл маршруты"
+    echo -e "  ${C}5)${N} Балансировка"
+    echo -e "  ${C}6)${N} Клиенты"
     echo -e "  ${W}0)${N} ← Назад"
     read_choice c "${C}  Выбор [0-6]: ${N}" 0 6 0
     case "$c" in

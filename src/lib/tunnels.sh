@@ -235,8 +235,10 @@ tunnel_peers_menu() {
       if peers_has "$file" "$ip"; then echo -e "  ${G}$((i + 1)))${N} $name ${D}$ip${N}  ${C}через туннель${N}"
       else echo -e "  ${D}$((i + 1))) $name $ip  напрямую${N}"; fi
     done
-    echo -e "  ${W}a${N} — все через туннель, ${W}n${N} — все напрямую, ${W}0${N} — назад"
-    read_choice c "${C}  Номер клиента для переключения: ${N}" 0 "${#rows[@]}" 0 "a|n"
+    echo -e "  ${C}a)${N} Все через туннель"
+    echo -e "  ${C}n)${N} Все напрямую"
+    echo -e "  ${W}0)${N} ← Назад"
+    read_choice c "${C}  Номер — вкл/выкл: ${N}" 0 "${#rows[@]}" 0 "a|n"
     case "$c" in
       0) return 0 ;;
       a) clients_name_ip | cut -d'|' -f2 > "$file" ;;

@@ -146,11 +146,11 @@ xray_balancer_menu() {
   n=$(xray_tags | grep -c . || true)
   (( n >= 2 )) || { warn "Для балансировки нужно минимум 2 выхода"; return 0; }
   echo -e "  Сейчас: ${W}$(py xray-balancer-get "$XRAY_CONF")${N}"
-  echo -e "  1) random     — случайный выход на каждое соединение"
-  echo -e "  2) roundRobin — по очереди"
-  echo -e "  3) leastPing  — самый быстрый по замерам"
-  echo -e "  4) leastLoad  — наименее загруженный"
-  echo -e "  5) выключить  — весь трафик в первый выход"
+  echo -e "  ${C}1)${N} random ${D}— случайный выход${N}"
+  echo -e "  ${C}2)${N} roundRobin ${D}— по очереди${N}"
+  echo -e "  ${C}3)${N} leastPing ${D}— самый быстрый${N}"
+  echo -e "  ${C}4)${N} leastLoad ${D}— наименее загружен${N}"
+  echo -e "  ${C}5)${N} Выключить ${D}— первый выход${N}"
   read_choice c "${C}  Выбор [1-5] (0 — отмена): ${N}" 0 5 0
   (( c )) || return 0
   xray_balancer "${s[$((c - 1))]}"
@@ -451,12 +451,18 @@ do_xray_menu() {
     hdr "Xray"
     xray_status
     echo ""
-    echo -e "  ${C}1)${N} Установить / обновить    ${C}2)${N} Добавить выход (ссылка)"
-    echo -e "  ${C}3)${N} Удалить выход            ${C}4)${N} Балансировщик"
-    echo -e "  ${C}5)${N} Включить туннель         ${C}6)${N} Выключить туннель"
-    echo -e "  ${C}7)${N} Перезапустить туннель    ${C}8)${N} Клиенты в Xray"
-    echo -e "  ${C}9)${N} Диагностика              ${C}r)${N} РФ-сайты напрямую $(xray_ru_on && echo -e "${G}● вкл${N}" || echo -e "${D}○ выкл${N}")"
-    echo -e "  ${R}d)${N} Удалить Xray             ${W}0)${N} ← Назад"
+    echo -e "  ${C}1)${N} Установить / обновить"
+    echo -e "  ${C}2)${N} Добавить выход (ссылка)"
+    echo -e "  ${C}3)${N} Удалить выход"
+    echo -e "  ${C}4)${N} Балансировщик"
+    echo -e "  ${C}5)${N} Включить туннель"
+    echo -e "  ${C}6)${N} Выключить туннель"
+    echo -e "  ${C}7)${N} Перезапустить туннель"
+    echo -e "  ${C}8)${N} Клиенты в Xray"
+    echo -e "  ${C}9)${N} Диагностика"
+    echo -e "  ${C}r)${N} РФ-сайты напрямую $(xray_ru_on && echo -e "${G}● вкл${N}" || echo -e "${D}○ выкл${N}")"
+    echo -e "  ${R}d)${N} Удалить Xray"
+    echo -e "  ${W}0)${N} ← Назад"
     read_choice c "${C}  Выбор: ${N}" 0 9 0 "r|d"
     case "$c" in
       1) xray_install || true ;;

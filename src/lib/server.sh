@@ -293,8 +293,11 @@ pick_awg_net() { taken_networks | py pick-net awg; }
 # ── Создание сервера (меню) ───────────────────────────────
 _choose_dns() {
   local c d
-  echo -e "  1) Cloudflare 1.1.1.1   2) Google 8.8.8.8   3) Quad9 9.9.9.9"
-  echo -e "  4) Яндекс 77.88.8.8     5) Вручную"
+  echo -e "  ${C}1)${N} Cloudflare ${D}1.1.1.1${N}"
+  echo -e "  ${C}2)${N} Google ${D}8.8.8.8${N}"
+  echo -e "  ${C}3)${N} Quad9 ${D}9.9.9.9${N}"
+  echo -e "  ${C}4)${N} Яндекс ${D}77.88.8.8${N}"
+  echo -e "  ${C}5)${N} Вручную"
   read_choice c "${C}  DNS клиентов [1-5] (Enter = 1): ${N}" 1 5 1
   case "$c" in
     1) S_DNS="1.1.1.1, 1.0.0.1" ;; 2) S_DNS="8.8.8.8, 8.8.4.4" ;;
@@ -309,7 +312,12 @@ _choose_dns() {
 
 _choose_mtu() {  # $1 — значение по умолчанию
   local c v
-  echo -e "  1) $1 (рекомендуется)  2) 1420  3) 1380  4) 1320  5) 1280  6) вручную"
+  echo -e "  ${C}1)${N} $1 ${C}(рекомендуется)${N}"
+  echo -e "  ${C}2)${N} 1420"
+  echo -e "  ${C}3)${N} 1380"
+  echo -e "  ${C}4)${N} 1320"
+  echo -e "  ${C}5)${N} 1280"
+  echo -e "  ${C}6)${N} Вручную"
   read_choice c "${C}  MTU [1-6] (Enter = 1): ${N}" 1 6 1
   case "$c" in
     1) MTU=$1 ;; 2) MTU=1420 ;; 3) MTU=1380 ;; 4) MTU=1320 ;; 5) MTU=1280 ;;
@@ -327,8 +335,8 @@ _choose_proto() {
   proto_supported 3.1 || rc=$?
   echo ""
   hdr "Версия протокола"
-  echo -e "  ${G}1${N} AWG 2.0 ${D}— любой клиент AmneziaWG; H-диапазоны режут скорость${N}"
-  echo -e "  ${G}2${N} AWG 3.1 ${D}— шифрованные заголовки, паддинг, случайные таймеры, быстрее${N}"
+  echo -e "  ${G}1${N} AWG 2.0 ${D}— любой клиент AmneziaWG${N}"
+  echo -e "  ${G}2${N} AWG 3.1 ${D}— быстрее, заголовки под шифром${N}"
   echo -e "  ${Y}  Версия на весь сервер. Для 3.1 нужен AmneziaVPN 5.0.1.5+ / AmneziaWG с 3.1.${N}"
   if (( rc == 1 )); then
     def=1
@@ -351,8 +359,10 @@ _choose_profile() {
   local c
   echo ""
   hdr "Профиль"
-  echo -e "  ${G}1${N} AmneziaVPN ${D}— как официальный клиент: MTU 1280, без I1-I5, полная скорость${N} ${C}(рекомендуется)${N}"
-  echo -e "  ${G}2${N} Мощный ${D}— широкие диапазоны и цепочка I1-I5, сильнее против DPI${N}"
+  echo -e "  ${G}1${N} AmneziaVPN ${C}(рекомендуется)${N}"
+  echo -e "  ${D}    как официальный клиент: MTU 1280, без I1-I5${N}"
+  echo -e "  ${G}2${N} Мощный"
+  echo -e "  ${D}    широкие диапазоны и I1-I5, сильнее против DPI${N}"
   echo -e "  ${D}0 назад${N}"
   read_choice c "${C}  Выбор [0-2] (Enter = 1): ${N}" 0 2 1
   case "$c" in
@@ -371,7 +381,8 @@ _choose_profile() {
 
 _choose_net() {
   local c v
-  echo -e "  1) Случайная 10.x.y.0/24 без пересечений ${C}(рекомендуется)${N}   2) Вручную"
+  echo -e "  ${C}1)${N} Случайная 10.x.y.0/24 ${C}(рекомендуется)${N}"
+  echo -e "  ${C}2)${N} Вручную"
   read_choice c "${C}  Подсеть [1-2] (Enter = 1): ${N}" 1 2 1
   if [[ "$c" == 1 ]]; then
     S_NET=$(pick_awg_net) || { err "Не нашёл свободную /24"; return 1; }
@@ -663,9 +674,9 @@ do_proto_menu() {
   echo -e "  Сейчас: ${W}AWG $cur${N}, профиль ${W}$(profile_label)${N}, клиентов ${W}$n${N}"
   echo ""
   if [[ "$cur" != 3.1 ]]; then
-    echo -e "  ${G}1)${N} Перейти на AWG 3.1 ${D}— шифрованные заголовки, паддинг, быстрее 2.0${N}"
+    echo -e "  ${G}1)${N} Перейти на AWG 3.1 ${D}— быстрее 2.0${N}"
   else
-    echo -e "  ${C}1)${N} Перегенерировать параметры AWG 3.1 ${D}— если конфиг утёк${N}"
+    echo -e "  ${C}1)${N} Новые параметры AWG 3.1"
   fi
   if [[ "$cur" == 2.0 ]]; then
     echo -e "  ${C}2)${N} Перегенерировать параметры AWG 2.0"
@@ -690,7 +701,9 @@ do_endpoint_menu() {
   echo ""
   hdr "Endpoint для клиентов"
   echo -e "  Сейчас: ${W}${cur:-$(public_ip_cached)}:$port${N} ${D}(${cur:+домен}${cur:-IP})${N}"
-  echo -e "  ${C}1)${N} Задать домен   ${C}2)${N} Вернуться на IP   ${W}0)${N} Назад"
+  echo -e "  ${C}1)${N} Задать домен"
+  echo -e "  ${C}2)${N} Вернуться на IP"
+  echo -e "  ${W}0)${N} ← Назад"
   read_choice c "${C}  Выбор [0-2]: ${N}" 0 2 0
   case "$c" in
     1) while true; do

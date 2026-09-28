@@ -303,8 +303,12 @@ do_dns_menu() {
     hdr "Шифрованный DNS (dnscrypt-proxy)"
     dns_status
     echo ""
-    echo -e "  ${C}1)${N} Включить     ${C}2)${N} Перезапустить   ${C}3)${N} Журнал"
-    echo -e "  ${C}4)${N} Резолверы    ${R}5)${N} Выключить       ${W}0)${N} ← Назад"
+    echo -e "  ${C}1)${N} Включить"
+    echo -e "  ${C}2)${N} Перезапустить"
+    echo -e "  ${C}3)${N} Журнал"
+    echo -e "  ${C}4)${N} Резолверы"
+    echo -e "  ${R}5)${N} Выключить"
+    echo -e "  ${W}0)${N} ← Назад"
     read_choice c "${C}  Выбор [0-5]: ${N}" 0 5 0
     case "$c" in
       1) dns_install || true ;;

@@ -475,13 +475,16 @@ wgobf_install() {
     udp_port_busy "$port" && { warn "UDP $port занят (сокет, AWG или каскад)"; continue; }
     break
   done
-  echo -e "  1) Маскировка STUN ${D}— под видеозвонок, рекомендуется${N}   2) Без маскировки ${D}— только XOR${N}"
+  echo -e "  ${C}1)${N} STUN ${D}— под видеозвонок${N} ${C}(рекомендуется)${N}"
+  echo -e "  ${C}2)${N} Без маскировки ${D}— только XOR${N}"
   read_choice c "${C}  Выбор [1-2] (Enter = 1): ${N}" 1 2 1
   if [[ "$c" == 2 ]]; then mask=NONE; else mask=STUN; fi
   echo -e "  ${D}Клиенты без обфускатора (iOS) могут подключаться обычным WireGuard —${N}"
   echo -e "  ${D}но такой трафик DPI видит как WireGuard.${N}"
   clean=0; ask_yes "  Пускать клиентов без обфускатора? [y/N]: " n && clean=1
-  echo -e "  1) Cloudflare   2) Google   3) Quad9"
+  echo -e "  ${C}1)${N} Cloudflare"
+  echo -e "  ${C}2)${N} Google"
+  echo -e "  ${C}3)${N} Quad9"
   read_choice c "${C}  DNS клиентов [1-3] (Enter = 1): ${N}" 1 3 1
   case "$c" in 2) dns="8.8.8.8, 8.8.4.4" ;; 3) dns="9.9.9.9, 149.112.112.112" ;; *) dns="1.1.1.1, 1.0.0.1" ;; esac
   wg_port=$(random_free_udp_port "$port") || { err "Нет свободного порта для WireGuard"; return 1; }
@@ -587,7 +590,7 @@ wgobf_settings() {
   mask=$(wgobf_get MASKING); clean=$(wgobf_get ALLOW_CLEAN)
   echo -e "  ${C}1)${N} Маскировка клиентов: ${W}$mask${N} → $([[ "$mask" == STUN ]] && echo NONE || echo STUN)"
   echo -e "  ${C}2)${N} Клиенты без обфускатора: ${W}$([[ "$clean" == 1 ]] && echo да || echo нет)${N} → $([[ "$clean" == 1 ]] && echo нет || echo да)"
-  echo -e "  ${C}3)${N} Сменить ключ обфускатора ${D}— все клиенты получат новые комплекты${N}"
+  echo -e "  ${C}3)${N} Сменить ключ обфускатора"
   read_choice c "${C}  Выбор (0 — назад): ${N}" 0 3 0
   case "$c" in
     1) wgobf_set MASKING "$([[ "$mask" == STUN ]] && echo NONE || echo STUN)"
@@ -608,7 +611,8 @@ do_wgobf_menu() {
     echo ""
     hdr "WG + обфускатор (wg-obfuscator $WGOBF_VERSION)"
     if ! wgobf_installed; then
-      echo -e "  ${C}1)${N} Установить ${D}— отдельный WireGuard за обфускатором, AWG не трогает${N}"
+      echo -e "  ${D}Отдельный WireGuard за обфускатором, AWG не трогает.${N}"
+      echo -e "  ${C}1)${N} Установить"
       echo -e "  ${W}0)${N} ← Назад"
       read_choice c "${C}  Выбор [0-1]: ${N}" 0 1 0
       (( c )) || return 0
@@ -619,9 +623,14 @@ do_wgobf_menu() {
     if wgobf_running; then echo -e "  ${G}● работает${N}  ${D}вход $(wgobf_get ENDPOINT):$(wgobf_get PORT)/udp${N}"
     else echo -e "  ${R}○ не работает${N} ${D}— пункт 6${N}"; fi
     echo ""
-    echo -e "  ${C}1)${N} Добавить клиента   ${C}2)${N} Список           ${C}3)${N} Комплект клиента"
-    echo -e "  ${C}4)${N} Удалить клиента    ${C}5)${N} Статус и журнал  ${C}6)${N} Перезапустить"
-    echo -e "  ${C}7)${N} Настройки          ${R}8)${N} Удалить WG + обфускатор"
+    echo -e "  ${C}1)${N} Добавить клиента"
+    echo -e "  ${C}2)${N} Список"
+    echo -e "  ${C}3)${N} Комплект клиента"
+    echo -e "  ${C}4)${N} Удалить клиента"
+    echo -e "  ${C}5)${N} Статус и журнал"
+    echo -e "  ${C}6)${N} Перезапустить"
+    echo -e "  ${C}7)${N} Настройки"
+    echo -e "  ${R}8)${N} Удалить WG + обфускатор"
     echo -e "  ${W}0)${N} ← Назад"
     read_choice c "${C}  Выбор [0-8]: ${N}" 0 8 0
     case "$c" in

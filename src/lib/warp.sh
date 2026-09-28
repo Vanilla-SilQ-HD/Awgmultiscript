@@ -367,7 +367,8 @@ warp_find_endpoint() {
   local c country best rep lines=() i pub
   [[ "$(warp_backend)" == wg ]] || { warn "Только для бэкенда wg"; return 0; }
   _warpscout_ready || return 1
-  echo -e "  1) Найти лучший и применить   2) Показать список и выбрать"
+  echo -e "  ${C}1)${N} Найти лучший и применить"
+  echo -e "  ${C}2)${N} Показать список и выбрать"
   read_choice c "${C}  Выбор [1-2] (Enter = 1): ${N}" 1 2 1
   info "Сканирую (до минуты)..."
   if [[ "$c" == 1 ]]; then
@@ -456,13 +457,17 @@ do_warp_menu() {
     warp_status
     echo ""
     echo -e "  ${C}1)${N} Установить и зарегистрировать ($be)"
-    echo -e "  ${C}2)${N} Включить туннель        ${C}3)${N} Выключить туннель"
-    echo -e "  ${C}4)${N} Клиенты в WARP          ${C}5)${N} Health-check вкл/выкл"
+    echo -e "  ${C}2)${N} Включить туннель"
+    echo -e "  ${C}3)${N} Выключить туннель"
+    echo -e "  ${C}4)${N} Клиенты в WARP"
+    echo -e "  ${C}5)${N} Health-check вкл/выкл"
     if [[ "$be" == wg ]]; then
-      echo -e "  ${C}6)${N} Warp+ (лицензионный ключ)  ${C}7)${N} Импорт wgcf-profile.conf"
+      echo -e "  ${C}6)${N} Warp+ (ключ)"
+      echo -e "  ${C}7)${N} Импорт wgcf-profile.conf"
       echo -e "  ${C}8)${N} Поиск рабочего endpoint (warpscout)"
     fi
-    echo -e "  ${C}b)${N} Сменить бэкенд (wg ↔ usque)   ${R}d)${N} Удалить WARP"
+    echo -e "  ${C}b)${N} Сменить бэкенд (wg ↔ usque)"
+    echo -e "  ${R}d)${N} Удалить WARP"
     echo -e "  ${W}0)${N} ← Назад"
     read_choice c "${C}  Выбор: ${N}" 0 8 0 "b|d"
     case "$c" in
