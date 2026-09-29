@@ -14,7 +14,7 @@ import sys
 import tempfile
 
 __all__ = ["HERE", "AWG2", "chk", "summary", "TMP", "BIN", "CALLS", "LINKS", "ACTIVE", "IPT_SAVE", "AWG_DUMP", "ROOT", "LIB",
-           "PRELUDE", "ENV", "bash", "run_script", "calls", "reset_calls", "kv", "OLD20", "api_wrapper",
+           "PRELUDE", "ENV", "bash", "run_script", "calls", "reset_calls", "kv", "OLD20", "api_wrapper", "fake_acme",
            "json", "os", "re", "shutil", "subprocess", "sys"]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -115,6 +115,8 @@ done
 CASCADE_DIR="{ROOT}/etc/awg-cascade"; CASCADE_RULES="$CASCADE_DIR/rules.conf"; CASCADE_LOG="{ROOT}/cascade.log"
 WGOBF_DIR="{ROOT}/etc/awg-wgobf"; WGOBF_STATE="$WGOBF_DIR/state"
 WGOBF_WG_CONF="{ROOT}/etc/wireguard/wgobf0.conf"; WGOBF_CLIENTS="{ROOT}/root/wgobf"
+CERT_DIR="{ROOT}/etc/awg2/cert"; CERT_FULL="$CERT_DIR/fullchain.pem"; CERT_KEY="$CERT_DIR/key.pem"
+CERT_STATE="{ROOT}/var/lib/awg2/cert"; ACME_DIR="{ROOT}/acme.sh"; ACME_HOME="{ROOT}/var/lib/awg2/acme"
 EXPIRE_STATE_DIR="{ROOT}/var/lib/awg2-expire"; EXPIRE_LOG="{ROOT}/expire.log"; BOT_CONF="{ROOT}/bot.conf"
 BOT_ADMINS="{ROOT}/admins.json"
 WARP_PEERS="{ROOT}/warp.peers"; XRAY_PEERS="{ROOT}/xray.peers"; USQUE_LOG="{ROOT}/usque.log"
@@ -205,6 +207,43 @@ def api_wrapper():
     with open(stub, "w") as f:
         f.write("#!/usr/bin/env bash\nexit 1\n")
     os.chmod(stub, 0o755)
+    return path
+
+
+def fake_acme():
+    """acme.sh-заглушка: пишет вызовы в журнал, на --issue выпускает
+    самоподписанный сертификат (openssl) на -d, на --install-cert копирует его."""
+    d = os.path.join(ROOT, "acme.sh")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "acme.sh")
+    with open(path, "w") as f:
+        f.write(r'''#!/usr/bin/env bash
+echo "acme.sh $*" >> "$CALLS"
+home="" name="" key="" full="" cmd=""
+while (( $# )); do
+  case "$1" in
+    --home) home="$2"; shift ;;
+    -d) name="$2"; shift ;;
+    --key-file) key="$2"; shift ;;
+    --fullchain-file) full="$2"; shift ;;
+    --issue|--install-cert|--remove|--cron) cmd="$1" ;;
+  esac
+  shift
+done
+dir="$home/${name}_ecc"
+case "$cmd" in
+  --issue)
+    [[ -f "$dir/fullchain.cer" ]] && { echo "Skip, Next renewal time is: soon"; exit 2; }
+    mkdir -p "$dir"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 6 -subj "/CN=$name" \
+      -keyout "$dir/$name.key" -out "$dir/fullchain.cer" 2>/dev/null || exit 1
+    echo "Cert success." ;;
+  --install-cert) cp "$dir/$name.key" "$key" && cp "$dir/fullchain.cer" "$full" ;;
+  --remove) rm -rf "$dir" ;;
+esac
+exit 0
+''')
+    os.chmod(path, 0o755)
     return path
 
 

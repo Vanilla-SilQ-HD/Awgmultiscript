@@ -18,7 +18,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from aiogram.types import BotCommand, CallbackQuery, ErrorEvent, Message
 
-from . import __version__, access, admins, api, ask, icons, jobs, monitor, net, store, ui
+from . import __version__, access, admins, api, ask, icons, jobs, monitor, net, store, ui, webapp
 from .config import load_config
 from .sections import backup, botself, clients, diag, main as main_menu, server, system, tunnels, wgobf
 
@@ -95,9 +95,15 @@ async def main() -> None:
             await bot.set_my_commands([BotCommand(command="start", description="Главное меню")])
         await restore(bot)
         tasks.append(asyncio.create_task(monitor.loop(bot), name="monitor"))
+        try:
+            await webapp.SERVER.start(bot)
+        except Exception:                                   # noqa: BLE001
+            log.exception("Mini App не запущена")
 
     @dp.shutdown()
     async def _shutdown() -> None:
+        with contextlib.suppress(Exception):
+            await webapp.SERVER.stop()
         for t in tasks:
             t.cancel()
             with contextlib.suppress(asyncio.CancelledError):

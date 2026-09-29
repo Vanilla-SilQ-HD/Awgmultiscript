@@ -10,11 +10,16 @@ Telegram подменена сессией, которая записывает 
 """
 import asyncio
 import datetime
+import hashlib
+import hmac
 import itertools
+import json
 import logging
 import os
+import socket
 import sys
 import time
+from urllib.parse import urlencode
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sandbox import *  # noqa: E402,F401,F403
@@ -25,6 +30,7 @@ except ImportError:
     print("aiogram не установлен — тест бота пропущен (pip install -r awg_bot/requirements.txt)")
     sys.exit(0)
 
+import aiohttp  # noqa: E402
 from aiogram.client.session.base import BaseSession  # noqa: E402
 from aiogram.exceptions import TelegramBadRequest  # noqa: E402
 from aiogram.types import (CallbackQuery, Chat, InlineKeyboardMarkup, Message, MessageEntity, Sticker,  # noqa: E402
@@ -33,6 +39,8 @@ from aiogram.types import (CallbackQuery, Chat, InlineKeyboardMarkup, Message, M
 # Как Telegram обходится с иконками (custom emoji) от бота: ok — показывает
 # (Premium у владельца), strip — молча срезает, reject — отклоняет запрос
 PREMIUM = {"mode": "strip"}
+# Telegram не принимает адрес Mini App (например, IP вместо домена)
+WEBAPP_REJECT = [False]
 PACK = {"🖥": "111", "👥": "222", "🌐": "333", "🗑": "444", "⭐": "555", "💿": "666", "🟢": "777"}
 
 # ── Окружение бота ────────────────────────────────────────
@@ -44,10 +52,11 @@ with open(BOT_CONF, "w") as f:
     f.write("BOT_TOKEN=123456:" + "A" * 35 + "\nADMIN_ID=111\n")
 os.environ.update(ENV)
 os.environ.update(AWG2_BIN=API, AWG_BOT_STATE=STATE, AWG_ADMINS_FILE=os.path.join(STATE, "admins.json"),
-                  AWG_BOT_CONF=BOT_CONF)
+                  AWG_BOT_CONF=BOT_CONF, AWG_CERT_FULL=os.path.join(ROOT, "etc/awg2/cert/fullchain.pem"),
+                  AWG_CERT_KEY=os.path.join(ROOT, "etc/awg2/cert/key.pem"))
 sys.path.insert(0, os.path.join(HERE, "..", "awg_bot"))
 
-from awgbot import bot as botmod, jobs, store, ui  # noqa: E402
+from awgbot import bot as botmod, jobs, store, ui, webapp  # noqa: E402
 
 USER_NAMED = ("cl:v:", "tc:t:", "ex:pick:", "xr:delok:", "wo:v:", "adm:rm:", "diag:sn:", "mod:tag:")
 
@@ -105,6 +114,9 @@ class FakeSession(BaseSession):
             icons_in = "<tg-emoji" in (getattr(method, "text", None) or "") or (
                 isinstance(markup, InlineKeyboardMarkup)
                 and any(b.icon_custom_emoji_id for row in markup.inline_keyboard for b in row))
+            if WEBAPP_REJECT[0] and isinstance(markup, InlineKeyboardMarkup) and any(
+                    b.web_app for row in markup.inline_keyboard for b in row):
+                raise TelegramBadRequest(method=method, message="Bad Request: BUTTON_URL_INVALID")
             if icons_in and PREMIUM["mode"] == "reject":
                 raise TelegramBadRequest(method=method, message="Bad Request: custom emoji not allowed")
             entities, echo = None, markup
@@ -187,7 +199,8 @@ def screen(sent):
     for name, m in reversed(sent):
         if name in ("SendMessage", "EditMessageText"):
             rows = m.reply_markup.inline_keyboard if m.reply_markup else []
-            return m.text or "", [(b.text, b.callback_data or b.url) for row in rows for b in row]
+            return m.text or "", [(b.text, b.callback_data or b.url or ("webapp:" + b.web_app.url if b.web_app else None))
+                                  for row in rows for b in row]
     return "", []
 
 
@@ -551,6 +564,90 @@ async def run():
     text, buttons = screen(await press("wo:iopt:dns"))
     chk("кнопка DNS перебирает варианты", "DNS клиентов: Google" in text and ("🌐 Google", "wo:iopt:dns") in buttons,
         [text, buttons])
+
+    print("Mini App")
+    fake_acme()
+    webapp.CONF_PATH = os.path.join(ROOT, "bot.conf")        # тот же файл, что пишет awg2
+    ports = []
+    for _ in range(2):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            ports.append(s.getsockname()[1])
+    with open(os.path.join(ROOT, "bot.conf"), "a") as f:
+        f.write(f"WEBAPP_PORT={ports[0]}\n")
+    text, buttons = screen(await press("app"))
+    chk("экран Mini App: сертификата нет, сервер не запущен",
+        "Сертификата нет" in text and "не запущена" in text and ("🔐 На IP", "app:ip") in buttons
+        and not any((d or "").startswith("webapp:") for _, d in buttons), [text, buttons])
+    await press("app:ip")
+    chk("сертификат на IP — задачей", await wait_jobs())
+    url = f"https://203.0.113.10:{ports[0]}/"
+    chk("после выпуска сервер Mini App поднялся по адресу сертификата",
+        webapp.SERVER.running and webapp.SERVER.url == url, [webapp.SERVER.url, webapp.SERVER.error])
+    text, buttons = screen(await press("app"))
+    chk("кнопка «Открыть панель» — Mini App по этому адресу",
+        ("📱 Открыть панель", "webapp:" + url) in buttons and "Сертификат: <code>203.0.113.10</code> (IP)" in text,
+        [text, buttons])
+
+    token = BOT.token
+
+    def init_data(uid, auth=None, tamper=False, signature=False):
+        fields = {"auth_date": str(int(auth or time.time())), "query_id": "AAHd",
+                  "user": json.dumps({"id": uid, "first_name": "Max"}, separators=(",", ":"))}
+        if signature:
+            fields["signature"] = "c2ln"
+        secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
+        fields["hash"] = hmac.new(secret, "\n".join(f"{k}={v}" for k, v in sorted(fields.items())).encode(),
+                                  hashlib.sha256).hexdigest()
+        if tamper:
+            fields["user"] = fields["user"].replace("Max", "Eve")
+        return urlencode(fields)
+
+    chk("подпись initData: верная — пользователь", (webapp.check_init_data(init_data(111), token) or {}).get("id") == 111)
+    chk("подпись с полем signature тоже принимается",
+        (webapp.check_init_data(init_data(111, signature=True), token) or {}).get("id") == 111)
+    chk("подделка, чужой токен и старые данные — отказ",
+        webapp.check_init_data(init_data(111, tamper=True), token) is None
+        and webapp.check_init_data(init_data(111), "1:other") is None
+        and webapp.check_init_data(init_data(111, auth=time.time() - 3 * 86400), token) is None
+        and webapp.check_init_data("", token) is None)
+
+    base = f"https://127.0.0.1:{ports[0]}"
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as http:
+        async with http.get(base + "/") as r:
+            page = await r.text()
+        chk("страница Mini App отдаётся по HTTPS", r.status == 200 and "telegram-web-app.js" in page, r.status)
+
+        async def post(path, data=None):
+            headers = {"Authorization": "tma " + data} if data is not None else {}
+            async with http.post(base + path, headers=headers) as r:
+                return r.status, await r.json(content_type=None)
+
+        st, body = await post("/api/me")
+        chk("API без подписи Telegram — 401", st == 401, [st, body])
+        st, body = await post("/api/me", init_data(111))
+        chk("владелец входит", st == 200 and body.get("id") == 111 and body.get("owner") is True, [st, body])
+        st, body = await post("/api/me", init_data(222))
+        chk("чужой с настоящей подписью — 403", st == 403, [st, body])
+        st, body = await post("/api/me", init_data(111, tamper=True))
+        chk("подделанные данные — 401", st == 401, [st, body])
+        st, body = await post("/api/status", init_data(111))
+        chk("сводка сервера через Mini App", st == 200 and body.get("version") and "server" in body, [st, str(body)[:200]])
+
+    text, _ = screen(await press(f"app:pset:{ports[1]}"))
+    chk("смена порта перезапускает сервер", webapp.SERVER.running and webapp.SERVER.url.endswith(f":{ports[1]}/")
+        and f"Порт Mini App: {ports[1]}" in text, [text[:200], webapp.SERVER.url])
+
+    WEBAPP_REJECT[0] = True
+    text, buttons = screen(await press("app"))
+    chk("Telegram не принял адрес — понятно, что нужен домен, экран на месте",
+        "Telegram не принял адрес" in text and "Нужен домен" in text and ("🌍 На домен…", "app:dom") in buttons
+        and not any((d or "").startswith("webapp:") for _, d in buttons), [text[-300:], buttons])
+    WEBAPP_REJECT[0] = False
+
+    await press("app:rmok")
+    chk("удаление сертификата останавливает Mini App",
+        not webapp.SERVER.running and not os.path.exists(os.path.join(ROOT, "etc/awg2/cert/fullchain.pem")))
 
     print("Цвета кнопок")
     await say("/start")

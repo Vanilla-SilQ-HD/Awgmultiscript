@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AWG Toolza</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #17212b);
+    --card: var(--tg-theme-secondary-bg-color, #232e3c);
+    --text: var(--tg-theme-text-color, #f5f5f5);
+    --hint: var(--tg-theme-hint-color, #8b9aa7);
+    --accent: var(--tg-theme-button-color, #5288c1);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --ok: #4caf50;
+    --bad: #e05252;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 4px 0 16px; }
+  .card { background: var(--card); border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; }
+  .row span:first-child { color: var(--hint); }
+  .row span:last-child { text-align: right; overflow-wrap: anywhere; }
+  .big { font-size: 17px; font-weight: 600; margin-bottom: 6px; }
+  .hint { color: var(--hint); font-size: 13px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  button {
+    width: 100%; border: 0; border-radius: 12px; padding: 13px; margin-top: 4px;
+    background: var(--accent); color: var(--accent-text); font-size: 15px; font-weight: 600;
+  }
+</style>
+</head>
+<body>
+<h1>AWG Toolza</h1>
+<div class="card"><div id="check" class="big">Проверяю вход…</div><div id="who" class="hint"></div></div>
+<div class="card" id="server" hidden></div>
+<div class="card hint">Это проверочная страница Mini App: HTTPS и вход через Telegram работают.
+  Полная панель управления — следующим шагом.</div>
+<button id="close" type="button">Закрыть</button>
+<script>
+"use strict";
+const tg = window.Telegram && window.Telegram.WebApp;
+const $ = (id) => document.getElementById(id);
+
+function row(label, value) {
+  const r = document.createElement("div");
+  r.className = "row";
+  const a = document.createElement("span"), b = document.createElement("span");
+  a.textContent = label; b.textContent = value;
+  r.append(a, b);
+  return r;
+}
+
+async function call(path) {
+  const r = await fetch(path, { method: "POST", headers: { Authorization: "tma " + (tg ? tg.initData : "") } });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || ("HTTP " + r.status));
+  return body;
+}
+
+async function main() {
+  if (tg) { tg.ready(); tg.expand(); }
+  $("close").onclick = () => (tg ? tg.close() : window.close());
+  if (!tg || !tg.initData) {
+    $("check").textContent = "Открой панель кнопкой в боте";
+    $("check").className = "big bad";
+    return;
+  }
+  try {
+    const me = await call("/api/me");
+    $("check").textContent = "✅ Mini App работает";
+    $("check").className = "big ok";
+    $("who").textContent = `${me.name} · ${me.owner ? "владелец" : "админ"} · бот ${me.bot}`;
+  } catch (e) {
+    $("check").textContent = "❌ " + e.message;
+    $("check").className = "big bad";
+    return;
+  }
+  try {
+    const d = await call("/api/status");
+    const s = d.server || {}, t = d.tunnels || {};
+    const box = $("server");
+    const title = document.createElement("div");
+    title.className = "big";
+    title.textContent = `${d.host || "сервер"} · ${d.ip || ""}`;
+    box.append(title, row("AWG Toolza", `${d.version || "?"} · ${d.channel === "beta" ? "бета" : "стабильный"}`));
+    if (s.exists) {
+      box.append(row("Сервер", `AWG ${s.proto || "?"} · порт ${s.port || "?"} · ${s.up ? "работает" : "не поднят"}`),
+                 row("Клиенты", `${s.clients || 0} · онлайн ${s.online || 0}`));
+    } else {
+      box.append(row("Сервер", "не создан"));
+    }
+    const up = Object.entries(t).filter(([k, v]) => v === "up").map(([k]) => k);
+    box.append(row("Туннели", up.length ? up.join(", ") : "нет"));
+    box.hidden = false;
+  } catch (e) {
+    $("who").textContent += " · сводка недоступна: " + e.message;
+  }
+}
+main();
+</script>
+</body>
+</html>

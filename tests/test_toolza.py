@@ -460,4 +460,51 @@ for _ in range(60):
     time.sleep(0.5)
 chk("ошибка задачи в итоге", st.get("state") == "done" and st.get("ok") is False and st.get("rc") == 2, st)
 
+print("Сертификат")
+fake_acme()
+CERT = os.path.join(ROOT, "etc/awg2/cert/fullchain.pem")
+r = api("cert")
+chk("cert status: сертификата нет, IP сервера известен",
+    r.get("ok") and r["data"]["installed"] is False and r["data"]["ip"] == "203.0.113.10", r)
+reset_calls()
+r = api("cert", "issue", "ip")
+c = calls()
+chk("сертификат на IP: Let's Encrypt, http-01 на 80-м порту, профиль shortlived, продление через 3 дня",
+    r.get("ok") and "--issue --server letsencrypt -d 203.0.113.10 --standalone --httpport 80" in c
+    and "--cert-profile shortlived --days 3" in c, [r.get("log"), c[-500:]])
+st = api("cert", "status").get("data") or {}
+chk("сертификат на месте, срок читается",
+    st.get("installed") and st.get("kind") == "ip" and st.get("name") == "203.0.113.10"
+    and (st.get("expires") or 0) > time.time() + 5 * 86400 and oct(os.stat(CERT.replace("fullchain", "key")).st_mode)[-3:] == "600", st)
+with open(os.path.join(ROOT, "units", "awg2-cert.service")) as f:
+    unit = f.read()
+chk("таймер продления: acme.sh --cron со своим каталогом",
+    "--cron --home" in unit and os.path.exists(os.path.join(ROOT, "units", "awg2-cert.timer")), unit)
+r = api("cert", "issue", "ip")
+chk("повторный выпуск: acme.sh ответил «рано продлевать» — не ошибка", r.get("ok"), r)
+r = api("cert", "issue", "domain", "bad_domain")
+chk("домен проверяется", not r.get("ok") and "домен" in (r.get("error") or ""), r)
+r = api("cert", "issue", "domain", "nothing.invalid")
+chk("домен без A-записи — понятная ошибка", not r.get("ok") and "не резолвится" in (r.get("error") or ""), r)
+
+with open(os.path.join(ROOT, "bot.conf"), "w") as f:
+    f.write('BOT_TOKEN="1:AA"\nADMIN_ID=11\n')
+r = api("bot", "webapp", "get")
+chk("Mini App: порт по умолчанию 8443, адрес по сертификату",
+    r.get("ok") and r["data"] == {"port": "8443", "url": "https://203.0.113.10:8443/"}, r)
+r = api("bot", "webapp", "port", "80")
+chk("порт 80 под Mini App не отдаётся — он для сертификата", not r.get("ok"), r)
+r = api("bot", "webapp", "port", "443")
+chk("порт 443 — адрес без номера порта",
+    r.get("ok") and api("bot", "webapp", "get")["data"]["url"] == "https://203.0.113.10/", r)
+with open(os.path.join(ROOT, "bot.conf")) as f:
+    chk("порт записан в конфиг бота, токен не тронут", "WEBAPP_PORT=443" in f.read())
+os.remove(os.path.join(ROOT, "bot.conf"))
+
+reset_calls()
+r = api("cert", "remove")
+chk("удаление: acme.sh забывает адрес, файлы и таймер убраны",
+    r.get("ok") and not os.path.exists(CERT) and "--remove -d 203.0.113.10" in calls()
+    and not os.path.exists(os.path.join(ROOT, "var/lib/awg2/cert")), [r, calls()[-300:]])
+
 summary()

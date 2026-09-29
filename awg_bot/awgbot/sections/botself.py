@@ -17,13 +17,14 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from .. import __version__, access, admins, api, ask, icons, jobs, store, ui
+from .. import __version__, access, admins, api, ask, icons, jobs, store, ui, webapp
 from ..ui import esc
 
 router = Router()
 act = ui.Actions(router, "botm")
 adm = ui.Actions(router, "adm")
 look = ui.Actions(router, "look")
+app = ui.Actions(router, "app")
 
 
 @act()
@@ -40,6 +41,7 @@ async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
                           ("📜 Журнал", "diag:log:bot"),
                           ("👮 Админы", adm.data()) if owner else None,
                           ("🎨 Оформление", look.data()) if owner else None,
+                          ("📱 Mini App", app.data()) if owner else None,
                           ("🗑 Удалить бота", act.data("rm")) if owner else None,
                           ui.back()))
 
@@ -385,3 +387,135 @@ async def _look_on(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 async def _look_off(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     icons.disable("выключены владельцем")
     await _look_screen(cb, "Иконки выключены — снова обычные эмодзи.")
+
+
+# ── Mini App: HTTPS-сертификат и сервер ───────────────────
+DOMAIN_RE = re.compile(r"^(?=.{4,253}$)([a-z0-9-]{1,63}\.)+[a-z]{2,63}$")
+
+
+async def _owner(cb: CallbackQuery) -> bool:
+    if access.is_owner(cb.from_user.id):
+        return True
+    await cb.answer("Mini App настраивает только владелец", show_alert=True)
+    return False
+
+
+async def app_screen(target: ui.Target, verdict: str = "") -> None:
+    c = await api.data("cert", "status", default={}) or {}
+    srv = webapp.SERVER
+    lines = ["<b>📱 Mini App</b>",
+             "Панель управления внутри Telegram. Telegram открывает её только по HTTPS с настоящим сертификатом.",
+             ""]
+    if verdict:
+        lines += [verdict, ""]
+    if c.get("installed"):
+        lines.append(f"🔐 Сертификат: <code>{esc(c.get('name') or '')}</code> "
+                     f"({'IP' if c.get('kind') == 'ip' else 'домен'}) · до {ui.fmt_time(c.get('expires'))}"
+                     + (" · продлевается сам" if c.get("renew") else " · ⚠️ таймер продления не работает"))
+    else:
+        lines.append("🔐 Сертификата нет")
+    lines.append(f"🟢 Mini App: <code>{esc(srv.url)}</code>" if srv.running
+                 else f"⚪️ Mini App не запущена: {esc(srv.error or 'нет сертификата')}")
+    if c.get("port80"):
+        lines.append(f"⚠️ Порт 80 занят ({esc(c['port80'])}) — Let's Encrypt не сможет проверить адрес")
+    lines += ["", f"<i>🔐 На IP — сертификат Let's Encrypt на {esc(c.get('ip') or 'IP сервера')}: живёт ~6 дней "
+                  "и продлевается сам. Для проверки нужен свободный и открытый порт 80.\n"
+                  "🌍 На домен — если у сервера есть домен с A-записью на этот IP.\n"
+                  "📱 Открыть панель — проверка: пустит ли Telegram Mini App по этому адресу.</i>"]
+    text = "\n".join(lines)
+    buttons = [("🔐 На IP", app.data("ip")), ("🌍 На домен…", app.data("dom")),
+               ("🔢 Порт", app.data("port")),
+               ("🗑 Удалить", app.data("rm")) if c.get("installed") else None,
+               ui.back("botm")]
+    if not srv.running:
+        await ui.render(target, text, ui.kb(*buttons))
+        return
+    try:
+        await ui.render(target, text, ui.kb(ui.Row(("📱 Открыть панель", "webapp:" + srv.url)), *buttons))
+    except TelegramBadRequest as e:
+        # Главный вопрос шага: принимает ли Telegram адрес Mini App (IP)
+        await ui.render(target, text + f"\n\n❌ Telegram не принял адрес <code>{esc(srv.url)}</code>: "
+                                       f"{esc(e.message)}\nНужен домен — 🌍 На домен…", ui.kb(*buttons))
+
+
+async def _app_started(bot, chat_id: int, st: dict) -> None:  # type: ignore[no-untyped-def]
+    await webapp.SERVER.start(bot)
+
+
+@app()
+async def _app(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
+    if await _owner(cb):
+        await app_screen(cb)
+
+
+@app("ip")
+async def _app_ip(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    if await _owner(cb):
+        await jobs.start(cb, "Сертификат на IP", "cert", "issue", "ip", back_to=app.data(), done=_app_started)
+
+
+@app("dom")
+async def _app_dom(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    if await _owner(cb):
+        await ask.ask(cb, state, "app_dom", "Домен для Mini App, например <code>panel.example.com</code>.\n"
+                                            "<i>A-запись должна указывать на этот сервер.</i>", app.data())
+
+
+@ask.on("app_dom")
+async def _app_dom_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
+    dom = ask.text_of(msg).lower()
+    if not DOMAIN_RE.match(dom):
+        await ask.retry(msg, state, ctx, "Нужен домен вида panel.example.com")
+        return
+    await jobs.start(msg, f"Сертификат на {dom}", "cert", "issue", "domain", dom, back_to=app.data(),
+                     done=_app_started)
+
+
+@app("port")
+async def _app_port(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    if await _owner(cb):
+        port = webapp.configured_port()
+        await ask.ask(cb, state, "app_port", f"Порт Mini App — сейчас {port or 'выключена'}.\n"
+                                             "<i>1-65535, кроме 80 (он для сертификата). 443 — адрес без номера "
+                                             "порта, если его не занял Xray. off — выключить.</i>", app.data(),
+                      [("8443", app.data("pset", "8443")), ("443", app.data("pset", "443"))])
+
+
+async def _set_port(target: ui.Target, port: str) -> str:
+    r = await api.call("bot", "webapp", "port", port)
+    if not r.ok:
+        return ui.fail(r, "Порт Mini App")
+    await webapp.SERVER.start(target.bot)  # type: ignore[arg-type]
+    return f"✅ Порт Mini App: {esc(port)}"
+
+
+@ask.on("app_port")
+async def _app_port_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
+    v = ask.text_of(msg).lower()
+    if v != "off" and not (v.isdigit() and 0 < int(v) < 65536 and v != "80"):
+        await ask.retry(msg, state, ctx, "Порт — число 1-65535, кроме 80, или off")
+        return
+    await app_screen(msg, await _set_port(msg, v))
+
+
+@app("pset")
+async def _app_port_btn(cb: CallbackQuery, state: FSMContext, port: str) -> None:
+    if await _owner(cb):
+        await app_screen(cb, await _set_port(cb, port))
+
+
+@app("rm")
+async def _app_rm(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    if await _owner(cb):
+        await ui.confirm(cb, "Удалить сертификат? Mini App перестанет открываться, продление остановится.",
+                         ("🗑 Да, удалить", app.data("rmok")), app.data())
+
+
+@app("rmok")
+async def _app_rm_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    if not await _owner(cb):
+        return
+    r = await api.call("cert", "remove")
+    await webapp.SERVER.stop()
+    webapp.SERVER.error = "нет сертификата"
+    await app_screen(cb, "✅ Сертификат удалён" if r.ok else ui.fail(r, "Удаление сертификата"))

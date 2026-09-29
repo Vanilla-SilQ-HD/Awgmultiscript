@@ -156,6 +156,18 @@ BOT_ADMINS="/var/lib/awg-bot/admins.json"   # приглашённые адми�
 BOT_DIR="/opt/awg-bot"
 BOT_UNIT="awg-bot.service"
 BOT_PROXY_SCHEMES="http https socks4 socks5 socks5h iface"
+WEBAPP_PORT_DEFAULT=8443                    # Mini App бота (WEBAPP_PORT в BOT_CONF)
+
+# ── HTTPS-сертификат (Let's Encrypt через acme.sh) ───────
+CERT_DIR="/etc/awg2/cert"
+CERT_FULL="$CERT_DIR/fullchain.pem"
+CERT_KEY="$CERT_DIR/key.pem"
+CERT_STATE="$STATE_DIR/cert"                # kind=ip|domain, name=адрес
+ACME_DIR="/usr/local/lib/awg2/acme.sh"      # код acme.sh
+ACME_HOME="/var/lib/awg2/acme"              # аккаунт и сертификаты acme.sh
+CERT_SERVICE="awg2-cert.service"
+CERT_TIMER="awg2-cert.timer"
+CERT_TAG="awg2-cert"
 
 # Интерфейсы, которые поднимает сам awg2: их адрес не может быть Endpoint
 # клиента, и маршрут через них — не аплинк сервера.

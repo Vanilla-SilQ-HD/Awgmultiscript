@@ -19,7 +19,7 @@ from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
-                           Message)
+                           Message, WebAppInfo)
 
 from . import api, icons
 
@@ -87,14 +87,17 @@ def style_of(text: str) -> str:
 
 
 def _button(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
-    """Данные вида https://… или tg://… — кнопка-ссылка, иначе колбэк.
-    Иконки включены — эмодзи из начала подписи становится иконкой."""
+    """Данные вида https://… или tg://… — кнопка-ссылка, webapp:https://… —
+    Mini App, иначе колбэк. Иконки включены — эмодзи из начала подписи
+    становится иконкой."""
     style = style_of(text) if style is None else style
     kw: dict = {"style": style or None}
     emoji, rest = icons.lead(text)
     icon_id = icons.icon(emoji) if emoji and rest else None
     if icon_id:
         text, kw["icon_custom_emoji_id"] = rest, icon_id
+    if data.startswith("webapp:"):
+        return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=data[7:]), **kw)
     if data.startswith(("https://", "http://", "tg://")):
         return InlineKeyboardButton(text=text, url=data, **kw)
     return InlineKeyboardButton(text=text, callback_data=data, **kw)

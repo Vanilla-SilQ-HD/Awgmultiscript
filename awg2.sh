@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.0.0"
+VERSION="v1.1.0"
 
 # ═════ core ═════
 # Базовые примитивы: вывод, ввод, журнал, временные файлы, случайные числа,
@@ -449,6 +449,18 @@ BOT_ADMINS="/var/lib/awg-bot/admins.json"   # приглашённые адми�
 BOT_DIR="/opt/awg-bot"
 BOT_UNIT="awg-bot.service"
 BOT_PROXY_SCHEMES="http https socks4 socks5 socks5h iface"
+WEBAPP_PORT_DEFAULT=8443                    # Mini App бота (WEBAPP_PORT в BOT_CONF)
+
+# ── HTTPS-сертификат (Let's Encrypt через acme.sh) ───────
+CERT_DIR="/etc/awg2/cert"
+CERT_FULL="$CERT_DIR/fullchain.pem"
+CERT_KEY="$CERT_DIR/key.pem"
+CERT_STATE="$STATE_DIR/cert"                # kind=ip|domain, name=адрес
+ACME_DIR="/usr/local/lib/awg2/acme.sh"      # код acme.sh
+ACME_HOME="/var/lib/awg2/acme"              # аккаунт и сертификаты acme.sh
+CERT_SERVICE="awg2-cert.service"
+CERT_TIMER="awg2-cert.timer"
+CERT_TAG="awg2-cert"
 
 # Интерфейсы, которые поднимает сам awg2: их адрес не может быть Endpoint
 # клиента, и маршрут через них — не аплинк сервера.
@@ -6761,6 +6773,144 @@ wgobf_cli() {
   esac
 }
 
+# ═════ cert ═════
+# HTTPS-сертификат сервера — Let's Encrypt через acme.sh: на IP (профиль
+# shortlived, ~6 дней, продление каждые 3 дня) или на домен (90 дней).
+#
+# Нужен Mini App бота: Telegram открывает её только по HTTPS с настоящим
+# сертификатом. Владение адресом проверяется по http-01: на время выпуска и
+# продления acme.sh сам слушает 80-й порт (standalone), поэтому порт должен
+# быть свободен и открыт снаружи. Для IP другого способа нет — DNS-проверка
+# у Let's Encrypt только для доменов.
+#
+# Файлы для потребителей — $CERT_FULL и $CERT_KEY: acme.sh кладёт туда
+# сертификат при выпуске и после каждого продления (таймер $CERT_TIMER).
+
+cert_installed() { [[ -s "$CERT_FULL" && -s "$CERT_KEY" ]]; }
+cert_get() { sed -n "s/^$1=//p" "$CERT_STATE" 2>/dev/null | head -1; }
+
+# Срок действия (unixtime) или пусто.
+cert_expires() {
+  local end
+  end=$(openssl x509 -enddate -noout -in "$CERT_FULL" 2>/dev/null) || return 0
+  date -d "${end#notAfter=}" +%s 2>/dev/null || true
+}
+
+# Кто слушает TCP 80 — пусто, если никто.
+cert_port80_holder() {
+  ss -ltnpH 'sport = :80' 2>/dev/null | grep -oE 'users:\(\("[^"]+' | head -1 | sed 's/.*"//' || true
+}
+
+acme() { "$ACME_DIR/acme.sh" --home "$ACME_HOME" --config-home "$ACME_HOME" "$@"; }
+
+# acme.sh — последний тег с GitHub (или зеркал), без установки в систему:
+# скрипт запускается из своего каталога, всё состояние — в $ACME_HOME.
+acme_install() {
+  [[ -x "$ACME_DIR/acme.sh" ]] && return 0
+  local tag ref tmp
+  mktmp tmp -d || return 1
+  tag=$(gh_latest_tag acmesh-official/acme.sh || true)
+  ref=${tag:+tags/$tag}
+  gh_fetch "https://github.com/acmesh-official/acme.sh/archive/refs/${ref:-heads/master}.tar.gz" "$tmp/a.tgz" 100000 any \
+    || { err "acme.sh не скачался ни напрямую, ни через зеркала"; return 1; }
+  [[ "$(head -c2 "$tmp/a.tgz" | od -An -tx1 | tr -d ' \n')" == 1f8b ]] \
+    || { err "Вместо архива acme.sh пришло что-то другое"; return 1; }
+  mkdir -p "$ACME_DIR" "$ACME_HOME" && chmod 700 "$ACME_HOME"
+  tar -xzf "$tmp/a.tgz" -C "$ACME_DIR" --strip-components=1 || { err "Архив acme.sh не распаковался"; return 1; }
+  chmod 755 "$ACME_DIR/acme.sh"
+  # standalone-режиму нужен socat или python3; socat надёжнее
+  command -v socat &>/dev/null || apt_install socat || true
+  ok "acme.sh ${tag:-master}"
+}
+
+cert_timer_install() {
+  write_unit "$CERT_SERVICE" <<UNIT
+[Unit]
+Description=AWG Toolza — продление HTTPS-сертификата (acme.sh)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$ACME_DIR/acme.sh --cron --home $ACME_HOME --config-home $ACME_HOME
+UNIT
+  write_unit "$CERT_TIMER" <<'UNIT'
+[Unit]
+Description=AWG Toolza — таймер продления HTTPS-сертификата
+
+[Timer]
+OnCalendar=*-*-* 04,16:20:00
+RandomizedDelaySec=45min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl enable --now "$CERT_TIMER" &>/dev/null || warn "Таймер продления не запустился: systemctl status $CERT_TIMER"
+}
+
+# cert_issue ip | domain ИМЯ
+cert_issue() {
+  local kind="${1:-}" name="${2:-}" args=() ip pub holder rc=0 old out
+  case "$kind" in
+    ip)
+      name=$(public_ip)
+      valid_ip "$name" && ! ip_is_private "$name" || { err "У сервера нет публичного IPv4 — сертификат на IP не выпустить"; return 1; }
+      # Сертификаты на IP Let's Encrypt выдаёт только с профилем shortlived
+      args=(--cert-profile shortlived --days 3) ;;
+    domain)
+      name="${name,,}"
+      valid_domain "$name" || { err "Нужен домен вида panel.example.com"; return 1; }
+      ip=$(getent ahostsv4 "$name" 2>/dev/null | awk 'NR == 1 {print $1}')
+      pub=$(public_ip)
+      [[ -n "$ip" ]] || { err "Домен $name не резолвится — проверь A-запись"; return 1; }
+      [[ "$ip" == "$pub" ]] || { err "A-запись $name ведёт на $ip, а IP сервера — $pub: Let's Encrypt не проверит владение"; return 1; } ;;
+    *) err "Сертификат: ip | domain ИМЯ"; return 1 ;;
+  esac
+  holder=$(cert_port80_holder)
+  [[ -z "$holder" ]] || { err "Порт 80 занят ($holder): acme.sh слушает его сам на время выпуска и продления"; return 1; }
+  acme_install || return 1
+  ufw_allow 80/tcp "$CERT_TAG"
+  info "Let's Encrypt: сертификат на $name…"
+  mkdir -p "$ACME_HOME"
+  out=$(acme --issue --server letsencrypt -d "$name" --standalone --httpport 80 --keylength ec-256 "${args[@]}" 2>&1) || rc=$?
+  printf '%s\n' "$out" | sed 's/^\[[^]]*\] //' | grep -vE '^$' | tail -n 12
+  # 2 — сертификат уже выпущен и продлевать его рано
+  if (( rc != 0 && rc != 2 )); then
+    err "Let's Encrypt не выдал сертификат — проверь, что порт 80 открыт снаружи (и в файрволе хостера)"
+    return 1
+  fi
+  mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
+  acme --install-cert -d "$name" --ecc --key-file "$CERT_KEY" --fullchain-file "$CERT_FULL" &>/dev/null
+  cert_installed || { err "Сертификат выпущен, но не скопирован в $CERT_DIR"; return 1; }
+  chmod 600 "$CERT_KEY"
+  # Прежний адрес больше не продлеваем — иначе таймер дёргал бы 80-й порт зря
+  old=$(cert_get name)
+  [[ -n "$old" && "$old" != "$name" ]] && acme --remove -d "$old" --ecc &>/dev/null
+  printf 'kind=%s\nname=%s\n' "$kind" "$name" | write_file "$CERT_STATE" 600
+  cert_timer_install
+  log_info "сертификат: $kind $name"
+  ok "Сертификат на $name до $(date -d "@$(cert_expires)" '+%d.%m.%Y %H:%M'), продлевается сам"
+}
+
+cert_remove() {
+  local name
+  name=$(cert_get name)
+  [[ -n "$name" && -x "$ACME_DIR/acme.sh" ]] && acme --remove -d "$name" --ecc &>/dev/null
+  remove_unit "$CERT_TIMER" "$CERT_SERVICE"
+  rm -rf "$CERT_DIR" "$CERT_STATE"
+  ufw_delete_matching "$CERT_TAG"
+  log_info "сертификат удалён"
+  ok "Сертификат удалён"
+}
+
+cert_state_line() {
+  local exp
+  cert_installed || { echo -e "${D}нет${N}"; return; }
+  exp=$(cert_expires)
+  echo -e "${W}$(cert_get name)${N} ${D}($([[ "$(cert_get kind)" == ip ]] && echo IP || echo домен), до $(date -d "@${exp:-0}" '+%d.%m %H:%M'))${N}"
+}
+
 # ═════ backup ═════
 # Бэкапы в ~/awg_backup (домашний каталог того, кто запустил sudo):
 #   awg2_backup_<время>/        — полный: сервер, клиенты, WARP, WG + обфускатор,
@@ -7180,10 +7330,20 @@ bot_version() {
 }
 
 # ── Прокси до Telegram ────────────────────────────────────
-bot_proxy_get() {
-  sed -n 's/^[[:space:]]*BOT_PROXY[[:space:]]*=[[:space:]]*//p' "$BOT_CONF" 2>/dev/null | tail -1 \
+# Значение ключа из конфига бота (кавычки и пробелы по краям снимаются).
+bot_conf_get() {
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$BOT_CONF" 2>/dev/null | tail -1 \
     | sed -e 's/[[:space:]]*$//' -e "s/^[\"']//" -e "s/[\"']\$//"
 }
+
+# KEY=значение в конфиге бота; пустое значение — убрать ключ.
+bot_conf_set() {
+  [[ -f "$BOT_CONF" ]] || { err "Нет $BOT_CONF — сначала установи бота"; return 1; }
+  { grep -vE "^[[:space:]]*$1[[:space:]]*=" "$BOT_CONF" || true
+    if [[ -n "$2" ]]; then echo "$1=$2"; fi; } | write_file "$BOT_CONF" 600
+}
+
+bot_proxy_get() { bot_conf_get BOT_PROXY; }
 
 # Пароль прокси весит как токен бота, а меню снимают на скриншоты
 bot_proxy_mask() { if [[ "$1" == *@* ]]; then echo "${1%%://*}://***@${1##*@}"; else echo "$1"; fi; }
@@ -7203,10 +7363,74 @@ bot_proxy_probe() {
   [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]
 }
 
-_bot_proxy_write() {  # url (пусто — убрать)
-  [[ -f "$BOT_CONF" ]] || { err "Нет $BOT_CONF — сначала установи бота"; return 1; }
-  { grep -vE '^[[:space:]]*BOT_PROXY[[:space:]]*=' "$BOT_CONF" || true
-    if [[ -n "$1" ]]; then echo "BOT_PROXY=$1"; fi; } | write_file "$BOT_CONF" 600
+_bot_proxy_write() { bot_conf_set BOT_PROXY "$1"; }  # url (пусто — убрать)
+
+# ── Mini App ──────────────────────────────────────────────
+# HTTPS-сервер Mini App живёт в самом боте; awg2 задаёт порт (WEBAPP_PORT в
+# конфиге бота, off — выключена) и выпускает сертификат (cert.sh).
+webapp_port() {
+  local p
+  p=$(bot_conf_get WEBAPP_PORT)
+  echo "${p:-$WEBAPP_PORT_DEFAULT}"
+}
+
+webapp_fw() {
+  local p
+  p=$(webapp_port)
+  [[ "$p" == off ]] || ufw_allow "$p/tcp" awg-webapp
+  return 0
+}
+
+webapp_port_set() {  # порт | off
+  local p="${1:-}"
+  if [[ "$p" != off ]]; then
+    valid_port "$p" && (( p != 80 )) || { err "Порт Mini App: 1-65535, кроме 80 — он для сертификата"; return 1; }
+  fi
+  bot_conf_set WEBAPP_PORT "$p" || return 1
+  webapp_fw
+  ok "Mini App: $([[ "$p" == off ]] && echo "выключена" || echo "порт $p")"
+}
+
+webapp_url() {
+  local p
+  p=$(webapp_port)
+  cert_installed && [[ "$p" != off ]] || return 1
+  echo "https://$(cert_get name)$([[ "$p" == 443 ]] || echo ":$p")/"
+}
+
+do_webapp_menu() {
+  local c v p url
+  while true; do
+    echo ""
+    hdr "Mini App и HTTPS-сертификат"
+    p=$(webapp_port)
+    echo -e "  Сертификат : $(cert_state_line)"
+    if url=$(webapp_url); then
+      echo -e "  Mini App   : ${W}$url${N} ${D}— открывается кнопкой в боте${N}"
+    else
+      echo -e "  Mini App   : ${D}$([[ "$p" == off ]] && echo "выключена" || echo "нужен сертификат")${N}"
+    fi
+    echo -e "  ${D}Telegram открывает Mini App только по HTTPS. Let's Encrypt проверяет адрес через${N}"
+    echo -e "  ${D}порт 80 — он должен быть свободен и открыт; сертификат на IP живёт ~6 дней и${N}"
+    echo -e "  ${D}продлевается сам.${N}"
+    echo ""
+    echo -e "  ${C}1)${N} Сертификат на IP ${D}— $(public_ip_cached)${N}"
+    echo -e "  ${C}2)${N} Сертификат на домен"
+    echo -e "  ${C}3)${N} Порт Mini App ${D}— $p${N}"
+    echo -e "  ${R}4)${N} Удалить сертификат"
+    echo -e "  ${W}0)${N} ← Назад"
+    read_choice c "${C}  Выбор [0-4]: ${N}" 0 4 0
+    case "$c" in
+      1) cert_issue ip && webapp_fw && bot_restart ;;
+      2) read_line v "${C}  Домен (A-запись → $(public_ip_cached)): ${N}"
+         [[ -n "$v" ]] && cert_issue domain "$v" && webapp_fw && bot_restart ;;
+      3) read_line v "${C}  Порт (1-65535, off — выключить): ${N}"
+         [[ -n "$v" ]] && webapp_port_set "$v" && bot_restart ;;
+      4) ask_yes "  Удалить сертификат? Mini App перестанет открываться [y/N]: " n && cert_remove && bot_restart ;;
+      0) return 0 ;;
+    esac
+    pause
+  done
 }
 
 # Выходы этого сервера, годные боту, строки «url|описание».
@@ -7389,8 +7613,9 @@ do_bot_menu() {
       echo -e "  ${C}5)${N} Журнал"
       echo -e "  ${C}6)${N} Прокси до Telegram"
       echo -e "  ${R}7)${N} Удалить бота"
+      echo -e "  ${C}8)${N} Mini App и HTTPS-сертификат"
       echo -e "  ${W}0)${N} ← Назад"
-      read_choice c "${C}  Выбор [0-7]: ${N}" 0 7 0
+      read_choice c "${C}  Выбор [0-8]: ${N}" 0 8 0
     else
       echo -e "  ${D}Клиенты, сроки, туннели и статус из Telegram.${N}"
       echo -e "  ${C}1)${N} Установить бота"
@@ -7405,6 +7630,7 @@ do_bot_menu() {
       5) journalctl -u "$BOT_UNIT" -n 40 --no-pager 2>/dev/null || true ;;
       6) bot_proxy_menu || true ;;
       7) bot_uninstall || true ;;
+      8) do_webapp_menu || true; continue ;;
       0) return 0 ;;
     esac
     pause
@@ -7533,7 +7759,12 @@ uninstall_all() {
   ufw_delete_matching AmneziaWG
   if [[ "$del_wgobf" == y ]]; then wgobf_remove quiet
   elif wgobf_installed; then info "WG + обфускатор оставлен и продолжит работать сам"; fi
-  [[ "$del_bot" == y ]] && bot_uninstall quiet
+  if [[ "$del_bot" == y ]]; then
+    bot_uninstall quiet
+    # Сертификат нужен только Mini App бота
+    [[ -f "$CERT_STATE" || -d "$CERT_DIR" ]] && cert_remove &>/dev/null
+    rm -rf "$ACME_DIR" "$ACME_HOME"
+  fi
   log_info "полное удаление"
   if [[ "$del_self" != y ]]; then
     ok "Удалено. Скрипт остался: $SCRIPT_PATH"
@@ -8536,8 +8767,29 @@ _api_bot() {
         clear) bot_proxy_set "" ;;
         *) _api_usage "bot proxy get|check|candidates|set URL [force]|clear" ;;
       esac ;;
+    webapp)
+      case "${1:-}" in
+        get) { _kv port "$(webapp_port)"; _kv url "$(webapp_url || true)"; } | api_obj ;;
+        port) webapp_port_set "${2:-}" ;;
+        *) _api_usage "bot webapp get|port ПОРТ|off" ;;
+      esac ;;
     uninstall) bot_uninstall quiet ;;
-    *) _api_usage "bot status|restart|update|proxy ...|uninstall" ;;
+    *) _api_usage "bot status|restart|update|proxy ...|webapp ...|uninstall" ;;
+  esac
+}
+
+# ── HTTPS-сертификат ──────────────────────────────────────
+_api_cert() {
+  local a="${1:-status}"
+  shift || true
+  case "$a" in
+    status)
+      { _kv installed:b "$(_b cert_installed)"; _kv kind "$(cert_get kind)"; _kv name "$(cert_get name)"
+        _kv expires:n "$(cert_expires)"; _kv renew:b "$(_b unit_enabled "$CERT_TIMER")"
+        _kv port80 "$(cert_port80_holder)"; _kv ip "$(public_ip_cached)"; } | api_obj ;;
+    issue) cert_issue "$@" && webapp_fw ;;
+    remove) cert_remove ;;
+    *) _api_usage "cert status|issue ip|issue domain ИМЯ|remove" ;;
   esac
 }
 
@@ -8641,7 +8893,7 @@ _api_readonly() {
     "status "|"version "|"help "|"mimicry "|"log "*|"job "*|"diag "*) return 0 ;;
     *" status"|*" info"|*" report"|*" tags"|*" backups"|*" list"|*" conf"|*" inspect") return 0 ;;
     "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|"wgobf bundle"|\
-    "bot proxy"|"update check"|"module check") return 0 ;;
+    "bot proxy"|"bot webapp"|"update check"|"module check"|"cert ") return 0 ;;
   esac
   return 1
 }
@@ -8681,6 +8933,7 @@ api_dispatch() {
     wgobf) _api_wgobf "$@" ;;
     update) _api_update "$@" ;;
     bot) _api_bot "$@" ;;
+    cert) _api_cert "$@" ;;
     uninstall) _api_uninstall "$@" ;;
     log) _api_log "$@" ;;
     job) _api_job "$@" ;;

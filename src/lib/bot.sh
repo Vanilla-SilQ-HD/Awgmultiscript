@@ -16,10 +16,20 @@ bot_version() {
 }
 
 # ── Прокси до Telegram ────────────────────────────────────
-bot_proxy_get() {
-  sed -n 's/^[[:space:]]*BOT_PROXY[[:space:]]*=[[:space:]]*//p' "$BOT_CONF" 2>/dev/null | tail -1 \
+# Значение ключа из конфига бота (кавычки и пробелы по краям снимаются).
+bot_conf_get() {
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$BOT_CONF" 2>/dev/null | tail -1 \
     | sed -e 's/[[:space:]]*$//' -e "s/^[\"']//" -e "s/[\"']\$//"
 }
+
+# KEY=значение в конфиге бота; пустое значение — убрать ключ.
+bot_conf_set() {
+  [[ -f "$BOT_CONF" ]] || { err "Нет $BOT_CONF — сначала установи бота"; return 1; }
+  { grep -vE "^[[:space:]]*$1[[:space:]]*=" "$BOT_CONF" || true
+    if [[ -n "$2" ]]; then echo "$1=$2"; fi; } | write_file "$BOT_CONF" 600
+}
+
+bot_proxy_get() { bot_conf_get BOT_PROXY; }
 
 # Пароль прокси весит как токен бота, а меню снимают на скриншоты
 bot_proxy_mask() { if [[ "$1" == *@* ]]; then echo "${1%%://*}://***@${1##*@}"; else echo "$1"; fi; }
@@ -39,10 +49,74 @@ bot_proxy_probe() {
   [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]
 }
 
-_bot_proxy_write() {  # url (пусто — убрать)
-  [[ -f "$BOT_CONF" ]] || { err "Нет $BOT_CONF — сначала установи бота"; return 1; }
-  { grep -vE '^[[:space:]]*BOT_PROXY[[:space:]]*=' "$BOT_CONF" || true
-    if [[ -n "$1" ]]; then echo "BOT_PROXY=$1"; fi; } | write_file "$BOT_CONF" 600
+_bot_proxy_write() { bot_conf_set BOT_PROXY "$1"; }  # url (пусто — убрать)
+
+# ── Mini App ──────────────────────────────────────────────
+# HTTPS-сервер Mini App живёт в самом боте; awg2 задаёт порт (WEBAPP_PORT в
+# конфиге бота, off — выключена) и выпускает сертификат (cert.sh).
+webapp_port() {
+  local p
+  p=$(bot_conf_get WEBAPP_PORT)
+  echo "${p:-$WEBAPP_PORT_DEFAULT}"
+}
+
+webapp_fw() {
+  local p
+  p=$(webapp_port)
+  [[ "$p" == off ]] || ufw_allow "$p/tcp" awg-webapp
+  return 0
+}
+
+webapp_port_set() {  # порт | off
+  local p="${1:-}"
+  if [[ "$p" != off ]]; then
+    valid_port "$p" && (( p != 80 )) || { err "Порт Mini App: 1-65535, кроме 80 — он для сертификата"; return 1; }
+  fi
+  bot_conf_set WEBAPP_PORT "$p" || return 1
+  webapp_fw
+  ok "Mini App: $([[ "$p" == off ]] && echo "выключена" || echo "порт $p")"
+}
+
+webapp_url() {
+  local p
+  p=$(webapp_port)
+  cert_installed && [[ "$p" != off ]] || return 1
+  echo "https://$(cert_get name)$([[ "$p" == 443 ]] || echo ":$p")/"
+}
+
+do_webapp_menu() {
+  local c v p url
+  while true; do
+    echo ""
+    hdr "Mini App и HTTPS-сертификат"
+    p=$(webapp_port)
+    echo -e "  Сертификат : $(cert_state_line)"
+    if url=$(webapp_url); then
+      echo -e "  Mini App   : ${W}$url${N} ${D}— открывается кнопкой в боте${N}"
+    else
+      echo -e "  Mini App   : ${D}$([[ "$p" == off ]] && echo "выключена" || echo "нужен сертификат")${N}"
+    fi
+    echo -e "  ${D}Telegram открывает Mini App только по HTTPS. Let's Encrypt проверяет адрес через${N}"
+    echo -e "  ${D}порт 80 — он должен быть свободен и открыт; сертификат на IP живёт ~6 дней и${N}"
+    echo -e "  ${D}продлевается сам.${N}"
+    echo ""
+    echo -e "  ${C}1)${N} Сертификат на IP ${D}— $(public_ip_cached)${N}"
+    echo -e "  ${C}2)${N} Сертификат на домен"
+    echo -e "  ${C}3)${N} Порт Mini App ${D}— $p${N}"
+    echo -e "  ${R}4)${N} Удалить сертификат"
+    echo -e "  ${W}0)${N} ← Назад"
+    read_choice c "${C}  Выбор [0-4]: ${N}" 0 4 0
+    case "$c" in
+      1) cert_issue ip && webapp_fw && bot_restart ;;
+      2) read_line v "${C}  Домен (A-запись → $(public_ip_cached)): ${N}"
+         [[ -n "$v" ]] && cert_issue domain "$v" && webapp_fw && bot_restart ;;
+      3) read_line v "${C}  Порт (1-65535, off — выключить): ${N}"
+         [[ -n "$v" ]] && webapp_port_set "$v" && bot_restart ;;
+      4) ask_yes "  Удалить сертификат? Mini App перестанет открываться [y/N]: " n && cert_remove && bot_restart ;;
+      0) return 0 ;;
+    esac
+    pause
+  done
 }
 
 # Выходы этого сервера, годные боту, строки «url|описание».
@@ -225,8 +299,9 @@ do_bot_menu() {
       echo -e "  ${C}5)${N} Журнал"
       echo -e "  ${C}6)${N} Прокси до Telegram"
       echo -e "  ${R}7)${N} Удалить бота"
+      echo -e "  ${C}8)${N} Mini App и HTTPS-сертификат"
       echo -e "  ${W}0)${N} ← Назад"
-      read_choice c "${C}  Выбор [0-7]: ${N}" 0 7 0
+      read_choice c "${C}  Выбор [0-8]: ${N}" 0 8 0
     else
       echo -e "  ${D}Клиенты, сроки, туннели и статус из Telegram.${N}"
       echo -e "  ${C}1)${N} Установить бота"
@@ -241,6 +316,7 @@ do_bot_menu() {
       5) journalctl -u "$BOT_UNIT" -n 40 --no-pager 2>/dev/null || true ;;
       6) bot_proxy_menu || true ;;
       7) bot_uninstall || true ;;
+      8) do_webapp_menu || true; continue ;;
       0) return 0 ;;
     esac
     pause

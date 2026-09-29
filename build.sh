@@ -14,7 +14,7 @@ OUT="${1:-dist/awg2.sh}"
 
 LIBS=(
   core const sys net conf module params mimicry server clients expire
-  tunnels warp dns cascade xray tun2socks exits wgobf
+  tunnels warp dns cascade xray tun2socks exits wgobf cert
   backup update bot uninstall diag menu api cli
 )
 

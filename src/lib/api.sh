@@ -673,8 +673,29 @@ _api_bot() {
         clear) bot_proxy_set "" ;;
         *) _api_usage "bot proxy get|check|candidates|set URL [force]|clear" ;;
       esac ;;
+    webapp)
+      case "${1:-}" in
+        get) { _kv port "$(webapp_port)"; _kv url "$(webapp_url || true)"; } | api_obj ;;
+        port) webapp_port_set "${2:-}" ;;
+        *) _api_usage "bot webapp get|port ПОРТ|off" ;;
+      esac ;;
     uninstall) bot_uninstall quiet ;;
-    *) _api_usage "bot status|restart|update|proxy ...|uninstall" ;;
+    *) _api_usage "bot status|restart|update|proxy ...|webapp ...|uninstall" ;;
+  esac
+}
+
+# ── HTTPS-сертификат ──────────────────────────────────────
+_api_cert() {
+  local a="${1:-status}"
+  shift || true
+  case "$a" in
+    status)
+      { _kv installed:b "$(_b cert_installed)"; _kv kind "$(cert_get kind)"; _kv name "$(cert_get name)"
+        _kv expires:n "$(cert_expires)"; _kv renew:b "$(_b unit_enabled "$CERT_TIMER")"
+        _kv port80 "$(cert_port80_holder)"; _kv ip "$(public_ip_cached)"; } | api_obj ;;
+    issue) cert_issue "$@" && webapp_fw ;;
+    remove) cert_remove ;;
+    *) _api_usage "cert status|issue ip|issue domain ИМЯ|remove" ;;
   esac
 }
 
@@ -778,7 +799,7 @@ _api_readonly() {
     "status "|"version "|"help "|"mimicry "|"log "*|"job "*|"diag "*) return 0 ;;
     *" status"|*" info"|*" report"|*" tags"|*" backups"|*" list"|*" conf"|*" inspect") return 0 ;;
     "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|"wgobf bundle"|\
-    "bot proxy"|"update check"|"module check") return 0 ;;
+    "bot proxy"|"bot webapp"|"update check"|"module check"|"cert ") return 0 ;;
   esac
   return 1
 }
@@ -818,6 +839,7 @@ api_dispatch() {
     wgobf) _api_wgobf "$@" ;;
     update) _api_update "$@" ;;
     bot) _api_bot "$@" ;;
+    cert) _api_cert "$@" ;;
     uninstall) _api_uninstall "$@" ;;
     log) _api_log "$@" ;;
     job) _api_job "$@" ;;

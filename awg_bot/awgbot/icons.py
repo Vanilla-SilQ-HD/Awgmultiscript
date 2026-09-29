@@ -207,9 +207,12 @@ class Middleware(BaseRequestMiddleware):
         except TelegramBadRequest as e:
             if "not modified" in str(e):
                 raise
-            disable(f"Telegram отклонил сообщение с иконками: {e}")
+            # Повтор без иконок; не прошёл и он — дело не в иконках (ошибка
+            # уходит дальше, иконки остаются включёнными)
             method.text, method.reply_markup = plain, plain_markup(markup)
-            return await make_request(bot, method)
+            result = await make_request(bot, method)
+            disable(f"Telegram отклонил сообщение с иконками: {e}")
+            return result
         # Судим по тексту: сущности custom_emoji в ответе есть всегда, когда
         # Telegram их принял; кнопки — только если в тексте иконок не было
         if isinstance(result, Message):

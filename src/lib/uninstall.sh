@@ -119,7 +119,12 @@ uninstall_all() {
   ufw_delete_matching AmneziaWG
   if [[ "$del_wgobf" == y ]]; then wgobf_remove quiet
   elif wgobf_installed; then info "WG + обфускатор оставлен и продолжит работать сам"; fi
-  [[ "$del_bot" == y ]] && bot_uninstall quiet
+  if [[ "$del_bot" == y ]]; then
+    bot_uninstall quiet
+    # Сертификат нужен только Mini App бота
+    [[ -f "$CERT_STATE" || -d "$CERT_DIR" ]] && cert_remove &>/dev/null
+    rm -rf "$ACME_DIR" "$ACME_HOME"
+  fi
   log_info "полное удаление"
   if [[ "$del_self" != y ]]; then
     ok "Удалено. Скрипт остался: $SCRIPT_PATH"

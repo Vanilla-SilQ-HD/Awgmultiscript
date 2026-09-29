@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-ffffff?style=flat-square&labelColor=000000)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Ubuntu%2024%20%2F%20Debian%2012%2B-E95420?style=flat-square&logo=ubuntu&logoColor=white)](https://ubuntu.com/)
 [![Protocol](https://img.shields.io/badge/AWG-2.0%20%2F%203.1-00d4ff?style=flat-square)](#)
-[![Version](https://img.shields.io/badge/version-v1.0.0-ff6b00?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v1.1.0-ff6b00?style=flat-square)](#)
 
 <br>
 
@@ -240,6 +240,25 @@ tun2socks, exit-ноды, каскад, шифрованный DNS, WG + обф�
   бот сообщит, когда клиент пропал и когда вернулся. Об истечении сроков пишет
   таймер `awg2`, даже когда бот остановлен.
 
+### 📱 Mini App и HTTPS-сертификат
+
+Mini App — панель управления внутри Telegram. Telegram открывает её только по
+HTTPS с настоящим сертификатом, поэтому awg2 выпускает его сам — **Telegram-бот →
+Mini App и HTTPS-сертификат** (или в боте: **Telegram-бот → 📱 Mini App**):
+
+- **На IP** — Let's Encrypt выдаёт сертификаты на IP с января 2026: живут ~6 дней
+  (профиль `shortlived`), таймер `awg2-cert.timer` продлевает их сам.
+- **На домен** — если у сервера есть домен с A-записью на его IP; 90 дней.
+- Адрес проверяется по http-01: на время выпуска и продления acme.sh сам слушает
+  **порт 80** — он должен быть свободен и открыт снаружи.
+- Сервер Mini App живёт в боте (порт `WEBAPP_PORT`, по умолчанию 8443) и пускает
+  только владельцев и приглашённых админов: каждый запрос несёт данные
+  пользователя, подписанные Telegram токеном бота.
+
+Сейчас Mini App — проверочная страница (вход и сводка сервера); полная панель —
+следующим шагом. Если Telegram не примет адрес с IP, бот скажет об этом — тогда
+нужен домен.
+
 **Установка:** `sudo awg2` → **Telegram-бот** → Установить. Или вручную:
 
 ```bash
@@ -319,6 +338,6 @@ python3 tests/test_admins.py && python3 tests/test_net.py
 
 *Сообщество [AWG-Toolza](https://t.me/awgToolza)*
 
-**AWG Toolza v1.0.0** · MIT License
+**AWG Toolza v1.1.0** · MIT License
 
 </div>
