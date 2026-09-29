@@ -14,6 +14,7 @@ import time
 from typing import Awaitable, Callable, Iterable, Union
 
 from aiogram import Bot, F, Router
+from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -128,24 +129,35 @@ def fail(r: api.Result, title: str = "") -> str:
 
 
 # ── Отрисовка ─────────────────────────────────────────────
-# В чате живёт одно сообщение-экран с кнопками. Нажатие правит его, ответ
-# текстом заменяет его новым внизу — старые экраны и промежуточные «⏳»
-# не копятся. Отдельными сообщениями остаются только файлы (конфиги, QR,
-# бэкапы) и уведомления. Сообщение, где идёт задача, не удаляется, пока
-# она не закончится: в него пишется журнал.
+# В чате живёт одно сообщение-экран с кнопками. Нажатие правит его; ответ
+# текстом правит его же, если экран и так последнее сообщение бота, иначе
+# экран встаёт новым внизу (под файлами), а прежний убирается — уже после,
+# чтобы чат ни на миг не пустел. Отдельными сообщениями остаются только
+# файлы (конфиги, QR, бэкапы) и уведомления. Сообщение, где идёт задача,
+# не удаляется, пока она не закончится: в него пишется журнал.
 _screen: dict[int, int] = {}            # чат → id сообщения-экрана
+_last: dict[int, int] = {}              # чат → последнее сообщение, отправленное ботом
 busy: set[tuple[int, int]] = set()      # (чат, сообщение) с идущей задачей
 
 
-async def _drop_screen(bot: Bot, chat_id: int, keep: int = 0) -> None:
-    mid = _screen.pop(chat_id, 0)
-    if not mid or mid == keep or (chat_id, mid) in busy:
+class TrackSent(BaseRequestMiddleware):
+    """Запоминает последнее отправленное ботом сообщение в каждом чате."""
+
+    async def __call__(self, make_request, bot, method):  # type: ignore[no-untyped-def]
+        result = await make_request(bot, method)
+        if isinstance(result, Message) and type(method).__name__.startswith("Send"):
+            _last[result.chat.id] = result.message_id
+        return result
+
+
+async def _retire(bot: Bot, chat_id: int, mid: int) -> None:
+    """Убрать прежний экран: удалить, а если нельзя — хотя бы снять кнопки."""
+    if not mid or (chat_id, mid) in busy:
         return
     try:
         await bot.delete_message(chat_id, mid)
     except TelegramBadRequest:
-        # Старше 48 часов удалить нельзя — хотя бы снимаем кнопки
-        with contextlib.suppress(TelegramBadRequest):
+        with contextlib.suppress(TelegramBadRequest):         # старше 48 часов
             await bot.edit_message_reply_markup(chat_id=chat_id, message_id=mid, reply_markup=None)
 
 
@@ -158,21 +170,27 @@ def is_screen(chat_id: int, msg_id: int) -> bool:
 
 
 async def show_new(bot: Bot, chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> Message:
-    """Новый экран внизу чата; прежний удаляется."""
-    await _drop_screen(bot, chat_id)
+    """Новый экран внизу чата; прежний убирается после отправки."""
+    old = _screen.get(chat_id, 0)
     msg = await bot.send_message(chat_id, text[:TEXT_MAX], reply_markup=markup, disable_web_page_preview=True)
     _screen[chat_id] = msg.message_id
+    if old != msg.message_id:
+        await _retire(bot, chat_id, old)
     return msg
 
 
 async def render(target: Target, text: str, markup: InlineKeyboardMarkup | None = None) -> Message | None:
-    """Кнопка — правим её сообщение; ответ текстом — новый экран внизу."""
+    """Кнопка — правим её сообщение; ответ текстом — экран на месте или новый внизу.
+    None — показывать нечего или текст не изменился."""
     text = text[:TEXT_MAX]
+    bot = target.bot
+    if bot is None:
+        return None
     if isinstance(target, CallbackQuery):
         msg = target.message
         with contextlib.suppress(TelegramBadRequest):   # колбэк старше 15 минут
             await target.answer()
-        if not isinstance(msg, Message) or target.bot is None:
+        if not isinstance(msg, Message):
             return None
         chat_id = msg.chat.id
         try:
@@ -180,14 +198,26 @@ async def render(target: Target, text: str, markup: InlineKeyboardMarkup | None 
         except TelegramBadRequest as e:
             if "not modified" not in str(e):
                 log.debug("edit_text: %s — новый экран", e)
-                return await show_new(target.bot, chat_id, text, markup)
+                return await show_new(bot, chat_id, text, markup)
             out = msg
-        await _drop_screen(target.bot, chat_id, keep=msg.message_id)
+        old = _screen.get(chat_id, 0)
         _screen[chat_id] = msg.message_id
+        if old and old != msg.message_id:
+            await _retire(bot, chat_id, old)
         return out if isinstance(out, Message) else msg
-    if target.bot is None:
-        return None
-    return await show_new(target.bot, target.chat.id, text, markup)
+    chat_id = target.chat.id
+    mid = _screen.get(chat_id, 0)
+    if mid and _last.get(chat_id) == mid and (chat_id, mid) not in busy:
+        try:
+            out = await bot.edit_message_text(text, chat_id=chat_id, message_id=mid, reply_markup=markup,
+                                              disable_web_page_preview=True)
+            if isinstance(out, Message):
+                return out
+        except TelegramBadRequest as e:
+            if "not modified" in str(e):
+                return None
+            log.debug("edit_message_text: %s — новый экран", e)
+    return await show_new(bot, chat_id, text, markup)
 
 
 def chat_of(target: Target) -> Message:

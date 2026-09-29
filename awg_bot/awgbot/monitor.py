@@ -8,7 +8,8 @@
 Состояние переживает перезапуск (формат прежних версий):
     {имя: {"since": <последняя активность>, "notified": <отправлено ли 🔴>}}
 Сроки клиентов здесь не проверяются: блокирует их таймер awg2, он же и
-сообщает об этом владельцам и админам.
+сообщает об этом владельцам и админам. Клиент, который ни разу не
+подключался, не считается пропавшим.
 """
 
 from __future__ import annotations
@@ -69,37 +70,49 @@ def _card(c: dict) -> str:
             + (f"\nЗаметка: {esc(note)}" if note else ""))
 
 
+async def tick(bot: Bot, state: dict[str, dict[str, Any]], primed: bool) -> bool:
+    """Один проход: уведомления и состояние. False — список клиентов не получен."""
+    rows = await api.data("clients", "list")
+    if not isinstance(rows, list):
+        return False
+    notes = store.notes()
+    # Заметки удалённых клиентов (в том числе из меню awg2) — прочь: иначе
+    # новый клиент с тем же именем унаследует чужой #ping
+    alive = {c["name"] for c in rows}
+    for gone in [n for n in notes if n not in alive]:
+        store.drop_note(gone)
+    # Ни разу не подключавшийся клиент не «пропадал» — о нём молчим
+    watched = [c for c in rows if store.MONITOR_TAG in notes.get(c["name"], "").lower()
+               and not c.get("blocked") and c.get("handshake")]
+    now = int(time.time())
+    for c in watched:
+        hs = int(c["handshake"])
+        off = now - hs >= OFFLINE_AFTER
+        entry = state.get(c["name"])
+        if off and entry is None:
+            if primed:
+                await _send(bot, f"🔴 <b>Клиент офлайн</b>\n\n{_card(c)}\n"
+                                 f"Последняя активность: {ui.fmt_dur(now - hs)} назад")
+            state[c["name"]] = {"since": hs, "notified": primed}
+        elif not off and entry is not None:
+            state.pop(c["name"], None)
+            if primed and entry.get("notified"):
+                gone = f"\nОтсутствовал: {ui.fmt_dur(now - int(entry['since']))}" if entry.get("since") else ""
+                await _send(bot, f"🟢 <b>Клиент снова онлайн</b>\n\n{_card(c)}{gone}")
+    names = {c["name"] for c in watched}
+    for stale in [k for k in state if k not in names]:
+        state.pop(stale)
+    store.save(store.MONITOR, state)
+    return True
+
+
 async def loop(bot: Bot) -> None:
     log.info("Мониторинг активности: маркер %s, порог %d мин", store.MONITOR_TAG, OFFLINE_AFTER // 60)
     state = _load()
     primed = False                  # первый проход только запоминает картину
     while True:
         try:
-            rows = await api.data("clients", "list")
-            if isinstance(rows, list):
-                notes = store.notes()
-                watched = [c for c in rows if store.MONITOR_TAG in notes.get(c["name"], "").lower()
-                           and not c.get("blocked")]
-                now = int(time.time())
-                for c in watched:
-                    hs = int(c.get("handshake") or 0)
-                    off = not hs or now - hs >= OFFLINE_AFTER
-                    entry = state.get(c["name"])
-                    if off and entry is None:
-                        if primed:
-                            last = f"{ui.fmt_dur(now - hs)} назад" if hs else "никогда"
-                            await _send(bot, f"🔴 <b>Клиент офлайн</b>\n\n{_card(c)}\nПоследняя активность: {last}")
-                        state[c["name"]] = {"since": hs or now, "notified": primed}
-                    elif not off and entry is not None:
-                        state.pop(c["name"], None)
-                        if primed and entry.get("notified"):
-                            gone = (f"\nОтсутствовал: {ui.fmt_dur(now - int(entry['since']))}"
-                                    if entry.get("since") else "")
-                            await _send(bot, f"🟢 <b>Клиент снова онлайн</b>\n\n{_card(c)}{gone}")
-                names = {c["name"] for c in watched}
-                for stale in [k for k in state if k not in names]:
-                    state.pop(stale)
-                store.save(store.MONITOR, state)
+            if await tick(bot, state, primed):
                 primed = True
         except asyncio.CancelledError:
             raise

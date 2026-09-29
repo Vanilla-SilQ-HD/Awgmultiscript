@@ -23,12 +23,21 @@ _xray_asset() {
 }
 
 # Текст ошибки Xray по конфигу. 0 — принят.
-# Формат конфига Xray берёт из расширения: без «.json» любой файл он
-# отвергает («Failed to get format») — пробы создаются через mktmp … .json.
+# Проверяется копия: формат Xray берёт из расширения (без «.json» отказ
+# «Failed to get format»), а inbound tun при проверке создаёт устройство —
+# у копии оно своё, иначе при работающем Xray «device or resource busy».
 xray_test() {
-  local out
-  out=$("$XRAY_BIN" run -test -c "${1:-$XRAY_CONF}" 2>&1) && return 0
-  printf '%s\n' "$out" | grep -iE 'failed|error|invalid|unknown|not found' | head -5
+  local out copy rc=0
+  # Не mktmp: xray_test зовут и внутри $(...), где ловушка EXIT не убирает файлы
+  copy=$(mktemp --suffix=.json /tmp/awg2.XXXXXX) || return 1
+  if py xray-test-copy "${1:-$XRAY_CONF}" "$copy" 2>/dev/null; then
+    out=$("$XRAY_BIN" run -test -c "$copy" 2>&1) || rc=1
+  else
+    out="конфиг Xray — не JSON"; rc=1
+  fi
+  rm -f "$copy"
+  (( rc )) || return 0
+  printf '%s\n' "$out" | grep -iE 'failed|error|invalid|unknown|not found|JSON' | head -5
   return 1
 }
 

@@ -56,6 +56,7 @@ def build(session: BaseSession | None = None) -> tuple[Bot, Dispatcher]:
     access.setup(cfg)
     bot = Bot(token=cfg.token, session=session or net.build_session(cfg.proxy),
               default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True))
+    bot.session.middleware(ui.TrackSent())
     dp = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
     guard = access.AccessMiddleware()
     dp.message.outer_middleware(guard)

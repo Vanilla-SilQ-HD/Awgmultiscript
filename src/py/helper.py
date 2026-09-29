@@ -568,6 +568,18 @@ def cmd_xray_probe_tag(path, tag, out):
     jsave(out, probe_conf(ob))
 
 
+def cmd_xray_test_copy(src, dst):
+    """Копия конфига для `xray run -test`. Проверка с inbound tun создаёт
+    устройство, а xray0 занят работающим Xray («device or resource busy») —
+    у копии tun получает своё имя и адрес."""
+    conf = jload(src)
+    for i, ib in enumerate(x for x in conf.get("inbounds") or [] if x.get("protocol") == "tun"):
+        st = ib.setdefault("settings", {})
+        st["name"] = "xrt" + secrets.token_hex(3)
+        st["address"] = ["198.18.%d.1/30" % (250 + i % 4)]
+    jsave(dst, conf)
+
+
 def cmd_xray_tun_probe(out):
     jsave(out, {"log": {"loglevel": "none"},
                 "inbounds": [{"protocol": "tun", "tag": "tun-probe",
@@ -1072,6 +1084,7 @@ COMMANDS = {
     "xray-link": cmd_xray_link, "xray-default": cmd_xray_default, "xray-add": cmd_xray_add,
     "xray-del": cmd_xray_del, "xray-tags": cmd_xray_tags, "xray-probe": cmd_xray_probe,
     "xray-probe-tag": cmd_xray_probe_tag, "xray-tun-probe": cmd_xray_tun_probe,
+    "xray-test-copy": cmd_xray_test_copy,
     "xray-balancer": cmd_xray_balancer, "xray-balancer-get": cmd_xray_balancer_get,
     "xray-ru": cmd_xray_ru, "xray-prepare": cmd_xray_prepare,
     "pcap-analyze": cmd_pcap_analyze, "safe-untar": cmd_safe_untar,

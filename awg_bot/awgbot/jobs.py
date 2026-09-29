@@ -54,9 +54,11 @@ async def start(target: ui.Target, title: str, *args: Any, stdin: str | bytes | 
         await ui.render(target, ui.fail(r, title), ui.kb(ui.back(back_to)))
         return
     job_id = r.data["id"]
-    msg = await ui.render(target, f"⏳ <b>{ui.esc(title)}</b>\n<i>запускаю…</i>")
-    if msg is None or msg.bot is None:
-        return
+    text = f"⏳ <b>{ui.esc(title)}</b>\n<i>запускаю…</i>"
+    msg = await ui.render(target, text)
+    if msg is None:
+        chat = ui.chat_of(target)
+        msg = await ui.show_new(chat.bot, chat.chat.id, text)  # type: ignore[arg-type]
     ui.busy.add((msg.chat.id, msg.message_id))
     ok_buttons = [list(b) for b in ok_buttons or []]
     store.job_add(job_id, {"chat": msg.chat.id, "msg": msg.message_id, "title": title,

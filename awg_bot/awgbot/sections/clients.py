@@ -544,31 +544,95 @@ async def _create(target: ui.Target, state: FSMContext, spec: str) -> None:
     if not r.ok:
         await ui.render(msg, ui.fail(r, f"Клиент {name}"), ui.kb(ui.back("cl")))
         return
+    store.drop_note(name)           # заметка от удалённого тёзки не наследуется
     if await send_config(msg.bot, msg.chat.id, name):  # type: ignore[arg-type]
         await card(msg, name)
 
 
 # ── Несколько клиентов ────────────────────────────────────
+# Как в меню awg2: префикс и количество (user-001…) или имена списком.
+COUNTS = (2, 3, 5, 10, 20, 50)
+
+
 @act("bulk")
 async def _bulk(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    await ask.ask(cb, state, "cl_bulk",
-                  "<b>➕ Несколько клиентов</b>\n"
-                  "Имена через запятую: <code>anna, boris, vera</code>\n"
-                  "или префикс и число: <code>user:10</code> → user-001…user-010", "cl")
+    await ui.render(cb, "<b>➕ Несколько клиентов</b>\nКак назвать?",
+                    ui.kb(("🔢 Префикс и количество — user-001, user-002…", act.data("bpre")),
+                          ("✍️ Имена через запятую", act.data("bnames")),
+                          ui.back("cl")))
 
 
-@ask.on("cl_bulk")
-async def _bulk_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
-    spec = ask.text_of(msg).replace(" ", "")
-    m = re.fullmatch(r"([A-Za-z0-9_-]{1,27}):(\d{1,3})", spec)
-    if m and not 1 <= int(m.group(2)) <= 200:
-        await ask.retry(msg, state, ctx, "Число клиентов: 1-200")
+@act("bpre")
+async def _bulk_prefix(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await ask.ask(cb, state, "cl_bprefix", "<b>➕ Несколько клиентов</b>\nПрефикс имён: латиница, цифры, _ и -, "
+                                           "до 27 символов. Получатся <code>префикс-001</code>, <code>-002</code>…",
+                  act.data("bulk"), [("user", act.data("bp", "user")), ("client", act.data("bp", "client"))])
+
+
+@ask.on("cl_bprefix")
+async def _bulk_prefix_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
+    prefix = ask.text_of(msg)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,27}", prefix):
+        await ask.retry(msg, state, ctx, "Префикс: латиница, цифры, _ и -, до 27 символов")
         return
-    if not m and not all(NAME_RE.match(n) for n in spec.split(",") if n):
-        await ask.retry(msg, state, ctx, "Имена: латиница, цифры, _ и -, через запятую")
+    await _bulk_count(msg, state, prefix)
+
+
+@act("bp")
+async def _bulk_prefix_btn(cb: CallbackQuery, state: FSMContext, prefix: str) -> None:
+    await _bulk_count(cb, state, prefix)
+
+
+async def _bulk_count(target: ui.Target, state: FSMContext, prefix: str) -> None:
+    await state.update_data(bulk_prefix=prefix)
+    await ui.render(target, f"<b>➕ Несколько клиентов</b>\nСколько создать? Имена: <code>{esc(prefix)}-001</code>…",
+                    ui.kb([(str(n), act.data("bn", str(n))) for n in COUNTS],
+                          ("Другое число (1-200)…", act.data("bn", "ask")), ui.back(act.data("bulk"))))
+
+
+@act("bn")
+async def _bulk_n(cb: CallbackQuery, state: FSMContext, n: str) -> None:
+    prefix = (await state.get_data()).get("bulk_prefix")
+    if not prefix:
+        await _bulk(cb, state, "")
         return
+    if n == "ask":
+        await ask.ask(cb, state, "cl_bcount", "Сколько клиентов создать (1-200)?", act.data("bulk"))
+        return
+    await _bulk_expire_screen(cb, state, f"{prefix}:{n}")
+
+
+@ask.on("cl_bcount")
+async def _bulk_count_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
+    v = ask.text_of(msg)
+    prefix = (await state.get_data()).get("bulk_prefix")
+    if not v.isdigit() or not 1 <= int(v) <= 200:
+        await ask.retry(msg, state, ctx, "Нужно число от 1 до 200")
+        return
+    await _bulk_expire_screen(msg, state, f"{prefix}:{int(v)}")
+
+
+@act("bnames")
+async def _bulk_names(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await ask.ask(cb, state, "cl_bnames", "<b>➕ Несколько клиентов</b>\nИмена через запятую, например "
+                                          "<code>anna, boris, vera</code>", act.data("bulk"))
+
+
+@ask.on("cl_bnames")
+async def _bulk_names_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
+    names = [n for n in ask.text_of(msg).replace(" ", "").split(",") if n]
+    if not names or not all(NAME_RE.match(n) for n in names):
+        await ask.retry(msg, state, ctx, "Имена: латиница, цифры, _ и -, до 32 символов, через запятую")
+        return
+    await _bulk_expire_screen(msg, state, ",".join(names))
+
+
+async def _bulk_expire_screen(target: ui.Target, state: FSMContext, spec: str) -> None:
     await state.update_data(bulk=spec)
-    await ui.render(msg, "<b>➕ Несколько клиентов</b>\nСрок действия для всех:", expire_kb("be", "", False, "cl"))
+    what = (f"{spec.split(':')[1]} шт. с префиксом {spec.split(':')[0]}" if ":" in spec
+            else ", ".join(spec.split(",")))
+    await ui.render(target, f"<b>➕ Несколько клиентов</b>\n{esc(what)}\n\nСрок действия для всех:",
+                    expire_kb("be", "", False, "cl"))
 
 
 @act("be")
@@ -602,6 +666,8 @@ async def _bulk_create(target: ui.Target, state: FSMContext, expire: str) -> Non
         await ui.render(msg, ui.fail(r, "Создание клиентов"), ui.kb(ui.back("cl")))
         return
     names = set(r.data or [])
+    for n in names:                 # заметка от удалённого тёзки не наследуется
+        store.drop_note(n)
     files = [c["file"] for c in await clients() or [] if c["name"] in names]
     await msg.answer_document(BufferedInputFile(media.zip_files(files), filename="awg_clients.zip"),
                               caption=f"📦 Создано клиентов: {len(names)}")

@@ -176,10 +176,15 @@ with open(XRAY_STUB, "w") as f:
 [[ "$1" == version ]] && { echo "Xray 26.3.27 (Xray, Penetrates Everything.)"; exit 0; }
 f=""; while (( $# )); do [[ "$1" == -c ]] && { f="$2"; shift; }; shift; done
 [[ "$f" == *.json ]] || { echo "Failed to start: main: failed to load config files: [$f] > core: Failed to get format of $f"; exit 23; }
-python3 -c 'import json, sys
+python3 -c 'import json, os, sys
 c = json.load(open(sys.argv[1]))
-sys.exit(1 if any(o.get("protocol") == "hysteria2" for o in c.get("outbounds", [])) else 0)' "$f" \
-  || { echo "infra/conf: unknown config id: hysteria2"; exit 23; }
+if any(o.get("protocol") == "hysteria2" for o in c.get("outbounds", [])):
+    print("infra/conf: unknown config id: hysteria2"); sys.exit(23)
+# Проверка с inbound tun создаёт устройство: занятое имя — отказ, как у Xray
+busy = open(os.environ["LINKS"]).read().split()
+for ib in c.get("inbounds", []):
+    if ib.get("protocol") == "tun" and (ib.get("settings") or {}).get("name", "xray0") in busy:
+        print("Failed to start: main: failed to create server > device or resource busy"); sys.exit(23)' "$f" || exit 23
 """)
 os.chmod(XRAY_STUB, 0o755)
 XRAY_ENV = (f'XRAY_BIN="{XRAY_STUB}"; XRAY_DIR="{ROOT}/etc/xray"; XRAY_CONF="$XRAY_DIR/config.json"; '
@@ -190,6 +195,13 @@ rc, out, _ = bash(XRAY_ENV + f"xray_add_link '{VLESS_TCP}' && xray_tags")
 chk("Xray: vless-ссылка добавляется (проба в .json)", rc == 0 and "proxy_dash_example_site" in out, out)
 rc, out, _ = bash(XRAY_ENV + "xray_tun_supported && echo tun-yes; xray_bad_outbounds | sed 's/^/BAD:/'")
 chk("Xray: inbound tun определяется, годный выход не считается плохим", "tun-yes" in out and "BAD:" not in out, out)
+with open(LINKS, "w") as f:
+    f.write("xray0\n")
+rc, out, _ = bash(XRAY_ENV + 'py xray-prepare "$XRAY_CONF" native; xray_test && echo TEST-OK; '
+                  '_XRAY_TUN=""; xray_tun_supported && echo TUN-YES')
+open(LINKS, "w").close()
+chk("Xray работает (xray0 занят): проверка конфига и проба tun не упираются в busy",
+    "TEST-OK" in out and "TUN-YES" in out, out)
 rc, out, _ = bash(XRAY_ENV + "xray_add_link 'hysteria2://secret@h2.example.site:443?sni=h2.example.site#H2'")
 chk("Xray: неподдерживаемый hysteria2 отклонён с подсказкой", rc != 0 and "hysteria2 есть не во всех" in out, out)
 rc, out, _ = bash(XRAY_ENV + "xray_add_link 'vless://11111111-2222-3333-4444-555555555555@x.example.site:443?security=tls&type=tcp#dup'"

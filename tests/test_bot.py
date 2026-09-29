@@ -184,6 +184,11 @@ async def run():
         datas[:9] == ["srv", "cl", "diag", "bk", "tun", "botm", "del", "upd", "wo"], buttons)
     one_screen("/start")
     chk("команда /start удалена из чата", LAST_SAID[0] in SESSION.deleted)
+    menu_id = SESSION.screen_id()
+    sent = await say("/start")
+    chk("повторный /start правит меню на месте — без удаления и новых сообщений",
+        not any(n == "SendMessage" for n, _ in sent) and menu_id not in SESSION.deleted
+        and SESSION.screen_id() == menu_id, [n for n, _ in sent])
     text, _ = screen(await say("что-нибудь"))
     chk("любой текст вне ввода — меню", "AWG Toolza" in text, text)
     one_screen("текст вне ввода")
@@ -226,15 +231,28 @@ async def run():
     chk("удаление клиента и его заметки", not os.path.exists(os.path.join(ROOT, "root", "dave_awg2.conf"))
         and store.note("dave") == "")
 
-    await press("cl:bulk")
-    await say("u:2")
+    text, buttons = screen(await press("cl:bulk"))
+    chk("массовое создание: выбор — префикс и количество или имена",
+        [d for _, d in buttons][:2] == ["cl:bpre", "cl:bnames"], buttons)
+    await press("cl:bpre")
+    text, buttons = screen(await say("u"))
+    chk("после префикса — количество кнопками", "cl:bn:10" in [d for _, d in buttons]
+        and "cl:bn:ask" in [d for _, d in buttons], buttons)
+    await press("cl:bn:2")
     sent = await press("cl:be:none")
     d = docs(sent)
     chk("несколько клиентов — zip", d and d[0].document.filename == "awg_clients.zip" and len(d[0].document.data) > 100,
         [n for n, _ in sent])
 
-    await press("cl:bulk")
-    await say("p:25")
+    await press("cl:bnames")
+    await say("x1, x2, x3")
+    sent = await press("cl:be:none")
+    chk("имена через запятую — все созданы", "Создано клиентов: 3" in (docs(sent)[0].caption if docs(sent) else ""),
+        [n for n, _ in sent])
+    await press("cl:bpre")
+    await say("p")
+    await press("cl:bn:ask")
+    await say("25")
     await press("cl:be:none")
     text, buttons = screen(await press("tc::warp"))
     datas = [d for _, d in buttons]
@@ -324,6 +342,16 @@ async def run():
     await botmod.restore(BOT)
     with open(ACTIVE, "w") as f:
         f.write("awg-exits-routing.service\n")
+
+    print("Мониторинг")
+    from awgbot import monitor
+    store.set_note("ghost", "старый клиент #ping")
+    store.set_note("alice", "#ping")
+    mark = len(SESSION.sent)
+    await monitor.tick(BOT, {}, True)
+    chk("заметка удалённого клиента убрана", store.note("ghost") == "", store.notes())
+    chk("ни разу не подключавшийся клиент не даёт «офлайн»",
+        not any(n == "SendMessage" and "офлайн" in (m.text or "") for n, m in SESSION.sent[mark:]))
 
     print("Все экраны")
     screens = ["srv", "mod", "srv:proto", "srv:ep", "srv:install", "srv:reset", "srv:reboot",
