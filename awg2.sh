@@ -8067,13 +8067,35 @@ _api_clients() {
       awg show "$AWG_IF" dump > "$dump" 2>/dev/null || true
       py clients-json "$SERVER_CONF" "$dump" "$CLIENT_DIR" "$WARP_PEERS" "$XRAY_PEERS" "$EXITS_PEERS" > "$API_DATA" ;;
     bulk) _api_clients_bulk "$@" ;;
+    del) _api_clients_del "$@" ;;
     export)
       clients_export || return 1
       { _kv file "$EXPORT_PATH"; } | api_obj ;;
     purge-blocked) clients_purge_blocked ;;
     clean) clients_clean ;;
-    *) _api_usage "clients list|bulk ИМЕНА|ПРЕФИКС:ЧИСЛО [ключ=значение...]|export|purge-blocked|clean" ;;
+    *) _api_usage "clients list|bulk ИМЕНА|ПРЕФИКС:ЧИСЛО [ключ=значение...]|del ИМЯ,ИМЯ...|export|purge-blocked|clean" ;;
   esac
+}
+
+# clients del a,b,c — как «Удалить → Несколько по именам» в меню: копия
+# awg0.conf рядом, затем по одному. data — список удалённых.
+_api_clients_del() {
+  local n pub names=() gone=() parts=()
+  [[ -n "${1:-}" ]] || { _api_usage "clients del ИМЯ,ИМЯ..."; return; }
+  server_exists || { err "Сервер не создан"; return 1; }
+  IFS=',' read -r -a parts <<< "$1"
+  for n in "${parts[@]}"; do
+    n="${n// /}"
+    [[ -n "$n" ]] && names+=("$n")
+  done
+  cp -a "$SERVER_CONF" "${SERVER_CONF}.pre_delete.$(date +%s)"
+  for n in "${names[@]}"; do
+    pub=$(client_pub "$n")
+    if [[ -z "$pub" ]]; then warn "Нет клиента: $n"; continue; fi
+    client_delete "$pub" && gone+=("$n")
+  done
+  printf '%s\n' "${gone[@]}" | py json-list > "$API_DATA"
+  (( ${#gone[@]} )) || { err "Никого не удалил"; return 1; }
 }
 
 # Разбор «expire= mimicry= dns= mtu=» → переменные _O_*.

@@ -118,7 +118,8 @@ async def _reboot_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 # ── Создание сервера: мастер ──────────────────────────────
 # Шаги — те же вопросы, что задаёт меню awg2. Ответы копятся в FSM (wiz).
-STEPS = ("region", "profile", "mimicry", "proto", "dns", "mtu", "port", "endpoint")
+STEPS = ("region", "profile", "mimicry", "proto", "dns", "mtu", "net", "port", "endpoint")
+NET_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}/24$")
 
 
 @act("create")
@@ -138,6 +139,13 @@ async def _wizard_answer(cb: CallbackQuery, state: FSMContext, arg: str) -> None
             return
     if key == "port" and val == "ask":
         await ask.ask(cb, state, "srv_port", "UDP-порт сервера: 1024-65535", "srv")
+        return
+    if key == "mtu" and val == "ask":
+        await ask.ask(cb, state, "srv_mtu", "MTU: число 1280-1500", "srv")
+        return
+    if key == "net" and val == "ask":
+        await ask.ask(cb, state, "srv_net", "Подсеть клиентов — сеть /24, например <code>10.8.0.0/24</code>.\n"
+                                            "<i>Не должна пересекаться с адресами и маршрутами сервера.</i>", "srv")
         return
     if key == "endpoint" and val == "ask":
         await ask.ask(cb, state, "srv_domain", "Домен для конфигов, например <code>vpn.example.com</code>\n"
@@ -172,6 +180,24 @@ async def _port_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
         await ask.retry(msg, state, ctx, "Порт — число 1024-65535")
         return
     await _wizard_set(msg, state, "port", v)
+
+
+@ask.on("srv_mtu")
+async def _mtu_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
+    v = ask.text_of(msg)
+    if not v.isdigit() or not 1280 <= int(v) <= 1500:
+        await ask.retry(msg, state, ctx, "MTU — число 1280-1500")
+        return
+    await _wizard_set(msg, state, "mtu", v)
+
+
+@ask.on("srv_net")
+async def _net_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
+    m = NET_RE.match(ask.text_of(msg))
+    if not m or any(int(x) > 255 for x in m.groups()):
+        await ask.retry(msg, state, ctx, "Нужна сеть /24, например 10.8.0.0/24")
+        return
+    await _wizard_set(msg, state, "net", f"{m[1]}.{m[2]}.{m[3]}.0/24")
 
 
 @ask.on("srv_domain")
@@ -237,7 +263,12 @@ async def wizard(target: ui.Target, state: FSMContext) -> None:
         rec = "1320" if wiz["profile"] == "pro" else "1280"
         await ui.render(target, head + f"<b>MTU</b>\nРекомендуется {rec}.",
                         ui.kb((f"⭐ {rec}", _w("mtu", rec)),
-                              [(v, _w("mtu", v)) for v in ("1420", "1380", "1320", "1280") if v != rec], cancel))
+                              [(v, _w("mtu", v)) for v in ("1420", "1380", "1320", "1280") if v != rec],
+                              ("✏️ Вручную…", _w("mtu", "ask")), cancel))
+    elif step == "net":
+        await ui.render(target, head + "<b>Подсеть клиентов</b>\nСлучайная свободная 10.x.y.0/24 — рекомендуется: "
+                                       "меньше шансов совпасть с домашней сетью клиента.",
+                        ui.kb(("🎲 Случайная", _w("net", "")), ("✏️ Вручную…", _w("net", "ask")), cancel))
     elif step == "port":
         await ui.render(target, head + "<b>UDP-порт</b>",
                         ui.kb(("🎲 Случайный", _w("port", "")), ("✏️ Ввести…", _w("port", "ask")), cancel))
@@ -250,6 +281,7 @@ async def wizard(target: ui.Target, state: FSMContext) -> None:
             f"Регион: {'Россия' if wiz['region'] == 'ru' else 'мир'}",
             f"Профиль: {PROFILE[wiz['profile']]} · мимикрия {esc(wiz['mimicry'])}",
             f"Версия: AWG {wiz['proto']} · MTU {wiz['mtu']}",
+            f"Подсеть: {esc(wiz['net'] or 'случайная 10.x.y.0/24')}",
             f"DNS: {esc(wiz['dns'])}",
             f"Порт: {wiz['port'] or 'случайный'} · endpoint: {esc(wiz['endpoint'] or 'IP сервера')}",
         ]), ui.kb(ui.Row(("✅ Создать сервер", act.data("createok")), cancel)))
@@ -270,6 +302,7 @@ async def _create_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await state.update_data(wiz={})
     args = [f"profile={wiz['profile']}", f"proto={wiz['proto']}", f"region={wiz['region']}",
             f"dns={wiz['dns']}", f"mtu={wiz['mtu']}", f"mimicry={wiz['mimicry']}"]
+    args += [f"net={wiz['net']}"] if wiz["net"] else []
     args += [f"port={wiz['port']}"] if wiz["port"] else []
     args += [f"endpoint={wiz['endpoint']}"] if wiz["endpoint"] else []
     await jobs.start(cb, "Создание сервера", "server", "create", *args, back_to="srv", done=_send_first)

@@ -131,6 +131,7 @@ async def list_screen(target: ui.Target, page: int = 0) -> None:
         (f"🔃 {SORTS[other].capitalize()}", act.data("sort", other)) if len(rows) > 1 else None,
         ("📊 Трафик", act.data("activity")) if rows else None,
         ("📦 Экспорт zip", act.data("export")) if rows else None,
+        ("🗑 Удалить…", act.data("dsel")) if rows else None,
         ("🧹 Убрать истёкших", act.data("purge")) if blocked else None,
         ui.back()))
 
@@ -296,6 +297,89 @@ async def _del_ok(cb: CallbackQuery, state: FSMContext, name: str) -> None:
     store.drop_note(name)
     await cb.answer(f"Удалён: {name}")
     await list_screen(cb)
+
+
+# ── Удаление нескольких ───────────────────────────────────
+# Отмеченные имена — в данных FSM (del_sel): в callback_data их не уложить.
+async def _pick_screen(target: ui.Target, state: FSMContext, page: int = 0) -> None:
+    rows = await clients()
+    if rows is None:
+        await ui.render(target, "❌ Список клиентов не получен", ui.kb(ui.back("cl")))
+        return
+    rows = sort_rows(rows, store.setting("clients_sort", "activity"))
+    names = {c["name"] for c in rows}
+    sel = [n for n in (await state.get_data()).get("del_sel") or [] if n in names]
+    await state.update_data(del_sel=sel)
+    buttons = [(f"{'✅' if c['name'] in sel else '⬜️'} {c['name']}", act.data("ds", f"{page}|{c['name']}"))
+               for c in rows]
+    await ui.render(target, "<b>🗑 Удалить клиентов</b>\nОтметь, кого удалить. Их конфиги перестанут работать.\n\n"
+                            + (f"Отмечено: {len(sel)}" if sel else "Никто не отмечен."),
+                    ui.kb(ui.paged(buttons, page, lambda p: act.data("dsp", str(p))),
+                          ("☑️ Отметить всех", act.data("dsa", "all")) if len(sel) < len(rows) else None,
+                          ("⬜️ Снять все", act.data("dsa", "none")) if sel else None,
+                          (f"🗑 Удалить: {len(sel)}", act.data("dsgo")) if sel else None,
+                          ui.back("cl")))
+
+
+@act("dsel")
+async def _dsel(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await state.update_data(del_sel=[])
+    await _pick_screen(cb, state)
+
+
+@act("dsp")
+async def _dsel_page(cb: CallbackQuery, state: FSMContext, page: str) -> None:
+    await _pick_screen(cb, state, int(page) if page.isdigit() else 0)
+
+
+@act("ds")
+async def _dsel_toggle(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    page, _, name = arg.partition("|")
+    sel = list((await state.get_data()).get("del_sel") or [])
+    if name in sel:
+        sel.remove(name)
+    else:
+        sel.append(name)
+    await state.update_data(del_sel=sel)
+    await _pick_screen(cb, state, int(page) if page.isdigit() else 0)
+
+
+@act("dsa")
+async def _dsel_all(cb: CallbackQuery, state: FSMContext, what: str) -> None:
+    rows = await clients() or []
+    await state.update_data(del_sel=[c["name"] for c in rows] if what == "all" else [])
+    await _pick_screen(cb, state)
+
+
+@act("dsgo")
+async def _dsel_go(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    sel = (await state.get_data()).get("del_sel") or []
+    if not sel:
+        await _pick_screen(cb, state)
+        return
+    shown = ", ".join(sel[:30]) + (f" и ещё {len(sel) - 30}" if len(sel) > 30 else "")
+    await ui.confirm(cb, f"Удалить клиентов: <b>{len(sel)}</b>?\n{esc(shown)}\n\nИх конфиги перестанут работать. "
+                         "Копия awg0.conf сохранится рядом с ним.",
+                     ("🗑 Да, удалить", act.data("dsok")), act.data("dsp", "0"))
+
+
+@act("dsok")
+async def _dsel_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    sel = (await state.get_data()).get("del_sel") or []
+    if not sel:
+        await list_screen(cb)
+        return
+    await ui.render(cb, f"⏳ Удаляю клиентов: {len(sel)}…")
+    r = await api.call("clients", "del", ",".join(sel), timeout=600)
+    gone = list(r.data or []) if isinstance(r.data, list) else []
+    for n in gone:
+        store.drop_note(n)
+    await state.update_data(del_sel=[])
+    if not r.ok:
+        await ui.render(cb, ui.fail(r, "Удаление клиентов"), ui.kb(ui.back("cl")))
+        return
+    await ui.render(cb, f"✅ <b>Удалено клиентов: {len(gone)}</b>\n{esc(', '.join(gone))}",
+                    ui.kb(ui.Row(("👥 Клиенты", "cl"), ui.HOME)))
 
 
 # ── Переименование и заметка ──────────────────────────────

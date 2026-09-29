@@ -16,6 +16,8 @@ router = Router()
 act = ui.Actions(router, "wo")
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+# DNS клиентов — те же три, что в меню awg2; кнопка перебирает их по кругу
+DNS = [("Cloudflare", "1.1.1.1, 1.0.0.1"), ("Google", "8.8.8.8, 8.8.4.4"), ("Quad9", "9.9.9.9, 149.112.112.112")]
 
 
 async def _bundle_data(bot: Bot, chat_id: int, name: str) -> dict | None:
@@ -105,15 +107,20 @@ async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
 # ── Установка ─────────────────────────────────────────────
 async def _install_screen(target: ui.Target, state: FSMContext) -> None:
     o = (await state.get_data()).get("wgobf") or {}
+    dns = DNS[int(o.get("dns") or 0) % len(DNS)]
     await ui.render(target, "<b>📦 Установка WG + обфускатор</b>\n\n"
                             f"Порт: {esc(o.get('port') or 'случайный')}\n"
                             f"Маскировка у клиентов: {o.get('masking', 'STUN')}\n"
                             f"Клиенты без обфускатора: {'да' if o.get('clean') == '1' else 'нет'}\n"
-                            f"Первый клиент: {esc(o.get('client') or 'client1')}",
+                            f"DNS клиентов: {dns[0]} ({dns[1]})\n"
+                            f"Первый клиент: {esc(o.get('client') or 'client1')}\n\n"
+                            "<i>🎭 STUN — под видеозвонок (рекомендуется), NONE — только XOR\n"
+                            "🚪 Без обфускатора — пускать и обычный WireGuard (iOS), его DPI видит</i>",
                     ui.kb(("✏️ Порт", act.data("iport")),
                           ("✏️ Первый клиент", act.data("iname")),
                           ("🎭 STUN ↔ NONE", act.data("iopt", "masking")),
                           ("🚪 Без обфускатора", act.data("iopt", "clean")),
+                          (f"🌐 DNS: {dns[0]}", act.data("iopt", "dns")),
                           ui.Row(("✅ Установить", act.data("igo")), ui.back("wo", "✖️ Отмена"))))
 
 
@@ -130,6 +137,8 @@ async def _install_opt(cb: CallbackQuery, state: FSMContext, key: str) -> None:
         o["masking"] = "NONE" if o.get("masking", "STUN") == "STUN" else "STUN"
     elif key == "clean":
         o["clean"] = "0" if o.get("clean") == "1" else "1"
+    elif key == "dns":
+        o["dns"] = str((int(o.get("dns") or 0) + 1) % len(DNS))
     await state.update_data(wgobf=o)
     await _install_screen(cb, state)
 
@@ -171,7 +180,8 @@ async def _install_go(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     o = (await state.get_data()).get("wgobf") or {}
     await state.update_data(wgobf={})
     name = o.get("client") or "client1"
-    args = [f"masking={o.get('masking', 'STUN')}", f"clean={o.get('clean', '0')}", f"client={name}"]
+    args = [f"masking={o.get('masking', 'STUN')}", f"clean={o.get('clean', '0')}", f"client={name}",
+            f"dns={DNS[int(o.get('dns') or 0) % len(DNS)][1]}"]
     if o.get("port"):
         args.append(f"port={o['port']}")
 

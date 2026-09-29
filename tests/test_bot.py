@@ -316,6 +316,23 @@ async def run():
     await press("cl:bn:ask")
     await say("25")
     await press("cl:be:none")
+    text, buttons = screen(await press("cl:dsel"))
+    chk("удаление нескольких: экран выбора", "Никто не отмечен" in text and "cl:ds:0|e1" in [d for _, d in buttons],
+        [text, buttons[:4]])
+    await press("cl:ds:0|e1")
+    text, buttons = screen(await press("cl:ds:0|e2"))
+    chk("отмечено двое", "Отмечено: 2" in text and ("✅ e1", "cl:ds:0|e1") in buttons
+        and ("🗑 Удалить: 2", "cl:dsgo") in buttons, [text, buttons])
+    text, buttons = screen(await press("cl:ds:0|e2"))
+    chk("повторное нажатие снимает отметку", "Отмечено: 1" in text and ("⬜️ e2", "cl:ds:0|e2") in buttons, text)
+    await press("cl:ds:0|e2")
+    text, _ = screen(await press("cl:dsgo"))
+    chk("подтверждение со списком", "Удалить клиентов: <b>2</b>" in text and "e1, e2" in text, text)
+    text, buttons = screen(await press("cl:dsok"))
+    chk("удалены оба, конфиги тоже", "Удалено клиентов: 2" in text
+        and not os.path.exists(os.path.join(ROOT, "root", "e1_awg2.conf"))
+        and not os.path.exists(os.path.join(ROOT, "root", "e2_awg2.conf")), text)
+    no_hourglass("удаление нескольких")
     text, buttons = screen(await press("tc::warp"))
     datas = [d for _, d in buttons]
     chk("длинный список клиентов туннеля — по страницам", "tc:pg:warp|1" in datas and len(buttons) <= 25, len(buttons))
@@ -329,6 +346,19 @@ async def run():
     chk("экран сервера", "AWG 2.0" in text and "srv:proto" in [d for _, d in buttons], text)
     text, buttons = screen(await press("srv:create"))
     chk("мастер создания начинается с региона", "srv:w:region=ru" in [d for _, d in buttons], buttons)
+    for step in ("region=ru", "profile=lite", "mimicry=none", "proto=2.0", "dns=0"):
+        await press(f"srv:w:{step}")
+    text, buttons = screen(await press("srv:w:mtu=1280"))
+    chk("мастер: подсеть — случайная или вручную", "Подсеть" in text and "srv:w:net=ask" in [d for _, d in buttons],
+        [text, buttons])
+    await press("srv:w:net=ask")
+    text, _ = screen(await say("10.66.1.7/25"))
+    chk("мастер: не /24 — повторный вопрос", "сеть /24" in text, text)
+    text, buttons = screen(await say("10.66.1.7/24"))
+    chk("мастер: после подсети — порт", "UDP-порт" in text, text)
+    await press("srv:w:port=")
+    text, _ = screen(await press("srv:w:endpoint="))
+    chk("мастер: итог с подсетью", "Подсеть: 10.66.1.0/24" in text, text)
     long_domain = "a" * 60 + ".example.com"
     await press("srv:epdom")
     text, buttons = screen(await say(long_domain))
@@ -491,6 +521,12 @@ async def run():
     sent = await press("wo:zip:clus")
     chk("архив для Linux — отдельной кнопкой", docs(sent) and docs(sent)[0].document.filename == "wgobf-clus.zip",
         [n for n, _ in sent])
+
+    text, buttons = screen(await press("wo:install"))
+    chk("установка обфускатора: DNS по умолчанию Cloudflare", "DNS клиентов: Cloudflare" in text, text)
+    text, buttons = screen(await press("wo:iopt:dns"))
+    chk("кнопка DNS перебирает варианты", "DNS клиентов: Google" in text and ("🌐 DNS: Google", "wo:iopt:dns") in buttons,
+        [text, buttons])
 
     print("Ширина экрана")
     short = ui.fit("<b>🛡 alice</b>", ui.kb(("📦 Комплект", "a"), ("🗑 Удалить", "b")))
