@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
-
 from aiogram import Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -144,6 +141,4 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandObject) -> 
                          "Владелец сервера может добавить его в ADMIN_ID или прислать приглашение.")
         return
     await state.clear()
-    with contextlib.suppress(TelegramBadRequest):
-        await msg.delete()
     await show_menu(msg)

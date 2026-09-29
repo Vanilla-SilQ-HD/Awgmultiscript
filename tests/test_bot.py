@@ -61,8 +61,8 @@ class FakeSession(BaseSession):
     def __init__(self):
         super().__init__()
         self.sent = []
-        self.ids = itertools.count(100000)
         self.chat = {}          # id сообщения бота → "screen" | "text" | "file"
+        self.text = {}          # id сообщения бота → его текущий текст
         self.deleted = set()
 
     async def make_request(self, bot, method, timeout=None):
@@ -79,10 +79,12 @@ class FakeSession(BaseSession):
                 self.chat[method.message_id] = "text"
             return True
         if name in ("SendMessage", "EditMessageText", "SendDocument", "SendPhoto"):
-            mid = getattr(method, "message_id", None) or next(self.ids)
+            # В личном чате номера сообщений общие для обеих сторон
+            mid = getattr(method, "message_id", None) or next(MSG_IDS)
             if method.chat_id == OWNER.id:
                 self.chat[mid] = ("file" if name in ("SendDocument", "SendPhoto")
                                   else "screen" if method.reply_markup else "text")
+                self.text[mid] = getattr(method, "text", None) or getattr(method, "caption", None) or ""
             return Message(message_id=mid, date=datetime.datetime.now(), chat=Chat(id=method.chat_id, type="private"),
                            text=getattr(method, "text", None)).as_(bot)
         return True
@@ -103,6 +105,7 @@ class FakeSession(BaseSession):
         pass
 
 
+MSG_IDS = itertools.count(1)
 SESSION = FakeSession()
 BOT, DP = botmod.build(SESSION)
 OWNER = User(id=111, is_bot=False, first_name="Owner", username="owner")
@@ -111,7 +114,7 @@ seq = itertools.count(1)
 
 
 def _msg(user, text):
-    return Message(message_id=next(seq), date=datetime.datetime.now(), chat=Chat(id=user.id, type="private"),
+    return Message(message_id=next(MSG_IDS), date=datetime.datetime.now(), chat=Chat(id=user.id, type="private"),
                    from_user=user, text=text)
 
 
@@ -126,11 +129,10 @@ async def say(text, user=OWNER):
     return SESSION.sent[mark:]
 
 
-def one_screen(label):
-    """В чате владельца ровно одно текстовое сообщение бота — экран."""
-    live = SESSION.texts()
-    chk(f"{label}: в чате один экран", len(live) == 1 and SESSION.chat[live[0]] == "screen",
-        {m: SESSION.chat[m] for m in live})
+def no_hourglass(label):
+    """Ни одно сообщение бота не осталось висеть на «⏳ …»."""
+    stuck = [SESSION.text[m] for m in SESSION.texts() if SESSION.text.get(m, "").startswith("⏳")]
+    chk(f"{label}: нет повисших «⏳»", not stuck, stuck)
 
 
 async def press(data, user=OWNER):
@@ -183,16 +185,13 @@ async def run():
     datas = [d for _, d in buttons]
     chk("девять пунктов меню в одну колонку",
         datas[:9] == ["srv", "cl", "diag", "bk", "tun", "botm", "del", "upd", "wo"], buttons)
-    one_screen("/start")
-    chk("команда /start удалена из чата", LAST_SAID[0] in SESSION.deleted)
     menu_id = SESSION.screen_id()
     sent = await say("/start")
-    chk("повторный /start правит меню на месте — без удаления и новых сообщений",
-        not any(n == "SendMessage" for n, _ in sent) and menu_id not in SESSION.deleted
-        and SESSION.screen_id() == menu_id, [n for n, _ in sent])
+    chk("повторный /start — всегда новое меню внизу, старое не трогается",
+        any(n == "SendMessage" for n, _ in sent) and SESSION.screen_id() > menu_id
+        and not any(n in ("DeleteMessage", "EditMessageText") for n, _ in sent), [n for n, _ in sent])
     text, _ = screen(await say("что-нибудь"))
     chk("любой текст вне ввода — меню", "AWG Toolza" in text, text)
-    one_screen("текст вне ввода")
     chk("устаревшая кнопка", any("устарела" in a for a in alerts(await press("zzz:1"))))
 
     print("Клиенты")
@@ -214,12 +213,20 @@ async def run():
     chk("и QR", any(n == "SendPhoto" for n, _ in sent))
     text, _ = screen(sent)
     chk("карточка нового клиента со сроком", "carol" in text and "через" in text, text)
-    one_screen("добавление клиента")
-    chk("экран — под файлами конфига", SESSION.screen_id() == max(SESSION.chat), SESSION.chat)
+    no_hourglass("добавление клиента")
+    chk("«⏳» становится карточкой, файлы — под ней, лишних экранов нет",
+        not any(n == "SendMessage" for n, _ in sent) and SESSION.screen_id() < max(SESSION.chat),
+        [n for n, _ in sent])
+    card_id = SESSION.screen_id()
+    sent = await press("cl:conf:carol")
+    chk("«Конфиг и QR» — только файлы, карточка остаётся на месте",
+        docs(sent) and not any(n in ("SendMessage", "EditMessageText", "DeleteMessage") for n, _ in sent)
+        and SESSION.screen_id() == card_id, [n for n, _ in sent])
+
 
     await press("cl:note:carol")
     await say("домашний роутер")
-    chk("ответ на вопрос удалён из чата", LAST_SAID[0] in SESSION.deleted)
+    chk("ответ на вопрос остаётся в чате", LAST_SAID[0] not in SESSION.deleted)
     await press("cl:mon:carol")
     chk("заметка и мониторинг", store.note("carol") == "домашний роутер #ping" and store.monitored("carol"),
         store.notes())
@@ -244,12 +251,27 @@ async def run():
     d = docs(sent)
     chk("несколько клиентов — zip", d and d[0].document.filename == "awg_clients.zip" and len(d[0].document.data) > 100,
         [n for n, _ in sent])
+    text, buttons = screen(sent)
+    chk("итог массового создания — на месте «⏳», архив под ним",
+        "Создано клиентов: 2" in text and "u-001" in text and ("👥 К списку клиентов", "cl") in buttons
+        and SESSION.screen_id() < max(SESSION.chat), [text, buttons])
+    no_hourglass("массовое создание")
 
+    await press("cl:bnames")
+    await say("e1,e2")
+    await press("cl:be:date")
+    sent = await say("2099-01-01 10:00")
+    text, _ = screen(sent)
+    chk("срок датой: итог ответом на дату, архив под ним",
+        "Создано клиентов: 2" in text and docs(sent)
+        and [n for n, _ in sent if n in ("SendMessage", "SendDocument")] == ["SendMessage", "SendDocument"],
+        [n for n, _ in sent])
+    no_hourglass("массовое создание со сроком-датой")
     await press("cl:bnames")
     await say("x1, x2, x3")
     sent = await press("cl:be:none")
-    chk("имена через запятую — все созданы", "Создано клиентов: 3" in (docs(sent)[0].caption if docs(sent) else ""),
-        [n for n, _ in sent])
+    chk("имена через запятую — все созданы", "Создано клиентов: 3" in screen(sent)[0]
+        and "Конфиги: 3" in (docs(sent)[0].caption if docs(sent) else ""), [n for n, _ in sent])
     await press("cl:bpre")
     await say("p")
     await press("cl:bn:ask")
@@ -286,7 +308,7 @@ async def run():
     chk("мастер каскада добавляет правило", "✅" in text, text)
     text, _ = screen(await press("cas"))
     chk("правило в списке", "UDP 5555 → 5.6.7.8:5555" in text, text)
-    one_screen("мастер каскада")
+    no_hourglass("мастер каскада")
 
     print("Маршрут клиента")
     with open(LINKS, "a") as f:
@@ -327,7 +349,8 @@ async def run():
     await press("botm:penter")
     text, _ = screen(await say("socks5://127.0.0.1:10808"))
     chk("прокси сохраняется без «awg2 ответил не JSON»", "Бот перезапускается" in text, text)
-    chk("адрес прокси удалён из чата", LAST_SAID[0] in SESSION.deleted)
+    chk("адрес прокси без пароля остаётся в чате", LAST_SAID[0] not in SESSION.deleted)
+
     with open(os.path.join(ROOT, "bot.conf")) as f:
         chk("BOT_PROXY записан", "BOT_PROXY=socks5://127.0.0.1:10808" in f.read())
     notice_msg = store.load(store.NOTICE).get("msg")
@@ -340,6 +363,12 @@ async def run():
         fixed[0].text if fixed else [n for n, _ in SESSION.sent[mark:]])
     text, _ = screen(await press("botm:restart"))
     chk("перезапуск из меню — сразу, без ошибки", "Бот перезапускается" in text, text)
+    await botmod.restore(BOT)
+    chk("до сих пор бот ничего не удалял", not SESSION.deleted, SESSION.deleted)
+    await press("botm:penter")
+    await say("socks5://user:secret@127.0.0.1:10808")
+    chk("адрес прокси с паролем удалён — единственное, что бот удаляет", SESSION.deleted == {LAST_SAID[0]},
+        SESSION.deleted)
     await botmod.restore(BOT)
     with open(ACTIVE, "w") as f:
         f.write("awg-exits-routing.service\n")
@@ -378,9 +407,9 @@ async def run():
     chk("задача завершилась", await wait_jobs())
     chk("архив бэкапа отправлен", any(n == "SendDocument" and "Бэкап" in (m.caption or "") for n, m in SESSION.sent))
     last = [m for n, m in SESSION.sent if n in ("SendMessage", "EditMessageText") and "Бэкап" in (m.text or "")][-1]
-    chk("итог задачи — внизу, под архивом", last.text.startswith("✅") and SESSION.screen_id() == max(SESSION.chat),
+    chk("итог задачи — в том же сообщении", last.text.startswith("✅") and last.message_id == screen_before,
         last.text[:60])
-    one_screen("после задачи")
+    no_hourglass("после задачи")
     chk("незавершённых задач не осталось", store.jobs() == {}, store.jobs())
 
 

@@ -93,7 +93,6 @@ async def _get(cb: CallbackQuery, state: FSMContext, idx: str) -> None:
     data, name = _pack(path)
     await ui.chat_of(cb).answer_document(BufferedInputFile(data, filename=name),
                                          caption="💾 В бэкапе приватные ключи — храни как пароль")
-    await _view_screen(ui.chat_of(cb), path, idx)
 
 
 @act("rs")

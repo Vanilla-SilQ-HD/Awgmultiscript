@@ -146,7 +146,4 @@ async def _follow(bot: Bot, job_id: str, chat_id: int, msg_id: int, title: str, 
                 await done(bot, chat_id, st)
             except Exception:                                  # noqa: BLE001
                 log.exception("действие после задачи %s", job_id)
-            # Файлы легли под итог — сам итог с кнопкой переезжает вниз
-            if ui.is_screen(chat_id, msg_id):
-                await ui.show_new(bot, chat_id, body, markup)
         return

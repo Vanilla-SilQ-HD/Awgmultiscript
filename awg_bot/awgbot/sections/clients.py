@@ -140,7 +140,6 @@ async def _export(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
         return
     await ui.chat_of(cb).answer_document(FSInputFile(r.data["file"]),
                                          caption="📦 Все конфиги клиентов")
-    await list_screen(ui.chat_of(cb))
 
 
 @act("purge")
@@ -244,8 +243,7 @@ async def _view(cb: CallbackQuery, state: FSMContext, name: str) -> None:
 @act("conf")
 async def _conf(cb: CallbackQuery, state: FSMContext, name: str) -> None:
     await cb.answer()
-    if await send_config(cb.bot, ui.chat_of(cb).chat.id, name):  # type: ignore[arg-type]
-        await card(ui.chat_of(cb), name)            # карточка — под файлами
+    await send_config(cb.bot, ui.chat_of(cb).chat.id, name)  # type: ignore[arg-type]
 
 
 @act("mon")
@@ -406,10 +404,10 @@ async def _mim_set(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     if not r.ok:
         await ui.render(cb, ui.fail(r, "Мимикрия"), ui.kb(ui.back(act.data("v", name))))
         return
-    if await send_config(cb.bot, ui.chat_of(cb).chat.id, name):  # type: ignore[arg-type]
-        await ui.render(ui.chat_of(cb), f"✅ Мимикрия <b>{esc(name)}</b> обновлена — выше новый конфиг, "
-                                        "старый больше не подключится.",
-                        ui.kb(ui.back(act.data("v", name), "◀️ К клиенту")))
+    await ui.render(cb, f"✅ Мимикрия <b>{esc(name)}</b> обновлена — новый конфиг ниже, "
+                        "старый больше не подключится.",
+                    ui.kb(ui.back(act.data("v", name), "◀️ К клиенту")))
+    await send_config(cb.bot, ui.chat_of(cb).chat.id, name)  # type: ignore[arg-type]
 
 
 # ── Маршрут клиента ───────────────────────────────────────
@@ -540,13 +538,13 @@ async def _create(target: ui.Target, state: FSMContext, spec: str) -> None:
     await ui.render(target, f"⏳ Создаю <b>{esc(name)}</b>…")
     args = ["client", "add", name, f"mimicry={spec}"] + ([f"expire={new['expire']}"] if new.get("expire") else [])
     r = await api.call(*args)
-    msg = ui.chat_of(target)
     if not r.ok:
-        await ui.render(msg, ui.fail(r, f"Клиент {name}"), ui.kb(ui.back("cl")))
+        await ui.render(target, ui.fail(r, f"Клиент {name}"), ui.kb(ui.back("cl")))
         return
     store.drop_note(name)           # заметка от удалённого тёзки не наследуется
-    if await send_config(msg.bot, msg.chat.id, name):  # type: ignore[arg-type]
-        await card(msg, name)
+    await card(target, name)        # «⏳» становится карточкой, файлы — под ней
+    msg = ui.chat_of(target)
+    await send_config(msg.bot, msg.chat.id, name)  # type: ignore[arg-type]
 
 
 # ── Несколько клиентов ────────────────────────────────────
@@ -661,14 +659,17 @@ async def _bulk_create(target: ui.Target, state: FSMContext, expire: str) -> Non
     await state.update_data(bulk="")
     await ui.render(target, "⏳ Создаю клиентов…")
     r = await api.call("clients", "bulk", spec, *([f"expire={expire}"] if expire else []), timeout=900)
-    msg = ui.chat_of(target)
     if not r.ok:
-        await ui.render(msg, ui.fail(r, "Создание клиентов"), ui.kb(ui.back("cl")))
+        await ui.render(target, ui.fail(r, "Создание клиентов"), ui.kb(ui.back("cl")))
         return
-    names = set(r.data or [])
-    for n in names:                 # заметка от удалённого тёзки не наследуется
+    created = list(r.data or [])
+    for n in created:               # заметка от удалённого тёзки не наследуется
         store.drop_note(n)
-    files = [c["file"] for c in await clients() or [] if c["name"] in names]
-    await msg.answer_document(BufferedInputFile(media.zip_files(files), filename="awg_clients.zip"),
-                              caption=f"📦 Создано клиентов: {len(names)}")
-    await list_screen(msg)
+    shown = ", ".join(created[:30]) + (f" и ещё {len(created) - 30}" if len(created) > 30 else "")
+    await ui.render(target, f"✅ <b>Создано клиентов: {len(created)}</b>\n{esc(shown)}\n\n"
+                            "Конфиги — архивом ниже.",
+                    ui.kb(("👥 К списку клиентов", "cl"), ui.HOME))
+    files = [c["file"] for c in await clients() or [] if c["name"] in set(created)]
+    await ui.chat_of(target).answer_document(
+        BufferedInputFile(media.zip_files(files), filename="awg_clients.zip"),
+        caption=f"📦 Конфиги: {len(files)}")

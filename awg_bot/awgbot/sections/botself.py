@@ -8,9 +8,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import time
 
 from aiogram import Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -112,7 +114,12 @@ async def _penter(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 @ask.on("bot_proxy")
 async def _proxy_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
-    await _apply_proxy(msg, state, ask.text_of(msg).replace(" ", ""))
+    url = ask.text_of(msg).replace(" ", "")
+    if "@" in url:
+        # Единственное, что бот удаляет: адрес с логином и паролем прокси
+        with contextlib.suppress(TelegramBadRequest):
+            await msg.delete()
+    await _apply_proxy(msg, state, url)
 
 
 async def _apply_proxy(target: ui.Target, state: FSMContext, url: str, force: bool = False) -> None:

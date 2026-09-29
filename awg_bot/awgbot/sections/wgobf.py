@@ -159,8 +159,9 @@ async def _add_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
     if not r.ok:
         await ask.retry(msg, state, ctx, r.message)
         return
+    await ui.render(msg, f"✅ Клиент <b>{esc(name)}</b> добавлен — комплект ниже.",
+                    ui.kb(("👥 Клиенты", act.data("list")), ui.back("wo")))
     await send_bundle(msg.bot, msg.chat.id, name)  # type: ignore[arg-type]
-    await ui.render(msg, f"✅ Клиент <b>{esc(name)}</b> добавлен.", ui.kb(("👥 Клиенты", act.data("list")), ui.back("wo")))
 
 
 @act("list")
@@ -187,7 +188,6 @@ async def _view(cb: ui.Target, state: FSMContext, name: str) -> None:
 async def _bundle(cb: CallbackQuery, state: FSMContext, name: str) -> None:
     await cb.answer("Отправляю…")
     await send_bundle(cb.bot, ui.chat_of(cb).chat.id, name)  # type: ignore[arg-type]
-    await _view(ui.chat_of(cb), state, name)            # экран — под файлом
 
 
 @act("del")
