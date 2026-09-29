@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 import time
 
 from aiogram import Router
@@ -16,12 +17,13 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from .. import __version__, access, admins, api, ask, jobs, store, ui
+from .. import __version__, access, admins, api, ask, icons, jobs, store, ui
 from ..ui import esc
 
 router = Router()
 act = ui.Actions(router, "botm")
 adm = ui.Actions(router, "adm")
+look = ui.Actions(router, "look")
 
 
 @act()
@@ -37,6 +39,7 @@ async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
                           ("🌐 Прокси", act.data("proxy")),
                           ("📜 Журнал", "diag:log:bot"),
                           ("👮 Админы", adm.data()) if owner else None,
+                          ("🎨 Оформление", look.data()) if owner else None,
                           ("🗑 Удалить бота", act.data("rm")) if owner else None,
                           ui.back()))
 
@@ -245,3 +248,118 @@ async def _revoke(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
         n = admins.revoke_invites()
         await cb.answer(f"Погашено приглашений: {n}")
         await admins_screen(cb, state)
+
+
+# ── Оформление: цветные кнопки и иконки ───────────────────
+PACK_RE = re.compile(r"(?:addemoji/)?([A-Za-z0-9_]{1,64})/?$")
+
+
+def _look_text(verdict: str = "") -> str:
+    m = icons.mapping()
+    lines = ["<b>🎨 Оформление</b>", ""]
+    if verdict:
+        lines += [verdict, ""]
+    lines += [
+        "Цветные кнопки: всегда — зелёные создают и включают, красные удаляют, синие — главное действие.",
+        f"Иконки вместо эмодзи: <b>{'включены' if icons.active() else 'выключены'}</b>"
+        + (f" · {esc(icons.pack())}, иконок: {len(m)}" if m else ""),
+        "",
+        "<i>Иконки — custom emoji Telegram, монохромные значки в тексте и на кнопках. Бот может их "
+        "показывать, только если у владельца бота (аккаунт, создавший его в @BotFather) есть Telegram "
+        "Premium или у бота есть имя с Fragment. Перед включением бот проверяет, видны ли они; перестанут "
+        "быть видны — сам вернётся к обычным эмодзи.</i>",
+    ]
+    return "\n".join(lines)
+
+
+async def _look_screen(target: ui.Target, verdict: str = "") -> None:
+    m = icons.mapping()
+    await ui.render(target, _look_text(verdict), ui.kb(
+        ("📥 Набор по ссылке", look.data("pack")),
+        ("✍️ Свои иконки", look.data("own")),
+        ("▶️ Включить иконки", look.data("on")) if m and not icons.active() else None,
+        ("⏹ Выключить иконки", look.data("off")) if icons.active() else None,
+        ui.back("botm")))
+
+
+@look()
+async def look_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
+    if not access.is_owner(cb.from_user.id):
+        await cb.answer("Оформление меняет только владелец", show_alert=True)
+        return
+    await _look_screen(cb)
+
+
+async def _try_icons(target: ui.Target, pack: str, mapping: dict[str, str]) -> None:
+    """Включить и проверить на деле: пробный экран с иконками в тексте и на
+    кнопке. Не показались — icons.Middleware их уже выключил."""
+    icons.save(pack, mapping, True)
+    sample = [e for e in icons.TEMPLATE if e in mapping][:8]
+    await ui.render(target, "🎨 Проверяю иконки… " + " ".join(sample),
+                    ui.kb((f"{sample[0]} Проверка", look.data()) if sample else None))
+    if icons.active():
+        verdict = f"✅ Иконки включены: {len(mapping)}."
+    else:
+        verdict = ("❌ Telegram не показал иконки. Нужен Telegram Premium у владельца бота (аккаунт, "
+                   "создавший его в @BotFather) или имя бота с Fragment. Набор сохранён — включить можно позже.")
+    await _look_screen(target, verdict)
+
+
+@look("pack")
+async def _look_pack(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await ask.ask(cb, state, "look_pack", "Ссылка на набор эмодзи: <code>t.me/addemoji/ИМЯ</code> или просто имя.\n"
+                                          "<i>Иконки сопоставятся с эмодзи бота по эмодзи, привязанным к ним в "
+                                          "наборе; остальные останутся обычными.</i>", look.data())
+
+
+@ask.on("look_pack")
+async def _look_pack_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
+    m = PACK_RE.search(ask.text_of(msg))
+    if not m:
+        await ask.retry(msg, state, ctx, "Нужна ссылка вида t.me/addemoji/ИМЯ")
+        return
+    try:
+        pack = await msg.bot.get_sticker_set(m.group(1))  # type: ignore[union-attr]
+    except TelegramBadRequest:
+        await ask.retry(msg, state, ctx, f"Набор {m.group(1)} не найден")
+        return
+    if pack.sticker_type != "custom_emoji":
+        await ask.retry(msg, state, ctx, "Это набор стикеров, а нужен набор эмодзи (t.me/addemoji/…)")
+        return
+    mapping = icons.from_pack(pack.stickers)
+    if not any(e in mapping for e in icons.TEMPLATE):
+        await ask.retry(msg, state, ctx, "В наборе нет иконок для эмодзи бота — пришли свои (✍️ Свои иконки)")
+        return
+    await _try_icons(msg, pack.name, mapping)
+
+
+@look("own")
+async def _look_own(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await ask.ask(cb, state, "look_own",
+                  "Пришли одним сообщением иконки (custom emoji) по порядку — для этих эмодзи бота:\n\n"
+                  + " ".join(icons.TEMPLATE)
+                  + "\n\n<i>Не нужна иконка — поставь на её место обычное эмодзи. Можно прислать меньше: "
+                    "остальные останутся как есть.</i>", look.data())
+
+
+@ask.on("look_own")
+async def _look_own_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
+    mapping = icons.from_message(msg.text or "", msg.entities or [])
+    if not mapping:
+        await ask.retry(msg, state, ctx, "В сообщении нет custom emoji — их отправляют с Telegram Premium")
+        return
+    await _try_icons(msg, "свои", mapping)
+
+
+@look("on")
+async def _look_on(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    if icons.mapping():
+        await _try_icons(cb, icons.pack(), icons.mapping())
+    else:
+        await _look_screen(cb)
+
+
+@look("off")
+async def _look_off(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    icons.disable("выключены владельцем")
+    await _look_screen(cb, "Иконки выключены — снова обычные эмодзи.")

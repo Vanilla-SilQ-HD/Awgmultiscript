@@ -43,7 +43,7 @@ async def _clients_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 async def _all_screen(target: ui.Target, state: FSMContext) -> None:
     opts = (await state.get_data()).get("uninstall") or {}
-    mark = lambda k: "✅" if opts.get(k) else "⬜️"                        # noqa: E731
+    mark = lambda k: "🗑" if opts.get(k) else "⬜️"                        # noqa: E731
     await ui.render(target, "<b>💣 Удалить всё</b>\n\nСервер AWG, клиенты, туннели, модуль ядра и утилиты. "
                             "Отметь, что удалить вместе с ними:",
                     ui.kb((f"{mark('bot')} Telegram-бот", rm.data("opt", "bot")),
@@ -102,7 +102,7 @@ async def _render_update(target: ui.Target, d: dict, latest: str, checked: bool 
         text += "\nОбновлений нет."
     text += "\n\n<i>♻️ Переустановить — заново из текущего канала, даже без новой версии</i>"
     await ui.render(target, text, ui.kb(
-        ("⬆️ Обновить", upd.data("go")) if latest else None,
+        ("⬆️ Обновить", upd.data("go"), "success") if latest else None,
         ("🔎 Проверить", upd.data("check")),
         ("♻️ Переустановить", upd.data("force")),
         ("🔀 На стабильный" if beta else "🧪 Бета-канал", upd.data("ch", "stable" if beta else "beta")),

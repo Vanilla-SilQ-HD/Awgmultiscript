@@ -28,6 +28,7 @@ MONITOR = STATE_DIR / "monitor_state.json"
 JOBS = STATE_DIR / "jobs.json"
 NOTICE = STATE_DIR / "restart_notice.json"
 SETTINGS = STATE_DIR / "settings.json"
+ICONS = STATE_DIR / "icons.json"
 
 MONITOR_TAG = "#ping"
 NOTE_MAX = 200

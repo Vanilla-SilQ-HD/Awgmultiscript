@@ -18,7 +18,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from aiogram.types import BotCommand, CallbackQuery, ErrorEvent, Message
 
-from . import __version__, access, admins, api, ask, jobs, monitor, net, store, ui
+from . import __version__, access, admins, api, ask, icons, jobs, monitor, net, store, ui
 from .config import load_config
 from .sections import backup, botself, clients, diag, main as main_menu, server, system, tunnels, wgobf
 
@@ -54,6 +54,7 @@ def build(session: BaseSession | None = None) -> tuple[Bot, Dispatcher]:
     bot = Bot(token=cfg.token, session=session or net.build_session(cfg.proxy),
               default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True))
     bot.session.middleware(ui.TrackSent())
+    bot.session.middleware(icons.Middleware())
     dp = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
     guard = access.AccessMiddleware()
     dp.message.outer_middleware(guard)

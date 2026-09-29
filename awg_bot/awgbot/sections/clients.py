@@ -310,7 +310,7 @@ async def _pick_screen(target: ui.Target, state: FSMContext, page: int = 0) -> N
     names = {c["name"] for c in rows}
     sel = [n for n in (await state.get_data()).get("del_sel") or [] if n in names]
     await state.update_data(del_sel=sel)
-    buttons = [(f"{'✅' if c['name'] in sel else '⬜️'} {c['name']}", act.data("ds", f"{page}|{c['name']}"))
+    buttons = [(f"{'🗑' if c['name'] in sel else '⬜️'} {c['name']}", act.data("ds", f"{page}|{c['name']}"))
                for c in rows]
     await ui.render(target, "<b>🗑 Удалить клиентов</b>\nОтметь, кого удалить. Их конфиги перестанут работать.\n\n"
                             + (f"Отмечено: {len(sel)}" if sel else "Никто не отмечен."),

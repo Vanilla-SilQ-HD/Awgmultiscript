@@ -26,7 +26,14 @@ except ImportError:
     sys.exit(0)
 
 from aiogram.client.session.base import BaseSession  # noqa: E402
-from aiogram.types import CallbackQuery, Chat, Message, Update, User  # noqa: E402
+from aiogram.exceptions import TelegramBadRequest  # noqa: E402
+from aiogram.types import (CallbackQuery, Chat, InlineKeyboardMarkup, Message, MessageEntity, Sticker,  # noqa: E402
+                           StickerSet, Update, User)
+
+# Как Telegram обходится с иконками (custom emoji) от бота: ok — показывает
+# (Premium у владельца), strip — молча срезает, reject — отклоняет запрос
+PREMIUM = {"mode": "strip"}
+PACK = {"🖥": "111", "👥": "222", "🌐": "333", "🗑": "444", "⭐": "555"}
 
 # ── Окружение бота ────────────────────────────────────────
 API = api_wrapper()
@@ -85,11 +92,27 @@ class FakeSession(BaseSession):
             self.deleted.add(method.message_id)
             self.chat.pop(method.message_id, None)
             return True
+        if name == "GetStickerSet":
+            return StickerSet(name=method.name, title="Icons", sticker_type="custom_emoji", stickers=[
+                Sticker(file_id=f"f{i}", file_unique_id=f"u{i}", type="custom_emoji", width=100, height=100,
+                        is_animated=False, is_video=False, emoji=e, custom_emoji_id=i) for e, i in PACK.items()])
         if name == "EditMessageReplyMarkup":
             if method.message_id in self.chat and not method.reply_markup:
                 self.chat[method.message_id] = "text"
             return True
         if name in ("SendMessage", "EditMessageText", "SendDocument", "SendPhoto"):
+            markup = getattr(method, "reply_markup", None)
+            icons_in = "<tg-emoji" in (getattr(method, "text", None) or "") or (
+                isinstance(markup, InlineKeyboardMarkup)
+                and any(b.icon_custom_emoji_id for row in markup.inline_keyboard for b in row))
+            if icons_in and PREMIUM["mode"] == "reject":
+                raise TelegramBadRequest(method=method, message="Bad Request: custom emoji not allowed")
+            entities, echo = None, markup
+            if icons_in and PREMIUM["mode"] == "ok":
+                entities = [MessageEntity(type="custom_emoji", offset=0, length=2, custom_emoji_id="111")]
+            elif icons_in and isinstance(markup, InlineKeyboardMarkup):
+                echo = InlineKeyboardMarkup(inline_keyboard=[
+                    [b.model_copy(update={"icon_custom_emoji_id": None}) for b in row] for row in markup.inline_keyboard])
             # В личном чате номера сообщений общие для обеих сторон
             mid = getattr(method, "message_id", None) or next(MSG_IDS)
             if method.chat_id == OWNER.id:
@@ -97,7 +120,8 @@ class FakeSession(BaseSession):
                                   else "screen" if method.reply_markup else "text")
                 self.text[mid] = getattr(method, "text", None) or getattr(method, "caption", None) or ""
             return Message(message_id=mid, date=datetime.datetime.now(), chat=Chat(id=method.chat_id, type="private"),
-                           text=getattr(method, "text", None)).as_(bot)
+                           text=getattr(method, "text", None), entities=entities,
+                           reply_markup=echo if isinstance(echo, InlineKeyboardMarkup) else None).as_(bot)
         return True
 
     def texts(self):
@@ -124,17 +148,17 @@ STRANGER = User(id=222, is_bot=False, first_name="Stranger")
 seq = itertools.count(1)
 
 
-def _msg(user, text):
+def _msg(user, text, entities=None):
     return Message(message_id=next(MSG_IDS), date=datetime.datetime.now(), chat=Chat(id=user.id, type="private"),
-                   from_user=user, text=text)
+                   from_user=user, text=text, entities=entities)
 
 
 LAST_SAID = [0]
 
 
-async def say(text, user=OWNER):
+async def say(text, user=OWNER, entities=None):
     mark = len(SESSION.sent)
-    msg = _msg(user, text)
+    msg = _msg(user, text, entities)
     LAST_SAID[0] = msg.message_id
     await DP.feed_update(BOT, Update(update_id=next(seq), message=msg))
     return SESSION.sent[mark:]
@@ -321,7 +345,7 @@ async def run():
         [text, buttons[:4]])
     await press("cl:ds:0|e1")
     text, buttons = screen(await press("cl:ds:0|e2"))
-    chk("отмечено двое", "Отмечено: 2" in text and ("✅ e1", "cl:ds:0|e1") in buttons
+    chk("отмечено двое", "Отмечено: 2" in text and ("🗑 e1", "cl:ds:0|e1") in buttons
         and ("🗑 Удалить: 2", "cl:dsgo") in buttons, [text, buttons])
     text, buttons = screen(await press("cl:ds:0|e2"))
     chk("повторное нажатие снимает отметку", "Отмечено: 1" in text and ("⬜️ e2", "cl:ds:0|e2") in buttons, text)
@@ -527,6 +551,71 @@ async def run():
     text, buttons = screen(await press("wo:iopt:dns"))
     chk("кнопка DNS перебирает варианты", "DNS клиентов: Google" in text and ("🌐 DNS: Google", "wo:iopt:dns") in buttons,
         [text, buttons])
+
+    print("Цвета кнопок")
+    await say("/start")
+    styles = {b.text: b.style for row in keyboard(SESSION.sent) for b in row}
+    chk("главное меню: клиенты синие, удаление красное, «Поддержать» зелёная",
+        styles.get("👥 Клиенты") == "primary" and styles.get("🗑 Удаление") == "danger"
+        and styles.get("Поддержать 💚") == "success" and styles.get("🖥 Сервер") is None, styles)
+    await press("cl")
+    styles = {b.text: b.style for row in keyboard(SESSION.sent) for b in row}
+    chk("клиенты: добавить — зелёная, удалить — красная, назад — обычная",
+        styles.get("➕ Добавить") == "success" and styles.get("🗑 Удалить…") == "danger"
+        and styles.get("◀️ Назад") is None, styles)
+    await press("cl:del:alice")
+    styles = {b.text: b.style for row in keyboard(SESSION.sent) for b in row}
+    chk("подтверждение удаления: «Да» красная, «Отмена» обычная, в одной строке",
+        styles == {"🗑 Да, удалить": "danger", "✖️ Отмена": None}
+        and [len(r) for r in keyboard(SESSION.sent)] == [2], styles)
+
+    print("Иконки")
+    icons_mod = sys.modules["awgbot.icons"]
+    text, buttons = screen(await press("look"))
+    chk("экран оформления: иконки выключены, условие Premium названо",
+        "выключены" in text and "Telegram Premium" in text and ("📥 Набор по ссылке", "look:pack") in buttons, text)
+    await press("look:pack")
+    text, _ = screen(await say("t.me/addemoji/SomeIcons"))
+    chk("нет Premium — Telegram срезал иконки: выключены, набор сохранён",
+        "не показал иконки" in text and not icons_mod.active() and icons_mod.mapping().get("🖥") == "111", text)
+    await say("/start")
+    text, buttons = screen(SESSION.sent[-3:])
+    rows = keyboard(SESSION.sent)
+    chk("после отказа — обычные эмодзи", "<tg-emoji" not in text and rows[0][0].text == "🖥 Сервер"
+        and rows[0][0].icon_custom_emoji_id is None, [text[:80], rows[0][0]])
+
+    PREMIUM["mode"] = "ok"
+    text, _ = screen(await press("look:on"))
+    chk("с Premium — проверка прошла, иконки включены", "Иконки включены" in text and icons_mod.active(), text)
+    sent = await say("/start")
+    text, _ = screen(sent)
+    rows = keyboard(sent)
+    chk("иконки в тексте: эмодзи хоста — custom emoji, цветные точки — как есть",
+        '<tg-emoji emoji-id="111">🖥</tg-emoji>' in text and "<tg-emoji emoji-id" in text
+        and "🟢" in text and 'emoji-id="111">🟢' not in text, text[:300])
+    chk("иконка на кнопке вместо эмодзи в подписи",
+        rows[0][0].text == "Сервер" and rows[0][0].icon_custom_emoji_id == "111"
+        and rows[0][1].text == "Клиенты" and rows[0][1].icon_custom_emoji_id == "222"
+        and rows[1][0].text == "🩺 Диагностика", [rows[0], rows[1][0]])
+
+    PREMIUM["mode"] = "reject"
+    sent = await press("main")
+    text, _ = screen(sent)
+    chk("Telegram отклонил иконки — экран всё равно показан, с обычными эмодзи, иконки выключены",
+        "AWG Toolza" in text and "<tg-emoji" not in text and not icons_mod.active()
+        and keyboard(sent)[0][0].text == "🖥 Сервер", [n for n, _ in sent])
+
+    PREMIUM["mode"] = "ok"
+    await press("look:own")
+    own = "🖥 🌐 👥"
+    ents = [MessageEntity(type="custom_emoji", offset=0, length=2, custom_emoji_id="901"),
+            MessageEntity(type="custom_emoji", offset=6, length=2, custom_emoji_id="903")]
+    text, _ = screen(await say(own, entities=ents))
+    chk("свои иконки по порядку: обычное эмодзи на месте — пропуск",
+        "Иконки включены" in text and icons_mod.mapping() == {"🖥": "901", "🩺": "903"}, icons_mod.mapping())
+    await press("look:off")
+    chk("выключение иконок", not icons_mod.active() and icons_mod.mapping(), icons_mod.mapping())
+    PREMIUM["mode"] = "strip"
 
     print("Ширина экрана")
     short = ui.fit("<b>🛡 alice</b>", ui.kb(("📦 Комплект", "a"), ("🗑 Удалить", "b")))

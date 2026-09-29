@@ -21,12 +21,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
                            Message)
 
-from . import api
+from . import api, icons
 
 log = logging.getLogger("awgbot.ui")
 
 Target = Union[CallbackQuery, Message]
-Button = tuple[str, str]
+Button = Union[tuple[str, str], tuple[str, str, str]]   # (текст, данные[, цвет])
 TEXT_MAX = 4096
 
 esc = html.escape
@@ -66,11 +66,35 @@ def _page(text: str) -> bool:
     return text.startswith("◀️ Стр") or text.endswith("▶️")
 
 
-def _button(text: str, data: str) -> InlineKeyboardButton:
-    """Данные вида https://… или tg://… — кнопка-ссылка, иначе колбэк."""
+# Цвет кнопки (Bot API: style) — по эмодзи в начале подписи, чтобы разделы
+# не расставляли его вручную: удаление и сброс — красные, создание и
+# включение — зелёные, выбранный вариант и главное действие — синие.
+# Третий элемент кнопки задаёт цвет явно ("" — обычная).
+DANGER = ("🗑", "💣", "⚠️", "🚨", "🧹", "🧯", "🚫", "❌")
+SUCCESS = ("➕", "✅", "✨", "▶️", "💚")
+PRIMARY = ("🔘", "📄")
+
+
+def style_of(text: str) -> str:
+    if text.startswith(DANGER):
+        return "danger"
+    if text.startswith(SUCCESS) or text.endswith("💚"):
+        return "success"
+    return "primary" if text.startswith(PRIMARY) else ""
+
+
+def _button(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
+    """Данные вида https://… или tg://… — кнопка-ссылка, иначе колбэк.
+    Иконки включены — эмодзи из начала подписи становится иконкой."""
+    style = style_of(text) if style is None else style
+    kw: dict = {"style": style or None}
+    emoji, rest = icons.lead(text)
+    icon_id = icons.icon(emoji) if emoji and rest else None
+    if icon_id:
+        text, kw["icon_custom_emoji_id"] = rest, icon_id
     if data.startswith(("https://", "http://", "tg://")):
-        return InlineKeyboardButton(text=text, url=data)
-    return InlineKeyboardButton(text=text, callback_data=data)
+        return InlineKeyboardButton(text=text, url=data, **kw)
+    return InlineKeyboardButton(text=text, callback_data=data, **kw)
 
 
 def kb(*items: Button | Iterable[Button] | None) -> InlineKeyboardMarkup:
@@ -90,11 +114,12 @@ def kb(*items: Button | Iterable[Button] | None) -> InlineKeyboardMarkup:
             continue
         if isinstance(item, Row):
             flush()
-            rows.append([_button(t, d) for t, d in item])
+            rows.append([_button(*b) for b in item])
             continue
         pairs = [item] if isinstance(item, tuple) else [p for p in item if p]
-        for text, data in pairs:
-            button = _button(text, data)
+        for b in pairs:
+            text = b[0]
+            button = _button(*b)
             if width(text) > WIDE:
                 flush()
                 rows.append([button])

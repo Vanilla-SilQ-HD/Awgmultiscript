@@ -89,13 +89,13 @@ def menu_kb(d: dict) -> ui.InlineKeyboardMarkup:
     «Поддержать» во всю ширину."""
     return ui.kb(
         ("🖥 Сервер", "srv"),
-        ("👥 Клиенты", "cl"),
+        ("👥 Клиенты", "cl", "primary"),
         ("🩺 Диагностика", "diag"),
         ("💾 Бэкапы", "bk"),
         ("🌐 Туннели и DNS", "tun"),
         ("🤖 Telegram-бот", "botm"),
         ("🗑 Удаление", "del"),
-        (f"⬆️ Есть {d['update']}" if d.get("update") else "⬆️ Обновление", "upd"),
+        (f"⬆️ Есть {d['update']}", "upd", "success") if d.get("update") else ("⬆️ Обновление", "upd"),
         ("🛡 WG + обфускатор", "wo"),
         ("🔄 Обновить", "main"),
         ui.Row(("Поддержать 💚", SUPPORT_URL)),
