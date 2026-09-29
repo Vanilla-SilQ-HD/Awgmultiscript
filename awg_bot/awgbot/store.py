@@ -27,6 +27,7 @@ NOTES = STATE_DIR / "notes.json"
 MONITOR = STATE_DIR / "monitor_state.json"
 JOBS = STATE_DIR / "jobs.json"
 NOTICE = STATE_DIR / "restart_notice.json"
+SETTINGS = STATE_DIR / "settings.json"
 
 MONITOR_TAG = "#ping"
 NOTE_MAX = 200
@@ -109,6 +110,17 @@ def set_monitored(name: str, on: bool) -> None:
     if on:
         base = f"{base[:NOTE_MAX - len(MONITOR_TAG) - 1].rstrip()} {MONITOR_TAG}".strip()
     set_note(name, base)
+
+
+# ── Настройки экранов (сортировка списка клиентов) ────────
+def setting(key: str, default: str = "") -> str:
+    return str(load(SETTINGS).get(key) or default)
+
+
+def set_setting(key: str, value: str) -> None:
+    data = load(SETTINGS)
+    data[key] = value
+    save(SETTINGS, data)
 
 
 # ── Сообщение, которое бот поправит после своего перезапуска ──

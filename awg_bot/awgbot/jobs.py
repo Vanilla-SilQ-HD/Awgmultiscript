@@ -85,7 +85,7 @@ async def _edit(bot: Bot, chat_id: int, msg_id: int, text: str,
     """Правка сообщения задачи. False — сообщения больше нет."""
     for _ in range(3):
         try:
-            await bot.edit_message_text(text[:ui.TEXT_MAX], chat_id=chat_id, message_id=msg_id,
+            await bot.edit_message_text(ui.fit(text[:ui.TEXT_MAX], markup), chat_id=chat_id, message_id=msg_id,
                                         reply_markup=markup, disable_web_page_preview=True)
             return True
         except TelegramRetryAfter as e:

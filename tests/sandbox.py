@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 
-__all__ = ["HERE", "AWG2", "chk", "summary", "TMP", "BIN", "CALLS", "LINKS", "ACTIVE", "IPT_SAVE", "ROOT", "LIB",
+__all__ = ["HERE", "AWG2", "chk", "summary", "TMP", "BIN", "CALLS", "LINKS", "ACTIVE", "IPT_SAVE", "AWG_DUMP", "ROOT", "LIB",
            "PRELUDE", "ENV", "bash", "run_script", "calls", "reset_calls", "kv", "OLD20", "api_wrapper",
            "json", "os", "re", "shutil", "subprocess", "sys"]
 
@@ -42,6 +42,7 @@ CALLS = os.path.join(TMP, "calls.log")
 LINKS = os.path.join(TMP, "links")          # «поднятые» интерфейсы, по строке
 ACTIVE = os.path.join(TMP, "active")        # «работающие» юниты systemd, по строке
 IPT_SAVE = os.path.join(TMP, "iptables-save.txt")
+AWG_DUMP = os.path.join(TMP, "awg-dump")      # вывод `awg show awg0 dump`, если файл есть
 open(LINKS, "w").close()
 open(ACTIVE, "w").close()
 open(IPT_SAVE, "w").close()
@@ -70,6 +71,7 @@ exit 0''',
     "awg": r'''case "$1" in
   genkey|genpsk) head -c 32 /dev/urandom | base64 ;;
   pubkey) sha256sum | head -c 43; echo "=" ;;
+  show) echo "awg $*" >> "$CALLS"; [[ "${3:-}" == dump && -f "$AWG_DUMP" ]] && cat "$AWG_DUMP" ;;
   *) echo "awg $*" >> "$CALLS" ;;
 esac
 exit 0''',
@@ -122,7 +124,7 @@ mkdir -p "$AWG_DIR" "$CLIENT_DIR" "$STATE_DIR" "{ROOT}/scripts"
 '''
 
 ENV = dict(os.environ, PATH=BIN + ":" + os.environ["PATH"], CALLS=CALLS, LINKS=LINKS, ACTIVE=ACTIVE,
-           IPT_SAVE=IPT_SAVE, LC_ALL="C.UTF-8")
+           IPT_SAVE=IPT_SAVE, AWG_DUMP=AWG_DUMP, LC_ALL="C.UTF-8")
 
 
 def bash(code, stdin=None):

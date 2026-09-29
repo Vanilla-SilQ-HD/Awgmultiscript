@@ -14,6 +14,7 @@ import itertools
 import logging
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sandbox import *  # noqa: E402,F401,F403
@@ -217,6 +218,21 @@ async def run():
     print("Клиенты")
     text, buttons = screen(await press("cl"))
     chk("список клиентов", "Клиенты: 2" in text and ("cl:v:alice" in [d for _, d in buttons]), [text, buttons])
+    now = int(time.time())
+    with open(AWG_DUMP, "w") as f:
+        f.write(f"PRIV\tPUB\t51820\toff\nPUBALICE=\t(none)\t(none)\t10.23.45.2/32\t{now - 3600}\t0\t0\toff\n"
+                f"PUBBOB=\t(none)\t1.2.3.4:5555\t10.23.45.3/32\t{now - 30}\t100\t200\toff\n")
+    text, buttons = screen(await press("cl:sort:activity"))
+    order = [d.split(":")[2] for _, d in buttons if d.startswith("cl:v:")]
+    chk("сортировка по активности: онлайн первым, с давностью",
+        order == ["bob", "alice"] and "по активности" in text and any(t.startswith("🟢 bob · ") for t, _ in buttons),
+        [text, buttons])
+    text, buttons = screen(await press("cl:sort:name"))
+    order = [d.split(":")[2] for _, d in buttons if d.startswith("cl:v:")]
+    chk("сортировка по имени", order == ["alice", "bob"] and "по имени" in text
+        and ("🔃 По активности", "cl:sort:activity") in buttons, [text, buttons])
+    chk("сортировка запоминается", store.setting("clients_sort") == "name", store.setting("clients_sort"))
+    os.remove(AWG_DUMP)
     text, buttons = screen(await press("cl:v:alice"))
     chk("карточка", "alice" in text and "10.23.45.2" in text and ("cl:conf:alice" in [d for _, d in buttons]), text)
 
@@ -440,6 +456,45 @@ async def run():
         last.text[:60])
     no_hourglass("после задачи")
     chk("незавершённых задач не осталось", store.jobs() == {}, store.jobs())
+
+    print("WG + обфускатор")
+    os.makedirs(os.path.join(ROOT, "etc/awg-wgobf"), exist_ok=True)
+    with open(os.path.join(ROOT, "etc/awg-wgobf/state"), "w") as f:
+        f.write("ENDPOINT=203.0.113.10\nPORT=45888\nKEY=obfkey\nMASKING=STUN\nMTU=1380\nDNS=1.1.1.1\n"
+                "SERVER_PUB=SRVPUB=\nALLOW_CLEAN=0\n")
+    os.makedirs(os.path.join(ROOT, "etc/wireguard"), exist_ok=True)
+    with open(os.path.join(ROOT, "etc/wireguard/wgobf0.conf"), "w") as f:
+        f.write("[Interface]\nPrivateKey = S\nListenPort = 45888\n\n[Peer]\n# client=clus\nPublicKey = CPUB=\n"
+                "AllowedIPs = 10.77.1.2/32\n")
+    cdir = os.path.join(ROOT, "root/wgobf/clus")
+    os.makedirs(cdir, exist_ok=True)
+    with open(os.path.join(cdir, "wg.conf"), "w") as f:
+        f.write("[Interface]\nPrivateKey = CPRIV=\nAddress = 10.77.1.2/32\n\n[Peer]\nPresharedKey = PSK=\n")
+    text, buttons = screen(await press("wo:v:clus"))
+    datas = [d for _, d in buttons]
+    chk("карточка клиента: IP и две кнопки выдачи", "10.77.1.2" in text and "wo:bundle:clus" in datas
+        and "wo:zip:clus" in datas, [text, buttons])
+    sent = await press("wo:bundle:clus")
+    msgs = [m.text or "" for n, m in sent if n == "SendMessage"]
+    d = docs(sent)
+    chk("ссылка phobos:// и конфиг — текстом",
+        any("phobos://" in t and "<pre>" in t and "[instance]" in t and "CPRIV=" in t for t in msgs), msgs)
+    chk("и один файл .conf со всеми данными",
+        len(d) == 1 and d[0].document.filename == "clus.conf" and b"[Interface]" in d[0].document.data
+        and b"[instance]" in d[0].document.data and b"key = obfkey" in d[0].document.data,
+        [x.document.filename for x in d])
+    chk("файлы — после текста", [n for n, _ in sent if n in ("SendMessage", "SendDocument")]
+        == ["SendMessage", "SendDocument"], [n for n, _ in sent])
+    sent = await press("wo:zip:clus")
+    chk("архив для Linux — отдельной кнопкой", docs(sent) and docs(sent)[0].document.filename == "wgobf-clus.zip",
+        [n for n, _ in sent])
+
+    print("Ширина экрана")
+    short = ui.fit("<b>🛡 alice</b>", ui.kb(("📦 Комплект", "a"), ("🗑 Удалить", "b")))
+    chk("короткий текст дополняется до ширины кнопок", short.startswith("<b>🛡 alice</b>")
+        and ui.width(short.replace("<b>", "").replace("</b>", "")) >= 2 * (ui.width("📦 Комплект") + 4), short)
+    long_text = "<b>Заголовок</b>\n" + "очень длинная строка текста экрана"
+    chk("длинный текст не трогается", ui.fit(long_text, ui.kb(("📦 Комплект", "a"))) == long_text)
 
 
 asyncio.run(run())

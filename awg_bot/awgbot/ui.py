@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import html
 import logging
+import re
 import time
 from typing import Awaitable, Callable, Iterable, Union
 
@@ -178,6 +179,26 @@ def state_word(state: str) -> str:
     return {"up": "включён", "off": "выключен", "none": "не настроен"}.get(state, state)
 
 
+# Telegram рисует клавиатуру шириной с сообщение: под коротким текстом
+# («🛡 alice») кнопки сжимаются и подписи обрезаются. Такой текст дополняем в
+# первой строке пустыми символами Брайля — это не пробел, Telegram его не
+# срезает — до ширины, в которую кнопки влезут.
+PAD = "\u2800"
+PAD_MAX = 32
+
+
+def fit(text: str, markup: InlineKeyboardMarkup | None) -> str:
+    if not markup or not markup.inline_keyboard:
+        return text
+    need = min(PAD_MAX, max(len(row) * (max(width(b.text) for b in row) + 4) for row in markup.inline_keyboard))
+    lines = html.unescape(re.sub(r"<[^>]+>", "", text)).split("\n")
+    if max(width(line) for line in lines) >= need:
+        return text
+    pad = PAD * (need - width(lines[0]))
+    i = text.find("\n")
+    return text + pad if i < 0 else text[:i] + pad + text[i:]
+
+
 def fail(r: api.Result, title: str = "") -> str:
     """Экран ошибки: причина и хвост журнала awg2."""
     head = f"❌ <b>{esc(title)}</b>\n" if title else "❌ "
@@ -221,7 +242,8 @@ def is_screen(chat_id: int, msg_id: int) -> bool:
 
 async def show_new(bot: Bot, chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> Message:
     """Новое сообщение-экран внизу чата."""
-    msg = await bot.send_message(chat_id, text[:TEXT_MAX], reply_markup=markup, disable_web_page_preview=True)
+    msg = await bot.send_message(chat_id, fit(text[:TEXT_MAX], markup), reply_markup=markup,
+                                 disable_web_page_preview=True)
     _screen[chat_id] = msg.message_id
     return msg
 
@@ -229,7 +251,7 @@ async def show_new(bot: Bot, chat_id: int, text: str, markup: InlineKeyboardMark
 async def render(target: Target, text: str, markup: InlineKeyboardMarkup | None = None) -> Message | None:
     """Кнопка — правим её сообщение; сообщение пользователя — отвечаем новым.
     None — текст не изменился."""
-    text = text[:TEXT_MAX]
+    text = fit(text[:TEXT_MAX], markup)
     bot = target.bot
     if bot is None:
         return None

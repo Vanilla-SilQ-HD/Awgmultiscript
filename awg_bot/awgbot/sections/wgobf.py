@@ -18,22 +18,59 @@ act = ui.Actions(router, "wo")
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 
-async def send_bundle(bot: Bot, chat_id: int, name: str) -> None:
-    """Комплект клиента одним zip и ссылка для Keenetic (AWG Manager → Phobos)."""
+async def _bundle_data(bot: Bot, chat_id: int, name: str) -> dict | None:
     r = await api.call("wgobf", "bundle", name)
     if not r.ok or not isinstance(r.data, dict):
-        await ui.show_new(bot, chat_id, ui.fail(r, f"Комплект {name}"), ui.kb(ui.back("wo")))
+        await ui.show_new(bot, chat_id, ui.fail(r, f"Клиент {name}"), ui.kb(ui.back("wo")))
+        return None
+    return r.data
+
+
+async def send_bundle(bot: Bot, chat_id: int, name: str) -> None:
+    """Ссылка phobos:// и конфиг текстом, затем тот же конфиг одним файлом
+    <имя>.conf: WireGuard и секция [instance] обфускатора (формат Phobos) —
+    Keenetic (AWG Manager → «Phobos») берёт его одной вставкой."""
+    d = await _bundle_data(bot, chat_id, name)
+    if d is None:
         return
-    files = [f["path"] for f in r.data.get("files") or []]
-    caption = (f"🛡 <b>{esc(name)}</b>: wg.conf + obfuscator.conf, установщик для Linux, "
-               "инструкция (README.txt)")
-    link = (r.data.get("phobos") or "").strip()
+    paths = {f["name"]: f["path"] for f in d.get("files") or []}
+    try:
+        with open(paths.get("phobos.conf", ""), encoding="utf-8") as f:
+            conf = f.read().strip()
+    except OSError:
+        conf = ""
+    link = (d.get("phobos") or "").strip()
+    head = f"🛡 <b>{esc(name)}</b> — WG + обфускатор\n"
+    parts = []
     if link:
-        caption += f"\n\nKeenetic, AWG Manager → «Phobos» (одной вставкой):\n<code>{esc(link)}</code>"
-    if len(caption) > 1000:                          # предел подписи к файлу
-        caption = caption.split("\n\n")[0] + "\n\nСсылка phobos:// — в phobos-link.txt архива."
+        parts.append(f"\n<b>Ссылка</b> — Keenetic, AWG Manager → «Phobos», одной вставкой:\n<code>{esc(link)}</code>\n")
+    if conf:
+        parts.append(f"\n<b>Конфиг</b> — WireGuard и [instance] обфускатора, как в файле ниже:\n<pre>{esc(conf)}</pre>")
+    text = head + "".join(parts)
+    if len(text) <= ui.TEXT_MAX:
+        await bot.send_message(chat_id, text)
+    else:                                               # длинный список AllowedIPs
+        for part in parts:
+            if len(head + part) <= ui.TEXT_MAX:
+                await bot.send_message(chat_id, head + part)
+    if conf:
+        await bot.send_document(
+            chat_id, BufferedInputFile((conf + "\n").encode(), filename=f"{name}.conf"),
+            caption=f"📄 <b>{esc(name)}.conf</b> — всё в одном файле: WireGuard + обфускатор.\n"
+                    "Linux, Windows, Android — «📦 Архив» в карточке клиента: wg.conf, obfuscator.conf "
+                    "и установщик.")
+
+
+async def send_archive(bot: Bot, chat_id: int, name: str) -> None:
+    """Всё по отдельности: wg.conf + obfuscator.conf, установщик для Linux,
+    инструкция — для устройств, где обфускатор ставят рядом с WireGuard."""
+    d = await _bundle_data(bot, chat_id, name)
+    if d is None:
+        return
+    files = [f["path"] for f in d.get("files") or []]
     await bot.send_document(chat_id, BufferedInputFile(media.zip_files(files), filename=f"wgobf-{name}.zip"),
-                            caption=caption)
+                            caption=f"📦 <b>{esc(name)}</b>: wg.conf + obfuscator.conf, установщик для Linux, "
+                                    "инструкция (README.txt)")
 
 
 @act()
@@ -160,8 +197,8 @@ async def _add_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
     if not r.ok:
         await ask.retry(msg, state, ctx, r.message)
         return
-    await ui.render(msg, f"✅ Клиент <b>{esc(name)}</b> добавлен — комплект ниже.",
-                    ui.kb(("👥 Клиенты", act.data("list")), ui.back("wo")))
+    await ui.render(msg, f"✅ Клиент <b>{esc(name)}</b> добавлен — ссылка и конфиг ниже.",
+                    ui.kb(("👤 Карточка", act.data("v", name)), ("👥 Клиенты", act.data("list")), ui.back("wo")))
     await send_bundle(msg.bot, msg.chat.id, name)  # type: ignore[arg-type]
 
 
@@ -182,8 +219,20 @@ async def _list(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 @act("v")
 async def _view(cb: ui.Target, state: FSMContext, name: str) -> None:
-    await ui.render(cb, f"<b>🛡 {esc(name)}</b>",
-                    ui.kb(("📦 Комплект", act.data("bundle", name)),
+    rows = await api.data("wgobf", "clients", default=[]) or []
+    c = next((r for r in rows if r["name"] == name), None)
+    if c is None:
+        await ui.render(cb, f"Клиента <b>{esc(name)}</b> нет.", ui.kb(ui.back(act.data("list"))))
+        return
+    ago = c.get("ago")
+    seen = ("не подключался" if ago is None
+            else f"🟢 онлайн ({ui.fmt_dur(ago)} назад)" if ago < 180 else f"был {ui.fmt_dur(ago)} назад")
+    await ui.render(cb, f"<b>🛡 {esc(name)}</b> — WG + обфускатор\n\nIP: <code>{esc(c['ip'])}</code>\n"
+                        f"Статус: {seen}\n\n"
+                        "<i>📄 Конфиг — ссылка и конфиг текстом, плюс один файл .conf со всеми данными\n"
+                        "📦 Архив — wg.conf, obfuscator.conf и установщик для Linux</i>",
+                    ui.kb(("📄 Конфиг", act.data("bundle", name)),
+                          ("📦 Архив", act.data("zip", name)),
                           ("🗑 Удалить", act.data("del", name)),
                           ui.back(act.data("list"))))
 
@@ -192,6 +241,12 @@ async def _view(cb: ui.Target, state: FSMContext, name: str) -> None:
 async def _bundle(cb: CallbackQuery, state: FSMContext, name: str) -> None:
     await cb.answer("Отправляю…")
     await send_bundle(cb.bot, ui.chat_of(cb).chat.id, name)  # type: ignore[arg-type]
+
+
+@act("zip")
+async def _zip(cb: CallbackQuery, state: FSMContext, name: str) -> None:
+    await cb.answer("Отправляю…")
+    await send_archive(cb.bot, ui.chat_of(cb).chat.id, name)  # type: ignore[arg-type]
 
 
 @act("del")

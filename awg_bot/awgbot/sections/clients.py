@@ -39,6 +39,18 @@ def icon(c: dict) -> str:
     return "🟢" if c.get("online") else "⚪️"
 
 
+# Сортировка списка: по активности — сначала онлайн, затем кто был недавно,
+# неподключавшиеся и заблокированные в конце; по имени — без учёта регистра.
+SORTS = {"activity": "по активности", "name": "по имени"}
+
+
+def sort_rows(rows: list[dict], mode: str) -> list[dict]:
+    if mode == "name":
+        return sorted(rows, key=lambda c: c["name"].lower())
+    return sorted(rows, key=lambda c: (bool(c.get("blocked")), not c.get("online"),
+                                       -(c.get("handshake") or 0), c["name"].lower()))
+
+
 def seen(c: dict) -> str:
     if c.get("blocked"):
         return "заблокирован: срок истёк"
@@ -86,32 +98,47 @@ async def list_screen(target: ui.Target, page: int = 0) -> None:
     if not r.ok or not isinstance(r.data, list):
         await ui.render(target, ui.fail(r, "Клиенты"), ui.kb(ui.back()))
         return
-    rows: list[dict] = r.data
+    mode = store.setting("clients_sort", "activity")
+    rows: list[dict] = sort_rows(r.data, mode)
     online = sum(1 for c in rows if c.get("online"))
     blocked = sum(1 for c in rows if c.get("blocked"))
     pages = max(1, (len(rows) + PAGE - 1) // PAGE)
     page = min(max(page, 0), pages - 1)
     text = (f"<b>👥 Клиенты: {len(rows)}</b> · 🟢 {online} онлайн"
             + (f" · 🚫 {blocked} заблок." if blocked else "")
-            + ("\n\nКлиентов пока нет." if not rows else "\n\n🟢 онлайн · ⚪️ офлайн · 🚫 срок истёк · 🔔 мониторинг"))
+            + ("\n\nКлиентов пока нет." if not rows else
+               f"\nСортировка: {SORTS.get(mode, mode)}\n\n🟢 онлайн · ⚪️ офлайн · 🚫 срок истёк · 🔔 мониторинг"))
     notes = store.notes()
     buttons: list[ui.Button] = []
     for c in rows[page * PAGE:(page + 1) * PAGE]:
         bell = " 🔔" if store.MONITOR_TAG in notes.get(c["name"], "").lower() else ""
-        buttons.append((f"{icon(c)} {c['name'] or '(без имени)'}{bell}", act.data("v", c["name"])))
+        label = f"{icon(c)} {c['name'] or '(без имени)'}{bell}"
+        # По активности — и давность, если влезает в полстроки
+        if mode == "activity" and c.get("handshake") and not c.get("blocked"):
+            with_ago = f"{label} · {ui.fmt_dur(c.get('ago'))}"
+            label = with_ago if ui.width(with_ago) <= ui.WIDE else label
+        buttons.append((label, act.data("v", c["name"])))
     nav: list[ui.Button] = []
     if page > 0:
         nav.append((f"◀️ Стр. {page}", act.data("p", str(page - 1))))
     if page < pages - 1:
         nav.append((f"Стр. {page + 2} ▶️", act.data("p", str(page + 1))))
+    other = "name" if mode == "activity" else "activity"
     await ui.render(target, text, ui.kb(
         buttons, nav,
         ("➕ Добавить", act.data("add")),
         ("➕ Несколько", act.data("bulk")),
-        ("📊 Активность", act.data("activity")) if rows else None,
+        (f"🔃 {SORTS[other].capitalize()}", act.data("sort", other)) if len(rows) > 1 else None,
+        ("📊 Трафик", act.data("activity")) if rows else None,
         ("📦 Экспорт zip", act.data("export")) if rows else None,
         ("🧹 Убрать истёкших", act.data("purge")) if blocked else None,
         ui.back()))
+
+
+@act("sort")
+async def _sort(cb: CallbackQuery, state: FSMContext, mode: str) -> None:
+    store.set_setting("clients_sort", mode if mode in SORTS else "activity")
+    await list_screen(cb)
 
 
 @act("activity")
