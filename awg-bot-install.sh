@@ -75,8 +75,17 @@ cp -r "$SRC/awgbot" "$DEST/"
 cp "$SRC/run.py" "$SRC/requirements.txt" "$DEST/"
 find "$DEST/awgbot" -name __pycache__ -prune -exec rm -rf {} +
 [[ -x "$DEST/venv/bin/python" ]] || python3 -m venv "$DEST/venv"
-"$DEST/venv/bin/pip" install -q --upgrade pip >/dev/null
-"$DEST/venv/bin/pip" install -q -r "$DEST/requirements.txt" || { err "pip install не удался"; exit 1; }
+# Свежий pip не нужен — без самообновления на PyPI ходим, только если
+# зависимостей не хватает. Повторы и ретраи — в журнал, на экран — только
+# итог: соединение с PyPI с серверов в РФ рвётся, и pip его переживает.
+PIP_LOG="$STATE/pip.log"
+mkdir -p "$STATE"; chmod 700 "$STATE"
+if ! "$DEST/venv/bin/pip" install -q --disable-pip-version-check --retries 10 --timeout 30 \
+     -r "$DEST/requirements.txt" >"$PIP_LOG" 2>&1; then
+  err "pip install не удался:"
+  tail -n 8 "$PIP_LOG" | sed 's/^/    /'
+  exit 1
+fi
 ok "Код и зависимости: $DEST"
 
 touch "$CONF"; chmod 600 "$CONF"
@@ -98,7 +107,6 @@ fi
 # Ключи прежнего скрипта управления awg-bot: источник обновлений теперь — awg2
 sed -i '/^LOCAL_SRC=/d;/^REPO_URL=/d;/^UPDATE_CHANNEL=/d' "$CONF"
 rm -f /usr/local/bin/awg-bot /usr/local/bin/awg-bot.py
-mkdir -p "$STATE"; chmod 700 "$STATE"
 
 cat > "$UNIT" <<EOF
 [Unit]
