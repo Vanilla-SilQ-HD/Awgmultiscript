@@ -302,7 +302,14 @@ def api(*args, stdin=None, env=None):
 r = api("version")
 chk("api version — одна строка JSON", r.get("ok") is True and r["data"]["version"].startswith("v")
     and r["data"]["api"] == 1, r)
-r = api("status")
+SLOW = os.path.join(TMP, "slowbin")
+os.makedirs(SLOW)
+with open(os.path.join(SLOW, "curl"), "w") as f:
+    f.write("#!/usr/bin/env bash\nsleep 6\nexit 1\n")
+os.chmod(os.path.join(SLOW, "curl"), 0o755)
+t0 = time.time()
+r = api("status", env={"PATH": SLOW + ":" + ENV["PATH"]})
+chk("фоновая проверка обновлений не держит ответ", r.get("ok") and time.time() - t0 < 5, time.time() - t0)
 d = r.get("data") or {}
 chk("api status", r.get("ok") and d["server"]["exists"] and d["server"]["clients"] == 2
     and d["server"]["proto"] == "2.0" and d["tunnels"]["warp"] == "none", r)

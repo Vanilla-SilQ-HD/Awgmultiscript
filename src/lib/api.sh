@@ -66,6 +66,8 @@ _api_ts() {
 _api_status() {
   local n=0
   os_detect
+  update_check_async || true
+  upstream_refresh_async || true
   server_exists && n=$(clients_tsv | grep -c . || true)
   {
     _kv version "$VERSION"; _kv api:n "$API_VERSION"

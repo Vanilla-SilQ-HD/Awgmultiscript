@@ -1,188 +1,118 @@
 #!/usr/bin/env bash
-# awg-bot-install.sh — установщик бота awgToolza для пункта 6 awg2.
+# awg-bot-install.sh — установка и обновление Telegram-бота AWG Toolza.
 #
-# Этот файл лежит в КОРНЕ репозитория awg-multi-script и качается самим awg2
-# (пункт 6 → «Установить/Переустановить бота») по URL:
-#   https://raw.githubusercontent.com/pumbaX/awg-multi-script/main/awg-bot-install.sh
-#
-# Запускается в терминале awg2 (read работает), от root. Делает:
-#   1. клонирует репо, берёт код бота из подпапки awg_bot/
-#   2. ставит зависимости в venv, настраивает systemd-сервис awg-bot
-#   3. спрашивает токен и Telegram ID (если ещё не заданы)
-#   4. ставит management-скрипт awg-bot и маркер /usr/local/bin/awg-bot.py
-#      (awg2 проверяет именно его, чтобы показать «бот установлен»)
+# Запускает его awg2 (Telegram-бот → Установить / Обновить), в том числе из
+# самого бота — тогда без терминала. Делает:
+#   1. берёт код бота: --src КАТАЛОГ, awg_bot/ рядом с установщиком или
+#      git clone репозитория (AWG_REPO_URL — канал обновлений awg2);
+#   2. ставит зависимости в venv /opt/awg-bot/venv;
+#   3. спрашивает токен и Telegram ID, если их ещё нет в /etc/awg-bot.conf
+#      (без терминала — ошибка: спросить некого);
+#   4. пишет службу awg-bot и запускает её.
+# Настройки, админы, заметки и мониторинг (/var/lib/awg-bot) сохраняются.
 set -euo pipefail
 
-# Репозиторий кода бота. По умолчанию — стабильный. awg2 передаёт сюда
-# AWG_REPO_URL своего канала обновлений, чтобы бот и скрипт ехали из одного
-# репозитория (на бета-канале — из бета-репозитория).
 REPO_URL="${AWG_REPO_URL:-https://github.com/pumbaX/awg-multi-script}"
-REPO_SUBDIR="awg_bot"
 DEST="/opt/awg-bot"
 CONF="/etc/awg-bot.conf"
-MARKER="/usr/local/bin/awg-bot.py"   # маркер для awg2 (пункт 6)
+STATE="/var/lib/awg-bot"
+UNIT="/etc/systemd/system/awg-bot.service"
+AWG2="/usr/local/bin/awg2"
 
-R='\033[38;5;203m'; G='\033[0;32m'; C='\033[0;36m'; W='\033[1;37m'; N='\033[0m'
-ok(){ echo -e "${G}  √ $*${N}"; }; err(){ echo -e "${R}  × $*${N}"; }
-info(){ echo -e "${C}  → $*${N}"; }
+R='\033[38;5;203m'; G='\033[0;32m'; Y='\033[0;33m'; C='\033[0;36m'; W='\033[1;37m'; N='\033[0m'
+ok()   { echo -e "${G}  √ $*${N}"; }
+err()  { echo -e "${R}  × $*${N}"; }
+warn() { echo -e "${Y}  ▲ $*${N}"; }
+info() { echo -e "${C}  → $*${N}"; }
 
-[[ $EUID -ne 0 ]] && { err "Нужен root (запусти через sudo awg2)"; exit 1; }
+(( EUID == 0 )) || { err "Нужен root: sudo awg2 → Telegram-бот"; exit 1; }
 
-# ── Источник кода бота ──
-# По умолчанию — git clone. Но код бота лежит рядом с этим установщиком в
-# распакованном архиве awg-toolza, и при проверке правок тянуть версию из
-# GitHub бессмысленно: там ещё старый код. Поэтому:
-#   --src <dir>  или  BOT_SRC=<dir>  — взять код из каталога (сам awg_bot/ либо
-#                                      корень репозитория, где он лежит);
-#   без аргумента — если рядом с установщиком есть awg_bot/awgbot, берём его,
-#                   иначе клонируем с GitHub.
-LOCAL_SRC="${BOT_SRC:-}"
-while [[ $# -gt 0 ]]; do
+SRC="${BOT_SRC:-}"
+while (( $# )); do
   case "$1" in
-    --src)  LOCAL_SRC="${2:-}"; shift 2 ;;
-    --src=*) LOCAL_SRC="${1#--src=}"; shift ;;
+    --src) SRC="${2:-}"; shift 2 ;;
+    --src=*) SRC="${1#--src=}"; shift ;;
     *) shift ;;
   esac
 done
 
-# Приводим переданный путь к каталогу с awgbot/ и run.py
-_normalize_src() {
+# Каталог с awgbot/ и run.py: сам awg_bot/ или корень репозитория.
+bot_dir() {
   local d="${1%/}"
-  [[ -z "$d" ]] && return 1
-  if [[ -d "$d/awgbot" && -f "$d/run.py" ]]; then echo "$d"; return 0; fi
-  if [[ -d "$d/$REPO_SUBDIR/awgbot" && -f "$d/$REPO_SUBDIR/run.py" ]]; then
-    echo "$d/$REPO_SUBDIR"; return 0
-  fi
-  return 1
+  [[ -n "$d" ]] || return 1
+  if [[ -d "$d/awgbot" && -f "$d/run.py" ]]; then echo "$d"
+  elif [[ -d "$d/awg_bot/awgbot" && -f "$d/awg_bot/run.py" ]]; then echo "$d/awg_bot"
+  else return 1; fi
 }
 
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -z "$LOCAL_SRC" ]]; then
-  LOCAL_SRC="$(_normalize_src "$SELF_DIR" || true)"
-else
-  LOCAL_SRC="$(_normalize_src "$LOCAL_SRC" || true)"
-  [[ -z "$LOCAL_SRC" ]] && { err "В указанном каталоге нет кода бота (awgbot/, run.py)"; exit 1; }
-fi
+echo -e "${W}━━━ Telegram-бот AWG Toolza ━━━${N}"
 
-echo -e "${W}━━━ Установка awgToolza Bot (через awg2) ━━━${N}"
-
-# 1. зависимости (git нужен только при установке из GitHub)
-info "Проверяю зависимости (python3-venv…)"
-if [[ -z "$LOCAL_SRC" ]]; then
-  command -v git >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq git; }
-fi
-command -v python3 >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq python3 python3-venv; }
-dpkg -s python3-venv >/dev/null 2>&1 || apt-get install -y -qq python3-venv
-ok "Зависимости готовы"
-
-# 2. код бота: локальный каталог или клон
-TMP="$(mktemp -d)"
+TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-if [[ -n "$LOCAL_SRC" ]]; then
-  SRC="$LOCAL_SRC"
-  ok "Код бота беру локально: ${SRC}"
+if [[ -n "$SRC" ]]; then
+  SRC=$(bot_dir "$SRC") || { err "В каталоге нет кода бота (awgbot/, run.py)"; exit 1; }
+  ok "Код бота: $SRC"
+elif SRC=$(bot_dir "$(dirname "$(readlink -f "$0")")"); then
+  ok "Код бота: $SRC"
 else
-  info "Скачиваю код бота из ${REPO_URL} (${REPO_SUBDIR}/)…"
-  if ! git clone --depth 1 "$REPO_URL" "$TMP/repo" >/dev/null 2>&1; then
-    err "git clone не удался. Проверь доступ к GitHub."
-    info "Можно поставить из локальной копии: bash $(basename "${BASH_SOURCE[0]}") --src /путь/к/awg_bot"
-    exit 1
-  fi
-  SRC="$TMP/repo/$REPO_SUBDIR"
+  command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq git >/dev/null; }
+  info "Скачиваю код бота из $REPO_URL"
+  git clone -q --depth 1 "$REPO_URL" "$TMP/repo" || { err "git clone не удался — нет доступа к GitHub?"; exit 1; }
+  SRC=$(bot_dir "$TMP/repo") || { err "В репозитории нет кода бота"; exit 1; }
 fi
-if [[ ! -d "$SRC/awgbot" || ! -f "$SRC/run.py" ]]; then
-  err "В источнике нет кода бота (${SRC}: awgbot/, run.py)."
-  exit 1
+
+info "Зависимости Python..."
+if ! python3 -c 'import venv, ensurepip' 2>/dev/null; then
+  if ! { apt-get update -qq && apt-get install -y -qq python3 python3-venv >/dev/null; }; then
+    err "Не поставился python3-venv"; exit 1
+  fi
 fi
 
 systemctl stop awg-bot 2>/dev/null || true
-
-# 2b. Чистая миграция со старого бота pumbaX (если стоял).
-#  - старый код был одним файлом /usr/local/bin/awg-bot.py — удалим (заменим маркером ниже)
-#  - старый конфиг использует ADMIN_CHAT_ID; наш бот понимает оба имени, но
-#    на всякий случай продублируем в ADMIN_ID, если его ещё нет.
-if [[ -f /usr/local/bin/awg-bot.py ]] && grep -q 'ADMIN_CHAT_ID\|awg-bot.py' /usr/local/bin/awg-bot.py 2>/dev/null; then
-  info "Обнаружен старый бот — выполняю чистую замену"
-fi
-if [[ -f "$CONF" ]]; then
-  if grep -q '^ADMIN_CHAT_ID=' "$CONF" 2>/dev/null && ! grep -q '^ADMIN_ID=' "$CONF" 2>/dev/null; then
-    old_id=$(grep -m1 '^ADMIN_CHAT_ID=' "$CONF" | cut -d= -f2- | tr -d '"'"'"' ')
-    [[ -n "$old_id" ]] && echo "ADMIN_ID=${old_id}" >> "$CONF" && info "Перенёс ADMIN_CHAT_ID → ADMIN_ID"
-  fi
-fi
-
 mkdir -p "$DEST"
 rm -rf "$DEST/awgbot"
 cp -r "$SRC/awgbot" "$DEST/"
 cp "$SRC/run.py" "$SRC/requirements.txt" "$DEST/"
-ok "Код развёрнут в ${DEST}"
+find "$DEST/awgbot" -name __pycache__ -prune -exec rm -rf {} +
+[[ -x "$DEST/venv/bin/python" ]] || python3 -m venv "$DEST/venv"
+"$DEST/venv/bin/pip" install -q --upgrade pip >/dev/null
+"$DEST/venv/bin/pip" install -q -r "$DEST/requirements.txt" || { err "pip install не удался"; exit 1; }
+ok "Код и зависимости: $DEST"
 
-# 3. venv
-info "Ставлю Python-зависимости…"
-[[ -d "$DEST/venv" ]] || python3 -m venv "$DEST/venv"
-"$DEST/venv/bin/pip" install -q --upgrade pip
-"$DEST/venv/bin/pip" install -q -r "$DEST/requirements.txt"
-ok "Зависимости установлены"
-
-# 4. токен и ID (спрашиваем, если ещё нет в конфиге)
-if [[ ! -f "$CONF" ]] || ! grep -q '^BOT_TOKEN=' "$CONF" 2>/dev/null; then
-  echo ""
-  echo -e "${W}  Нужен Telegram-бот. Создай его у @BotFather и вставь токен.${N}"
-  read -rp "$(echo -e "${C}  Токен бота: ${N}")" BOT_TOKEN
-  read -rp "$(echo -e "${C}  Твой Telegram ID (@userinfobot; несколько — через запятую): ${N}")" ADMIN_ID
-  touch "$CONF"; chmod 600 "$CONF"
-  sed -i '/^BOT_TOKEN=/d;/^ADMIN_ID=/d' "$CONF"
-  { echo "BOT_TOKEN=${BOT_TOKEN}"; echo "ADMIN_ID=${ADMIN_ID}"; } >> "$CONF"
-  ok "Конфиг записан (${CONF}, chmod 600)"
-else
-  ok "Конфиг ${CONF} уже содержит токен — оставляю как есть"
-fi
-
-# 4b. Запоминаем источник кода.
-# Иначе «Обновить бота» (кнопка в боте и awg-bot update) склонирует репозиторий
-# и накатит его поверх локальной сборки — то есть откатит правки, которых в
-# репозитории ещё нет. Ставили локально → обновляемся оттуда же.
 touch "$CONF"; chmod 600 "$CONF"
-# UPDATE_CHANNEL снимаем вместе с REPO_URL: установка задаёт источник заново, и
-# оставшаяся метка канала противоречила бы новому адресу (awg-bot channel_read
-# считает её главнее REPO_URL). Канал заново выведется из записанного адреса.
+# Бот старого образца писал ADMIN_CHAT_ID — переносим в ADMIN_ID
+if ! grep -q '^ADMIN_ID=' "$CONF" && grep -q '^ADMIN_CHAT_ID=' "$CONF"; then
+  echo "ADMIN_ID=$(sed -n 's/^ADMIN_CHAT_ID=//p' "$CONF" | tr -d "\"' " | head -1)" >> "$CONF"
+fi
+if ! grep -q '^BOT_TOKEN=.' "$CONF" || ! grep -q '^ADMIN_ID=.' "$CONF"; then
+  [[ -t 0 ]] || { err "В $CONF нет BOT_TOKEN/ADMIN_ID — запусти установку из меню awg2"; exit 1; }
+  echo -e "  Создай бота у ${W}@BotFather${N} и вставь токен."
+  read -rp "$(echo -e "${C}  Токен бота: ${N}")" token
+  read -rp "$(echo -e "${C}  Твой Telegram ID (@userinfobot; несколько — через запятую): ${N}")" ids
+  [[ "$token" =~ ^[0-9]+:[A-Za-z0-9_-]{30,}$ ]] || { err "Токен не похож на токен бота"; exit 1; }
+  [[ "$ids" =~ ^[0-9]+([,[:space:]]+[0-9]+)*$ ]] || { err "ID — числа через запятую"; exit 1; }
+  sed -i '/^BOT_TOKEN=/d;/^ADMIN_ID=/d' "$CONF"
+  printf 'BOT_TOKEN=%s\nADMIN_ID=%s\n' "$token" "${ids// /}" >> "$CONF"
+  ok "Конфиг: $CONF"
+fi
+# Ключи прежнего скрипта управления awg-bot: источник обновлений теперь — awg2
 sed -i '/^LOCAL_SRC=/d;/^REPO_URL=/d;/^UPDATE_CHANNEL=/d' "$CONF"
-if [[ -n "$LOCAL_SRC" ]]; then
-  echo "LOCAL_SRC=${SRC}" >> "$CONF"
-  ok "Обновления будут браться из ${SRC}"
-  info "Переключить на GitHub: awg-bot src --github"
-else
-  # Запоминаем репозиторий: `awg-bot update` и проверка версий в боте должны
-  # смотреть туда же, откуда бот приехал, а не в зашитый по умолчанию.
-  echo "REPO_URL=${REPO_URL}" >> "$CONF"
-  info "Обновления будут браться с GitHub (${REPO_URL})"
-fi
+rm -f /usr/local/bin/awg-bot /usr/local/bin/awg-bot.py
+mkdir -p "$STATE"; chmod 700 "$STATE"
 
-# 5. management-скрипт awg-bot
-if [[ -f "$SRC/awg-bot" ]]; then
-  cp "$SRC/awg-bot" /usr/local/bin/awg-bot
-  chmod +x /usr/local/bin/awg-bot
-  ok "Установлен awg-bot (управление: sudo awg-bot)"
-fi
-
-# 6. каталог состояния мониторинга
-mkdir -p /var/lib/awg-bot
-
-# 7. systemd-сервис (имя awg-bot — совпадает с тем, что ждёт awg2)
-cat > /etc/systemd/system/awg-bot.service << EOF
+cat > "$UNIT" <<EOF
 [Unit]
-Description=awgToolza Bot
+Description=AWG Toolza — Telegram-бот
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=${DEST}
-ExecStart=${DEST}/venv/bin/python ${DEST}/run.py
+WorkingDirectory=$DEST
+ExecStart=$DEST/venv/bin/python $DEST/run.py
+Environment=AWG_BOT_CONF=$CONF AWG2_BIN=$AWG2 PYTHONUNBUFFERED=1
 Restart=on-failure
 RestartSec=5
-Environment=AWG_BOT_CONF=${CONF}
 
 [Install]
 WantedBy=multi-user.target
@@ -190,24 +120,15 @@ EOF
 systemctl daemon-reload
 systemctl enable awg-bot >/dev/null 2>&1 || true
 
-# 8. маркер для awg2 (пункт 6 проверяет наличие /usr/local/bin/awg-bot.py)
-cat > "$MARKER" << EOF
-#!/usr/bin/env python3
-# Маркер установки бота awgToolza для awg2 (пункт 6).
-# Реальный код бота — в ${DEST}, запускается systemd-сервисом awg-bot.
-# Запуск вручную: systemctl start awg-bot  (или sudo awg-bot)
-import os, sys
-os.execv("${DEST}/venv/bin/python", ["${DEST}/venv/bin/python", "${DEST}/run.py"])
-EOF
-chmod +x "$MARKER"
+if ! "$AWG2" api version 2>/dev/null | grep -q '"ok": true'; then
+  warn "Установленный awg2 не отвечает на «awg2 api» — обнови AWG Toolza, иначе бот не сможет управлять сервером"
+fi
 
-# 9. старт
 systemctl restart awg-bot
-sleep 2
+sleep 3
 if systemctl is-active --quiet awg-bot; then
-  ok "Бот запущен"
-  echo -e "${G}━━━ Готово! Открой бота в Telegram и нажми /start ━━━${N}"
+  ok "Бот запущен — открой его в Telegram и нажми /start"
 else
-  err "Сервис не запустился. Логи: journalctl -u awg-bot -n 30"
+  err "Бот не запустился: journalctl -u awg-bot -n 30"
   exit 1
 fi

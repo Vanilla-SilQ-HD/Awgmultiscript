@@ -31,7 +31,7 @@ update_check_async() {
   ts=$(awk '{print $2 + 0; exit}' "$UPDATE_CACHE" 2>/dev/null || echo 0)
   (( now - ${ts:-0} < UPDATE_CHECK_TTL )) && return 0
   mkdir -p "$STATE_DIR"
-  update_peek </dev/null &>/dev/null &
+  update_peek </dev/null &>/dev/null 3>&- 4>&- 8>&- &
   disown 2>/dev/null || true
 }
 

@@ -159,7 +159,9 @@ upstream_refresh_async() {
   ts=$(sed -n 's/^ts=//p' "$UPSTREAM_CACHE" 2>/dev/null || echo 0)
   [[ "$ts" =~ ^[0-9]+$ ]] || ts=0
   (( $(date +%s) - ts < UPSTREAM_TTL )) && return 0
-  ( upstream_refresh ) >/dev/null 2>&1 &
+  # Дескрипторы 3/4/8 открыты у awg2 api: фоновый процесс не должен держать
+  # пайп ответа — иначе вызывающий ждал бы его до конца проверки
+  ( upstream_refresh ) </dev/null >/dev/null 2>&1 3>&- 4>&- 8>&- &
   disown 2>/dev/null || true
 }
 
