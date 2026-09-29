@@ -983,6 +983,33 @@ def cmd_api_jobs(jobs_dir, *active_ids):
     print(json.dumps(rows, ensure_ascii=False))
 
 
+def cmd_tg_targets(conf, admins_json):
+    """Кому слать уведомления от таймеров: токен, прокси бота и ID
+    владельцев (ADMIN_ID, у старых ботов ADMIN_CHAT_ID) и приглашённых
+    админов — построчно. Пустой вывод — бот не настроен."""
+    vals = {}
+    try:
+        for line in read(conf).splitlines():
+            k, sep, v = line.strip().partition("=")
+            if sep and not k.startswith("#"):
+                vals[k.strip().upper()] = v.strip().strip("\"'")
+    except OSError:
+        return
+    ids = []
+    for part in re.split(r"[,;\s]+", vals.get("ADMIN_ID") or vals.get("ADMIN_CHAT_ID", "")):
+        if part.isdigit() and part not in ids:
+            ids.append(part)
+    try:
+        for k in (json.loads(read(admins_json)).get("admins") or {}):
+            if str(k).isdigit() and str(k) not in ids:
+                ids.append(str(k))
+    except (OSError, ValueError, AttributeError):
+        pass
+    token = vals.get("BOT_TOKEN", "")
+    if token and ids:
+        print("\n".join([token, vals.get("BOT_PROXY", "")] + ids))
+
+
 def cmd_api_envelope(rc, data_file, log_file):
     try:
         raw = read(data_file).strip()
@@ -1051,6 +1078,7 @@ COMMANDS = {
     "json-kv": cmd_json_kv, "json-rows": cmd_json_rows, "json-list": cmd_json_list,
     "clients-json": cmd_clients_json, "api-envelope": cmd_api_envelope,
     "api-job-status": cmd_api_job_status, "api-jobs": cmd_api_jobs,
+    "tg-targets": cmd_tg_targets,
 }
 
 if __name__ == "__main__":

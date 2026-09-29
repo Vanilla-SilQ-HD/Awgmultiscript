@@ -4,19 +4,26 @@
 # ставит и Telegram-бот, поэтому таймер нужен независимо от того, кто
 # назначил срок.
 
+# Уведомление владельцам и админам бота — напрямую в Telegram, через прокси
+# бота: таймер работает и тогда, когда сам бот остановлен.
 _expire_notify() {
-  local token chat
+  local token="" proxy="" id ids=() via=()
   [[ -f "$BOT_CONF" ]] || return 0
-  token=$(sed -n 's/^BOT_TOKEN=//p' "$BOT_CONF" | tr -d '"' | head -1)
-  chat=$(sed -n 's/^ADMIN_CHAT_ID=//p' "$BOT_CONF" | tr -d '"' | head -1)
-  [[ -n "$token" && -n "$chat" ]] || return 0
-  # Токен не попадает в argv (его видно в списке процессов) — curl читает конфиг со stdin
-  curl -sf --max-time 5 --config - >/dev/null 2>&1 <<EOF || true
+  { read -r token; read -r proxy; mapfile -t ids; } < <(py tg-targets "$BOT_CONF" "$BOT_ADMINS" 2>/dev/null)
+  [[ -n "$token" ]] && (( ${#ids[@]} )) || return 0
+  case "$proxy" in
+    iface://*) via=(--interface "${proxy#iface://}") ;;
+    ?*) via=(--proxy "$proxy") ;;
+  esac
+  for id in "${ids[@]}"; do
+    # Токен не попадает в argv (его видно в списке процессов) — curl читает конфиг со stdin
+    curl -sf --max-time 8 ${via[@]+"${via[@]}"} --config - >/dev/null 2>&1 <<EOF || true
 url = "https://api.telegram.org/bot${token}/sendMessage"
-data = "chat_id=${chat}"
+data = "chat_id=${id}"
 data = "parse_mode=HTML"
 data-urlencode = "text=$1"
 EOF
+  done
 }
 
 # Точка входа таймера (awg2-expire-check).
@@ -44,7 +51,7 @@ expire_check_run() {
 expire_install() {
   mkdir -p "$EXPIRE_STATE_DIR"
   emit_script "$EXPIRE_BIN" 'expire_check_run' \
-    SERVER_CONF AWG_IF EXPIRE_SUSPEND_IP EXPIRE_STATE_DIR EXPIRE_LOG BOT_CONF _PY_HELPER \
+    SERVER_CONF AWG_IF EXPIRE_SUSPEND_IP EXPIRE_STATE_DIR EXPIRE_LOG BOT_CONF BOT_ADMINS _PY_HELPER \
     py _expire_notify expire_check_run || return 1
   write_file "$EXPIRE_SERVICE" 644 <<EOF
 [Unit]

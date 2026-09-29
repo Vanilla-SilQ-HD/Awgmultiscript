@@ -152,6 +152,7 @@ WGOBF_MTU=1380
 
 # ── Telegram-бот ──────────────────────────────────────────
 BOT_CONF="/etc/awg-bot.conf"
+BOT_ADMINS="/var/lib/awg-bot/admins.json"   # приглашённые админы (ведёт бот)
 BOT_DIR="/opt/awg-bot"
 BOT_UNIT="awg-bot.service"
 BOT_PROXY_SCHEMES="http https socks4 socks5 socks5h iface"

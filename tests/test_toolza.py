@@ -118,6 +118,7 @@ done
 CASCADE_DIR="{ROOT}/etc/awg-cascade"; CASCADE_RULES="$CASCADE_DIR/rules.conf"; CASCADE_LOG="{ROOT}/cascade.log"
 WGOBF_DIR="{ROOT}/etc/awg-wgobf"; WGOBF_STATE="$WGOBF_DIR/state"
 EXPIRE_STATE_DIR="{ROOT}/var/lib/awg2-expire"; EXPIRE_LOG="{ROOT}/expire.log"; BOT_CONF="{ROOT}/bot.conf"
+BOT_ADMINS="{ROOT}/admins.json"
 WARP_PEERS="{ROOT}/warp.peers"; XRAY_PEERS="{ROOT}/xray.peers"; USQUE_LOG="{ROOT}/usque.log"
 write_unit() {{ mkdir -p "{ROOT}/units"; cat > "{ROOT}/units/$1"; }}
 remove_unit() {{ :; }}
@@ -278,6 +279,14 @@ rc, out, _ = bash('printf "Jc = 7\\nS1 = 33\\nH1 = 1\\nHeaderProtectionKey = NEW
 p = kv(out)
 chk("замена параметров", p.get("Jc") == "7" and p.get("S1") == "33" and p.get("HeaderProtectionKey") == "NEW="
     and "S2" not in p and p.get("PrivateKey") == "sPRIV=" and p.get("Address") == "10.23.45.1/24", out)
+
+with open(os.path.join(ROOT, "bot.conf"), "w") as f:
+    f.write('BOT_TOKEN="1:AA"\nADMIN_ID=11, 22\nBOT_PROXY=socks5://127.0.0.1:1080\n')
+with open(os.path.join(ROOT, "admins.json"), "w") as f:
+    json.dump({"version": 1, "admins": {"33": {}, "22": {}}, "invites": {}}, f)
+rc, out, _ = bash('py tg-targets "$BOT_CONF" "$BOT_ADMINS"')
+chk("уведомления: владельцы, приглашённые, прокси", out.split("\n")[:5] == ["1:AA", "socks5://127.0.0.1:1080", "11", "22", "33"], out)
+os.remove(os.path.join(ROOT, "bot.conf"))
 
 EXIT = os.path.join(TMP, "exit.conf")
 with open(EXIT, "w") as f:
