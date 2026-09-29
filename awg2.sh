@@ -202,10 +202,13 @@ run_step() {
 _TMP_PATHS=()
 
 # mktmp VAR [-d] — временный файл/каталог, удаляется при выходе.
-mktmp() {
+mktmp() {  # ПЕРЕМЕННАЯ [-d | .расширение]
   local __var="$1" __p
-  if [[ "${2:-}" == -d ]]; then __p=$(mktemp -d /tmp/awg2.XXXXXX) || return 1
-  else __p=$(mktemp /tmp/awg2.XXXXXX) || return 1; fi
+  case "${2:-}" in
+    -d) __p=$(mktemp -d /tmp/awg2.XXXXXX) ;;
+    .*) __p=$(mktemp --suffix="$2" /tmp/awg2.XXXXXX) ;;
+    *)  __p=$(mktemp /tmp/awg2.XXXXXX) ;;
+  esac || return 1
   _TMP_PATHS+=("$__p")
   printf -v "$__var" '%s' "$__p"
 }
@@ -4944,6 +4947,8 @@ _xray_asset() {
 }
 
 # Текст ошибки Xray по конфигу. 0 — принят.
+# Формат конфига Xray берёт из расширения: без «.json» любой файл он
+# отвергает («Failed to get format») — пробы создаются через mktmp … .json.
 xray_test() {
   local out
   out=$("$XRAY_BIN" run -test -c "${1:-$XRAY_CONF}" 2>&1) && return 0
@@ -4958,7 +4963,7 @@ xray_tun_supported() {
   local probe
   if [[ -z "$_XRAY_TUN" ]]; then
     _XRAY_TUN=0
-    mktmp probe || return 1
+    mktmp probe .json || return 1
     py xray-tun-probe "$probe" && xray_test "$probe" >/dev/null && _XRAY_TUN=1
   fi
   [[ "$_XRAY_TUN" == 1 ]]
@@ -5027,12 +5032,12 @@ xray_add_link() {  # ссылка
   tag=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["tag"])' "$ob")
   # Проверяем outbound на самом бинаре до записи: неподдерживаемый протокол
   # (hysteria2 в апстримном Xray) иначе ломает весь конфиг.
-  mktmp probe || return 1
+  mktmp probe .json || return 1
   py xray-probe "$probe" <<< "$ob"
   if ! why=$(xray_test "$probe"); then
     err "Этот Xray не принимает такой выход:"
     sed 's/^/      /' <<< "$why"
-    info "hysteria2 есть не во всех сборках Xray — используй vless/vmess"
+    [[ "$link" =~ ^(hysteria2|hy2):// ]] && info "hysteria2 есть не во всех сборках Xray — используй vless/vmess"
     return 1
   fi
   py xray-add "$XRAY_CONF" <<< "$ob" 2>/dev/null || rc=$?
@@ -5358,7 +5363,7 @@ xray_status() {
 # Выходы, которых эта сборка Xray не принимает (по тегу в строке).
 xray_bad_outbounds() {
   local t probe
-  mktmp probe || return 1
+  mktmp probe .json || return 1
   while IFS= read -r t; do
     py xray-probe-tag "$XRAY_CONF" "$t" "$probe" && ! xray_test "$probe" >/dev/null && echo "$t"
   done < <(xray_tags)

@@ -192,10 +192,13 @@ run_step() {
 _TMP_PATHS=()
 
 # mktmp VAR [-d] — временный файл/каталог, удаляется при выходе.
-mktmp() {
+mktmp() {  # ПЕРЕМЕННАЯ [-d | .расширение]
   local __var="$1" __p
-  if [[ "${2:-}" == -d ]]; then __p=$(mktemp -d /tmp/awg2.XXXXXX) || return 1
-  else __p=$(mktemp /tmp/awg2.XXXXXX) || return 1; fi
+  case "${2:-}" in
+    -d) __p=$(mktemp -d /tmp/awg2.XXXXXX) ;;
+    .*) __p=$(mktemp --suffix="$2" /tmp/awg2.XXXXXX) ;;
+    *)  __p=$(mktemp /tmp/awg2.XXXXXX) ;;
+  esac || return 1
   _TMP_PATHS+=("$__p")
   printf -v "$__var" '%s' "$__p"
 }

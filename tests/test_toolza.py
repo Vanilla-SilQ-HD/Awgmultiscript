@@ -167,6 +167,35 @@ chk("Xray: удаление выхода чинит балансировщик",
     and any(i.get("protocol") == "tun" for i in xc["inbounds"])
     and all(r.get("outboundTag") != "proxy_two_example_com" for r in xc["routing"]["rules"]), out[:300])
 
+# ── Xray: пробы на бинаре ─────────────────────────────────
+# Заглушка ведёт себя как Xray 26.x: формат конфига — по расширению, без
+# «.json» отказ; hysteria2 не знает, inbound tun умеет.
+XRAY_STUB = os.path.join(TMP, "xray-stub")
+with open(XRAY_STUB, "w") as f:
+    f.write(r"""#!/usr/bin/env bash
+[[ "$1" == version ]] && { echo "Xray 26.3.27 (Xray, Penetrates Everything.)"; exit 0; }
+f=""; while (( $# )); do [[ "$1" == -c ]] && { f="$2"; shift; }; shift; done
+[[ "$f" == *.json ]] || { echo "Failed to start: main: failed to load config files: [$f] > core: Failed to get format of $f"; exit 23; }
+python3 -c 'import json, sys
+c = json.load(open(sys.argv[1]))
+sys.exit(1 if any(o.get("protocol") == "hysteria2" for o in c.get("outbounds", [])) else 0)' "$f" \
+  || { echo "infra/conf: unknown config id: hysteria2"; exit 23; }
+""")
+os.chmod(XRAY_STUB, 0o755)
+XRAY_ENV = (f'XRAY_BIN="{XRAY_STUB}"; XRAY_DIR="{ROOT}/etc/xray"; XRAY_CONF="$XRAY_DIR/config.json"; '
+            'mkdir -p "$XRAY_DIR"; [[ -f "$XRAY_CONF" ]] || py xray-default "$XRAY_CONF"; ')
+VLESS_TCP = ("vless://0378c8eb-6544-478e-837d-c3599ef8e73d@dash.example.site:8443?alpn=h2%2Chttp%2F1.1"
+             "&encryption=none&flow=xtls-rprx-vision&fp=chrome&security=tls&sni=dash.example.site&type=tcp#NL_Vless")
+rc, out, _ = bash(XRAY_ENV + f"xray_add_link '{VLESS_TCP}' && xray_tags")
+chk("Xray: vless-ссылка добавляется (проба в .json)", rc == 0 and "proxy_dash_example_site" in out, out)
+rc, out, _ = bash(XRAY_ENV + "xray_tun_supported && echo tun-yes; xray_bad_outbounds | sed 's/^/BAD:/'")
+chk("Xray: inbound tun определяется, годный выход не считается плохим", "tun-yes" in out and "BAD:" not in out, out)
+rc, out, _ = bash(XRAY_ENV + "xray_add_link 'hysteria2://secret@h2.example.site:443?sni=h2.example.site#H2'")
+chk("Xray: неподдерживаемый hysteria2 отклонён с подсказкой", rc != 0 and "hysteria2 есть не во всех" in out, out)
+rc, out, _ = bash(XRAY_ENV + "xray_add_link 'vless://11111111-2222-3333-4444-555555555555@x.example.site:443?security=tls&type=tcp#dup'"
+                  " >/dev/null; xray_add_link 'vless://11111111-2222-3333-4444-555555555555@x.example.site:443?security=tls&type=tcp#dup'")
+chk("Xray: подсказка про hysteria2 только для hysteria2", "hysteria2 есть не во всех" not in out, out)
+
 # ── 4. Служебные скрипты ──────────────────────────────────
 print("Служебные скрипты")
 with open(conf, "w") as f:
