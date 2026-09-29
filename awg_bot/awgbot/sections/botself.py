@@ -101,12 +101,7 @@ async def _penter(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 @ask.on("bot_proxy")
 async def _proxy_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
-    url = ask.text_of(msg).replace(" ", "")
-    try:
-        await msg.delete()                  # в адресе может быть пароль
-    except Exception:                       # noqa: BLE001
-        pass
-    await _apply_proxy(msg, state, url)
+    await _apply_proxy(msg, state, ask.text_of(msg).replace(" ", ""))
 
 
 async def _apply_proxy(target: ui.Target, state: FSMContext, url: str, force: bool = False) -> None:

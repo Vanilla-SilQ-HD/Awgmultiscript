@@ -297,14 +297,11 @@ async def _proto_go(cb: CallbackQuery, state: FSMContext, target: str) -> None:
                      ("✅ Да, перегенерировать", act.data("protook", target)), act.data("proto"))
 
 
-async def _after_proto(bot: Bot, chat_id: int, st: dict) -> None:
-    await bot.send_message(chat_id, "Раздай клиентам новые конфиги — архивом или по одному из карточек.",
-                           reply_markup=ui.kb(("📦 Все конфиги архивом", "cl:export"), ("👥 Клиенты", "cl")))
-
-
 @act("protook")
 async def _proto_ok(cb: CallbackQuery, state: FSMContext, target: str) -> None:
-    await jobs.start(cb, f"Переход на AWG {target}", "server", "proto", target, back_to="srv", done=_after_proto)
+    # Всем клиентам нужны новые конфиги — кнопки к ним прямо в итоге
+    await jobs.start(cb, f"Переход на AWG {target}", "server", "proto", target, back_to="srv",
+                     ok_buttons=[("📦 Новые конфиги архивом", "cl:export"), ("👥 Клиенты", "cl")])
 
 
 # ── Endpoint ──────────────────────────────────────────────

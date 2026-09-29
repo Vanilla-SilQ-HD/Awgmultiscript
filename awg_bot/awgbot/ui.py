@@ -1,18 +1,19 @@
 """ui.py — экраны бота: клавиатуры в одну колонку, форматирование, отрисовка.
 
 Каждый экран — текст и кнопки, по одной в строке, как пункты меню awg2.
-Нажатие кнопки перерисовывает то же сообщение; ответ на ввод текста
-приходит новым сообщением.
+В чате одно сообщение-экран: нажатие правит его, ответ на ввод текста
+заменяет его новым внизу.
 """
 
 from __future__ import annotations
 
+import contextlib
 import html
 import logging
 import time
 from typing import Awaitable, Callable, Iterable, Union
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -127,25 +128,66 @@ def fail(r: api.Result, title: str = "") -> str:
 
 
 # ── Отрисовка ─────────────────────────────────────────────
+# В чате живёт одно сообщение-экран с кнопками. Нажатие правит его, ответ
+# текстом заменяет его новым внизу — старые экраны и промежуточные «⏳»
+# не копятся. Отдельными сообщениями остаются только файлы (конфиги, QR,
+# бэкапы) и уведомления. Сообщение, где идёт задача, не удаляется, пока
+# она не закончится: в него пишется журнал.
+_screen: dict[int, int] = {}            # чат → id сообщения-экрана
+busy: set[tuple[int, int]] = set()      # (чат, сообщение) с идущей задачей
+
+
+async def _drop_screen(bot: Bot, chat_id: int, keep: int = 0) -> None:
+    mid = _screen.pop(chat_id, 0)
+    if not mid or mid == keep or (chat_id, mid) in busy:
+        return
+    try:
+        await bot.delete_message(chat_id, mid)
+    except TelegramBadRequest:
+        # Старше 48 часов удалить нельзя — хотя бы снимаем кнопки
+        with contextlib.suppress(TelegramBadRequest):
+            await bot.edit_message_reply_markup(chat_id=chat_id, message_id=mid, reply_markup=None)
+
+
+def set_screen(chat_id: int, msg_id: int) -> None:
+    _screen[chat_id] = msg_id
+
+
+def is_screen(chat_id: int, msg_id: int) -> bool:
+    return _screen.get(chat_id) == msg_id
+
+
+async def show_new(bot: Bot, chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> Message:
+    """Новый экран внизу чата; прежний удаляется."""
+    await _drop_screen(bot, chat_id)
+    msg = await bot.send_message(chat_id, text[:TEXT_MAX], reply_markup=markup, disable_web_page_preview=True)
+    _screen[chat_id] = msg.message_id
+    return msg
+
+
 async def render(target: Target, text: str, markup: InlineKeyboardMarkup | None = None) -> Message | None:
-    """Кнопка — правим её сообщение; сообщение — отвечаем новым."""
+    """Кнопка — правим её сообщение; ответ текстом — новый экран внизу."""
     text = text[:TEXT_MAX]
     if isinstance(target, CallbackQuery):
         msg = target.message
-        try:
+        with contextlib.suppress(TelegramBadRequest):   # колбэк старше 15 минут
             await target.answer()
-        except TelegramBadRequest:
-            pass                                    # колбэк старше 15 минут
-        if isinstance(msg, Message):
-            try:
-                return await msg.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
-            except TelegramBadRequest as e:
-                if "not modified" in str(e):
-                    return msg
-                log.debug("edit_text: %s — шлю новым сообщением", e)
-            return await msg.answer(text, reply_markup=markup, disable_web_page_preview=True)
+        if not isinstance(msg, Message) or target.bot is None:
+            return None
+        chat_id = msg.chat.id
+        try:
+            out = await msg.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+        except TelegramBadRequest as e:
+            if "not modified" not in str(e):
+                log.debug("edit_text: %s — новый экран", e)
+                return await show_new(target.bot, chat_id, text, markup)
+            out = msg
+        await _drop_screen(target.bot, chat_id, keep=msg.message_id)
+        _screen[chat_id] = msg.message_id
+        return out if isinstance(out, Message) else msg
+    if target.bot is None:
         return None
-    return await target.answer(text, reply_markup=markup, disable_web_page_preview=True)
+    return await show_new(target.bot, target.chat.id, text, markup)
 
 
 def chat_of(target: Target) -> Message:

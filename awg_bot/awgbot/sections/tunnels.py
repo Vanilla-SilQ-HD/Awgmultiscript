@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, Message
 
 from .. import api, ask, jobs, ui
 from ..ui import esc
+from . import clients
 
 router = Router()
 tun = ui.Actions(router, "tun")
@@ -501,12 +502,44 @@ async def _ex_bal_set(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 @ex("cl")
 async def _ex_clients(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     rows = await api.data("clients", "list", default=[]) or []
-    label = {"off": "напрямую", "shared": "общий выход", None: "общий выход"}
+    d = await api.data("exits", "status", default={}) or {}
+    route = {"kind": "exits", "mode": d.get("mode") or "all"}
+    label = {"off": "напрямую", "shared": "общий выход"}
     page = int(arg) if arg.isdigit() else 0
-    await ui.render(cb, "<b>👥 Клиенты и exit-ноды</b>\nВыбор ноды переводит маршруты в режим «выбранные клиенты».",
-                    ui.kb(ui.paged([(f"{c['name']} · {label.get(c.get('exit'), 'нода ' + str(c.get('exit')))}",
-                                     f"cl:tun:{c['name']}") for c in rows], page, lambda p: ex.data("cl", str(p))),
-                          ui.back("ex")))
+    text = "<b>👥 Клиенты и exit-ноды</b>\n"
+    text += ("Нажми клиента, чтобы выбрать его выход." if d.get("up")
+             else "Маршруты выключены — выбор вступит в силу, когда их включишь.")
+    await ui.render(cb, text, ui.kb(
+        ui.paged([(f"{c['name']} · {label.get(clients.exit_of(c, route), 'нода ' + clients.exit_of(c, route))}",
+                   ex.data("pick", c["name"])) for c in rows], page, lambda p: ex.data("cl", str(p))),
+        ui.back("ex")))
+
+
+@ex("pick")
+async def _ex_pick(cb: CallbackQuery, state: FSMContext, name: str) -> None:
+    d = await api.data("exits", "status", default={}) or {}
+    c = await clients.client(name)
+    if c is None:
+        await _ex_clients(cb, state, "")
+        return
+    route = {"kind": "exits", "mode": d.get("mode") or "all"}
+    cur = clients.exit_of(c, route)
+    opts = [("Напрямую", "off"), ("Общий выход", "shared")] + [(f"Нода {n['name']}", n["name"]) for n in d.get("nodes") or []]
+    await ui.render(cb, f"<b>🚪 Выход: {esc(name)}</b>"
+                        + ("\nВыбор переводит маршруты в режим «выбранные клиенты»: остальные остаются на "
+                           "общем выходе." if route["mode"] != "peers" else ""),
+                    ui.kb([(f"{'🔘' if cur == v else '⚪️'} {label}", ex.data("set", f"{name}|{v}")) for label, v in opts],
+                          ui.back(ex.data("cl"))))
+
+
+@ex("set")
+async def _ex_set(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    name, _, value = arg.partition("|")
+    r = await api.call("exits", "client", name, value)
+    if not r.ok:
+        await ui.render(cb, ui.fail(r, "Выход клиента"), ui.kb(ui.back(ex.data("cl"))))
+        return
+    await _ex_pick(cb, state, name)
 
 
 # ── Каскад портов ─────────────────────────────────────────

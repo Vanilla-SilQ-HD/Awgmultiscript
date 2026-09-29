@@ -50,22 +50,24 @@ def seen(c: dict) -> str:
 
 
 # ── Отправка конфига ──────────────────────────────────────
-async def send_config(bot: Bot, chat_id: int, name: str) -> None:
-    """Файл конфига и QR — для импорта в AmneziaVPN / AmneziaWG."""
+async def send_config(bot: Bot, chat_id: int, name: str) -> bool:
+    """Файл конфига и QR — для импорта в AmneziaVPN / AmneziaWG. Ошибка
+    становится экраном; False — файлов нет."""
     r = await api.call("client", "conf", name)
     if not r.ok or not isinstance(r.data, dict):
-        await bot.send_message(chat_id, ui.fail(r, f"Конфиг {name}"))
-        return
+        await ui.show_new(bot, chat_id, ui.fail(r, f"Конфиг {name}"), ui.kb(ui.back("cl")))
+        return False
     text, path = r.data.get("text") or "", r.data.get("file") or f"{name}.conf"
-    await bot.send_document(chat_id, BufferedInputFile(text.encode(), filename=os.path.basename(path)),
-                            caption=f"📄 <b>{esc(name)}</b> — импорт в AmneziaVPN / AmneziaWG")
     png = media.qr_png(text)
+    caption = f"📄 <b>{esc(name)}</b> — импорт в AmneziaVPN / AmneziaWG"
+    if not png:
+        caption += f"\nℹ️ {len(text.encode())} байт — в читаемый QR не влезает, импортируй файлом"
+    await bot.send_document(chat_id, BufferedInputFile(text.encode(), filename=os.path.basename(path)),
+                            caption=caption)
     if png:
         await bot.send_photo(chat_id, BufferedInputFile(png, filename=f"{name}.png"),
                              caption=f"🔳 {esc(name)} — сканируй в AmneziaVPN")
-    else:
-        await bot.send_message(chat_id, f"ℹ️ Конфиг {len(text.encode())} байт — в читаемый QR не влезает, "
-                                        "импортируй файлом.")
+    return True
 
 
 # ── Список ────────────────────────────────────────────────
@@ -138,6 +140,7 @@ async def _export(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
         return
     await ui.chat_of(cb).answer_document(FSInputFile(r.data["file"]),
                                          caption="📦 Все конфиги клиентов")
+    await list_screen(ui.chat_of(cb))
 
 
 @act("purge")
@@ -157,15 +160,47 @@ async def _purge_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 
 # ── Карточка ──────────────────────────────────────────────
-def card_text(c: dict) -> str:
+# ── Маршрут ───────────────────────────────────────────────
+# Клиентов везёт не больше одного туннеля. Показываем только работающий:
+# списки выключенных туннелей хранятся, но на маршрут сейчас не влияют.
+TUNNEL_NAMES = {"warp": "WARP", "xray": "Xray", "tun2socks": "tun2socks", "exits": "exit-ноды"}
+
+
+async def active_route() -> dict:
+    """Работающий туннель: {"kind": warp|xray|tun2socks|exits|"", для exits —
+    mode (all|peers) и nodes}."""
+    t = await api.data("tunnels", "status", default={}) or {}
+    kind = next((k for k in ("warp", "xray", "tun2socks", "exits") if t.get(k) == "up"), "")
+    route = {"kind": kind}
+    if kind == "exits":
+        e = await api.data("exits", "status", default={}) or {}
+        route.update(mode=e.get("mode") or "all", nodes=[n["name"] for n in e.get("nodes") or []])
+    return route
+
+
+def exit_of(c: dict, route: dict) -> str:
+    """Выход клиента через exit-ноды: off | shared | имя ноды. В режиме
+    «все клиенты» все идут через общий выход, список не действует."""
+    if route.get("mode") != "peers" or c.get("exit") is None:
+        return "shared"
+    return c["exit"]
+
+
+def route_of(c: dict, route: dict) -> str:
+    kind = route.get("kind")
+    if not kind:
+        return "напрямую"
+    if kind in ("warp", "xray"):
+        on = c.get(kind) is not False
+        return f"через {TUNNEL_NAMES[kind]}" if on else f"напрямую ({TUNNEL_NAMES[kind]} — для других)"
+    if kind == "tun2socks":
+        return "через tun2socks"
+    ex = exit_of(c, route)
+    return {"off": "напрямую (exit-ноды — для других)", "shared": "exit-ноды, общий выход"}.get(ex, f"exit-нода {ex}")
+
+
+def card_text(c: dict, route: dict) -> str:
     name = c["name"]
-    tunnels = []
-    if c.get("warp") is not None:
-        tunnels.append(f"WARP {'✓' if c['warp'] else '—'}")
-    if c.get("xray") is not None:
-        tunnels.append(f"Xray {'✓' if c['xray'] else '—'}")
-    if c.get("exit") is not None:
-        tunnels.append("Exit " + {"off": "—", "shared": "общий"}.get(c["exit"], c["exit"]))
     note = store.strip_tag(store.note(name))
     return "\n".join(filter(None, [
         f"<b>👤 {esc(name)}</b>",
@@ -176,7 +211,7 @@ def card_text(c: dict) -> str:
         f"Адрес клиента: <code>{esc(c['endpoint'].rsplit(':', 1)[0])}</code>" if c.get("endpoint") else "",
         f"Срок: {ui.fmt_expire(c.get('expires'))}",
         f"Мимикрия: {esc(c.get('mimicry') or 'none')}",
-        f"Туннели: {' · '.join(tunnels)}" if tunnels else "",
+        f"Маршрут: {route_of(c, route)}",
         f"Заметка: {esc(note)}" if note else "",
         f"Мониторинг: {'🔔 вкл' if store.monitored(name) else '🔕 выкл'}",
     ]))
@@ -187,14 +222,14 @@ async def card(target: ui.Target, name: str) -> None:
     if c is None:
         await ui.render(target, f"Клиента <b>{esc(name)}</b> нет.", ui.kb(ui.back("cl")))
         return
-    tun = any(c.get(k) is not None for k in ("warp", "xray", "exit"))
+    route = await active_route()
     mon = store.monitored(name)
-    await ui.render(target, card_text(c), ui.kb(
+    await ui.render(target, card_text(c, route), ui.kb(
         ("📄 Конфиг и QR", act.data("conf", name)),
         ("✏️ Переименовать", act.data("ren", name)),
         ("⏳ Срок действия", act.data("exp", name)),
         ("🎭 Мимикрия", act.data("mim", name)),
-        ("🌐 Туннели", act.data("tun", name)) if tun else None,
+        ("🌐 Маршрут", act.data("tun", name)) if route["kind"] in ("warp", "xray", "exits") else None,
         ("📝 Заметка", act.data("note", name)),
         ("🔕 Выключить мониторинг" if mon else "🔔 Мониторинг активности", act.data("mon", name)),
         ("🗑 Удалить", act.data("del", name)),
@@ -209,7 +244,8 @@ async def _view(cb: CallbackQuery, state: FSMContext, name: str) -> None:
 @act("conf")
 async def _conf(cb: CallbackQuery, state: FSMContext, name: str) -> None:
     await cb.answer()
-    await send_config(cb.bot, ui.chat_of(cb).chat.id, name)  # type: ignore[arg-type]
+    if await send_config(cb.bot, ui.chat_of(cb).chat.id, name):  # type: ignore[arg-type]
+        await card(ui.chat_of(cb), name)            # карточка — под файлами
 
 
 @act("mon")
@@ -370,60 +406,55 @@ async def _mim_set(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     if not r.ok:
         await ui.render(cb, ui.fail(r, "Мимикрия"), ui.kb(ui.back(act.data("v", name))))
         return
-    await ui.render(cb, f"✅ Мимикрия <b>{esc(name)}</b> обновлена — клиенту нужен новый конфиг.",
-                    ui.kb(ui.back(act.data("v", name), "◀️ К клиенту")))
-    await send_config(cb.bot, ui.chat_of(cb).chat.id, name)  # type: ignore[arg-type]
+    if await send_config(cb.bot, ui.chat_of(cb).chat.id, name):  # type: ignore[arg-type]
+        await ui.render(ui.chat_of(cb), f"✅ Мимикрия <b>{esc(name)}</b> обновлена — выше новый конфиг, "
+                                        "старый больше не подключится.",
+                        ui.kb(ui.back(act.data("v", name), "◀️ К клиенту")))
 
 
-# ── Туннели клиента ───────────────────────────────────────
+# ── Маршрут клиента ───────────────────────────────────────
 @act("tun")
 async def _tun(cb: CallbackQuery, state: FSMContext, name: str) -> None:
     c = await client(name)
     if c is None:
         await card(cb, name)
         return
-    buttons: list[ui.Button] = []
-    if c.get("warp") is not None:
-        buttons.append((f"WARP: {'✅ через туннель' if c['warp'] else '➖ напрямую'}", act.data("tw", name)))
-    if c.get("xray") is not None:
-        buttons.append((f"Xray: {'✅ через туннель' if c['xray'] else '➖ напрямую'}", act.data("tx", name)))
-    if c.get("exit") is not None:
-        nodes = ((await api.data("exits", "status", default={})) or {}).get("nodes") or []
-        cur = c["exit"]
-        for label, v in [("напрямую", "off"), ("общий выход", "shared")] + [(f"нода {n['name']}", n["name"]) for n in nodes]:
-            buttons.append((f"Exit: {'🔘' if cur == v else '⚪️'} {label}", act.data("te", f"{name}|{v}")))
-    await ui.render(cb, f"<b>🌐 Туннели: {esc(name)}</b>\nНажатие переключает маршрут клиента.",
-                    ui.kb(buttons, ui.back(act.data("v", name))))
-
-
-async def _tunnel_toggle(cb: CallbackQuery, name: str, kind: str) -> None:
-    c = await client(name)
-    if c is None:
-        await card(cb, name)
+    route = await active_route()
+    kind = route["kind"]
+    back_to = act.data("v", name)
+    if kind not in ("warp", "xray", "exits"):
+        await ui.render(cb, f"<b>🌐 Маршрут: {esc(name)}</b>\n\n"
+                            + ("Все клиенты идут через tun2socks — выбора по клиентам у него нет."
+                               if kind == "tun2socks" else "Туннели выключены — все клиенты идут напрямую."),
+                        ui.kb(("🌐 Туннели и DNS", "tun"), ui.back(back_to)))
         return
-    r = await api.call("tunnels", "client", kind, name, "off" if c.get(kind) else "on")
+
+    def opt(label: str, value: str, cur: bool) -> ui.Button:
+        return (f"{'🔘' if cur else '⚪️'} {label}", act.data("rt", f"{kind}|{name}|{value}"))
+
+    if kind == "exits":
+        cur = exit_of(c, route)
+        buttons = [opt("Напрямую", "off", cur == "off"), opt("Общий выход", "shared", cur == "shared")]
+        buttons += [opt(f"Нода {n}", n, cur == n) for n in route.get("nodes") or []]
+        note = ("\nВыбор для одного клиента переводит маршруты в режим «выбранные клиенты»: "
+                "остальные остаются на общем выходе." if route.get("mode") != "peers" else "")
+    else:
+        on = c.get(kind) is not False
+        buttons = [opt(f"Через {TUNNEL_NAMES[kind]}", "on", on), opt("Напрямую", "off", not on)]
+        note = ""
+    await ui.render(cb, f"<b>🌐 Маршрут: {esc(name)}</b>\nРаботает туннель: {TUNNEL_NAMES[kind]}.{note}",
+                    ui.kb(buttons, ui.back(back_to)))
+
+
+@act("rt")
+async def _route_set(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    kind, name, value = (arg.split("|") + ["", "", ""])[:3]
+    if kind == "exits":
+        r = await api.call("exits", "client", name, value)
+    else:
+        r = await api.call("tunnels", "client", kind, name, value)
     if not r.ok:
-        await ui.render(cb, ui.fail(r, kind.upper()), ui.kb(ui.back(act.data("tun", name))))
-        return
-    await _tun(cb, None, name)  # type: ignore[arg-type]
-
-
-@act("tw")
-async def _tw(cb: CallbackQuery, state: FSMContext, name: str) -> None:
-    await _tunnel_toggle(cb, name, "warp")
-
-
-@act("tx")
-async def _tx(cb: CallbackQuery, state: FSMContext, name: str) -> None:
-    await _tunnel_toggle(cb, name, "xray")
-
-
-@act("te")
-async def _te(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    name, _, v = arg.partition("|")
-    r = await api.call("exits", "client", name, v)
-    if not r.ok:
-        await ui.render(cb, ui.fail(r, "Exit-ноды"), ui.kb(ui.back(act.data("tun", name))))
+        await ui.render(cb, ui.fail(r, "Маршрут"), ui.kb(ui.back(act.data("tun", name))))
         return
     await _tun(cb, state, name)
 
@@ -511,10 +542,10 @@ async def _create(target: ui.Target, state: FSMContext, spec: str) -> None:
     r = await api.call(*args)
     msg = ui.chat_of(target)
     if not r.ok:
-        await msg.answer(ui.fail(r, f"Клиент {name}"), reply_markup=ui.kb(ui.back("cl")))
+        await ui.render(msg, ui.fail(r, f"Клиент {name}"), ui.kb(ui.back("cl")))
         return
-    await send_config(msg.bot, msg.chat.id, name)  # type: ignore[arg-type]
-    await card(msg, name)
+    if await send_config(msg.bot, msg.chat.id, name):  # type: ignore[arg-type]
+        await card(msg, name)
 
 
 # ── Несколько клиентов ────────────────────────────────────
@@ -568,7 +599,7 @@ async def _bulk_create(target: ui.Target, state: FSMContext, expire: str) -> Non
     r = await api.call("clients", "bulk", spec, *([f"expire={expire}"] if expire else []), timeout=900)
     msg = ui.chat_of(target)
     if not r.ok:
-        await msg.answer(ui.fail(r, "Создание клиентов"), reply_markup=ui.kb(ui.back("cl")))
+        await ui.render(msg, ui.fail(r, "Создание клиентов"), ui.kb(ui.back("cl")))
         return
     names = set(r.data or [])
     files = [c["file"] for c in await clients() or [] if c["name"] in names]

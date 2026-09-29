@@ -1,11 +1,11 @@
 """jobs.py — долгие операции awg2 с живым журналом.
 
 Задача запускается в awg2 (awg2 api job start) и живёт в своём юните
-systemd, а бот лишь следит за ней: отдельным сообщением показывает
-последние строки журнала и в конце — итог. Незавершённые задачи пишутся в
-jobs.json: если бот перезапустили посреди задачи (или задача сама его
-обновляла), после старта он дочитает журнал и поставит итог в то же
-сообщение.
+systemd, а бот лишь следит за ней: в том же экране показывает последние
+строки журнала, в конце — итог с кнопкой «Назад». Незавершённые задачи
+пишутся в jobs.json: если бот перезапустили посреди задачи (или задача
+сама его обновляла), после старта он дочитает журнал и поставит итог в то
+же сообщение.
 """
 
 from __future__ import annotations
@@ -45,20 +45,24 @@ def _tail(text: str, n: int = LOG_LINES) -> str:
 
 
 async def start(target: ui.Target, title: str, *args: Any, stdin: str | bytes | None = None,
-                back_to: str = "main", done: Done | None = None) -> None:
-    """Запускает задачу и сразу возвращается; журнал обновляется в фоне."""
+                back_to: str = "main", done: Done | None = None,
+                ok_buttons: list[ui.Button] | None = None) -> None:
+    """Запускает задачу и сразу возвращается; журнал обновляется в фоне.
+    ok_buttons — кнопки итога при успехе (над «Назад»)."""
     r = await api.job_start(*args, stdin=stdin)
     if not r.ok or not isinstance(r.data, dict):
         await ui.render(target, ui.fail(r, title), ui.kb(ui.back(back_to)))
         return
     job_id = r.data["id"]
-    chat = ui.chat_of(target)
-    if isinstance(target, ui.CallbackQuery):
-        await target.answer("Запущено")
-    msg = await chat.answer(f"⏳ <b>{ui.esc(title)}</b>\n<i>запускаю…</i>")
+    msg = await ui.render(target, f"⏳ <b>{ui.esc(title)}</b>\n<i>запускаю…</i>")
+    if msg is None or msg.bot is None:
+        return
+    ui.busy.add((msg.chat.id, msg.message_id))
+    ok_buttons = [list(b) for b in ok_buttons or []]
     store.job_add(job_id, {"chat": msg.chat.id, "msg": msg.message_id, "title": title,
-                           "back": back_to, "started": int(time.time())})
-    _spawn(_follow(chat.bot, job_id, msg.chat.id, msg.message_id, title, back_to, done))
+                           "back": back_to, "started": int(time.time()), "ok_buttons": ok_buttons})
+    _spawn(_follow(msg.bot, job_id, msg.chat.id, msg.message_id, title, back_to, done,
+                   ok_buttons=ok_buttons))
 
 
 def resume(bot: Bot) -> int:
@@ -68,7 +72,7 @@ def resume(bot: Bot) -> int:
         try:
             _spawn(_follow(bot, job_id, int(info["chat"]), int(info["msg"]),
                            str(info.get("title") or "Задача"), str(info.get("back") or "main"), None,
-                           int(info.get("started") or time.time())))
+                           int(info.get("started") or time.time()), info.get("ok_buttons") or []))
         except (KeyError, TypeError, ValueError):
             store.job_done(job_id)
     return len(pending)
@@ -93,7 +97,7 @@ async def _edit(bot: Bot, chat_id: int, msg_id: int, text: str,
 
 
 async def _follow(bot: Bot, job_id: str, chat_id: int, msg_id: int, title: str, back_to: str,
-                  done: Done | None, started: int | None = None) -> None:
+                  done: Done | None, started: int | None = None, ok_buttons: list | None = None) -> None:
     started = started or int(time.time())
     offset, text, shown, last_edit, errors = 0, "", "", 0.0, 0
     head = f"<b>{ui.esc(title)}</b>"
@@ -105,6 +109,7 @@ async def _follow(bot: Bot, job_id: str, chat_id: int, msg_id: int, title: str, 
             if errors < 10:
                 continue
             store.job_done(job_id)
+            ui.busy.discard((chat_id, msg_id))
             await _edit(bot, chat_id, msg_id, ui.fail(r, title), ui.kb(ui.back(back_to)))
             return
         errors = 0
@@ -121,6 +126,7 @@ async def _follow(bot: Bot, job_id: str, chat_id: int, msg_id: int, title: str, 
             continue
 
         store.job_done(job_id)
+        ui.busy.discard((chat_id, msg_id))
         if st.get("state") == "lost":
             body = (f"⚠️ {head}\nЗадача прервана: awg2 остановлен или сервер перезагружен.\n"
                     + ui.pre(_tail(text, 15), 2500))
@@ -129,11 +135,16 @@ async def _follow(bot: Bot, job_id: str, chat_id: int, msg_id: int, title: str, 
         else:
             body = (f"❌ {head}\n{ui.esc(st.get('error') or 'ошибка')}\n"
                     + ui.pre(_tail(text, 20), 3000))
-        if not await _edit(bot, chat_id, msg_id, body, ui.kb(ui.back(back_to))):
-            await bot.send_message(chat_id, body[:ui.TEXT_MAX], reply_markup=ui.kb(ui.back(back_to)))
+        extra = [tuple(b) for b in ok_buttons or []] if st.get("ok") else []
+        markup = ui.kb(extra, ui.back(back_to))
+        if not await _edit(bot, chat_id, msg_id, body, markup):
+            await ui.show_new(bot, chat_id, body, markup)
         if done and st.get("ok"):
             try:
                 await done(bot, chat_id, st)
             except Exception:                                  # noqa: BLE001
                 log.exception("действие после задачи %s", job_id)
+            # Файлы легли под итог — сам итог с кнопкой переезжает вниз
+            if ui.is_screen(chat_id, msg_id):
+                await ui.show_new(bot, chat_id, body, markup)
         return

@@ -22,15 +22,18 @@ async def send_bundle(bot: Bot, chat_id: int, name: str) -> None:
     """Комплект клиента одним zip и ссылка для Keenetic (AWG Manager → Phobos)."""
     r = await api.call("wgobf", "bundle", name)
     if not r.ok or not isinstance(r.data, dict):
-        await bot.send_message(chat_id, ui.fail(r, f"Комплект {name}"))
+        await ui.show_new(bot, chat_id, ui.fail(r, f"Комплект {name}"), ui.kb(ui.back("wo")))
         return
     files = [f["path"] for f in r.data.get("files") or []]
-    await bot.send_document(chat_id, BufferedInputFile(media.zip_files(files), filename=f"wgobf-{name}.zip"),
-                            caption=f"🛡 <b>{esc(name)}</b>: wg.conf + obfuscator.conf, установщик для Linux, "
-                                    "инструкция (README.txt)")
+    caption = (f"🛡 <b>{esc(name)}</b>: wg.conf + obfuscator.conf, установщик для Linux, "
+               "инструкция (README.txt)")
     link = (r.data.get("phobos") or "").strip()
     if link:
-        await bot.send_message(chat_id, f"Keenetic, AWG Manager → «Phobos» (одной вставкой):\n<code>{esc(link)}</code>")
+        caption += f"\n\nKeenetic, AWG Manager → «Phobos» (одной вставкой):\n<code>{esc(link)}</code>"
+    if len(caption) > 1000:                          # предел подписи к файлу
+        caption = caption.split("\n\n")[0] + "\n\nСсылка phobos:// — в phobos-link.txt архива."
+    await bot.send_document(chat_id, BufferedInputFile(media.zip_files(files), filename=f"wgobf-{name}.zip"),
+                            caption=caption)
 
 
 @act()
@@ -173,7 +176,7 @@ async def _list(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 
 @act("v")
-async def _view(cb: CallbackQuery, state: FSMContext, name: str) -> None:
+async def _view(cb: ui.Target, state: FSMContext, name: str) -> None:
     await ui.render(cb, f"<b>🛡 {esc(name)}</b>",
                     ui.kb(("📦 Комплект клиента", act.data("bundle", name)),
                           ("🗑 Удалить клиента", act.data("del", name)),
@@ -184,6 +187,7 @@ async def _view(cb: CallbackQuery, state: FSMContext, name: str) -> None:
 async def _bundle(cb: CallbackQuery, state: FSMContext, name: str) -> None:
     await cb.answer("Отправляю…")
     await send_bundle(cb.bot, ui.chat_of(cb).chat.id, name)  # type: ignore[arg-type]
+    await _view(ui.chat_of(cb), state, name)            # экран — под файлом
 
 
 @act("del")

@@ -15,6 +15,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from aiogram.types import BotCommand, CallbackQuery, ErrorEvent, Message
 
@@ -31,6 +32,8 @@ fallback = Router()
 @fallback.message(F.text | F.document)
 async def _anything(msg: Message) -> None:
     """Сообщение вне ввода — показать меню: кнопки удобнее команд."""
+    with contextlib.suppress(TelegramBadRequest):
+        await msg.delete()
     await main_menu.show_menu(msg)
 
 

@@ -62,7 +62,11 @@ async def _view(cb: CallbackQuery, state: FSMContext, idx: str) -> None:
     if not path:
         await _list(cb, state, "")
         return
-    await ui.render(cb, f"<b>{esc(os.path.basename(path))}</b>",
+    await _view_screen(cb, path, idx)
+
+
+async def _view_screen(target: ui.Target, path: str, idx: str) -> None:
+    await ui.render(target, f"<b>{esc(os.path.basename(path))}</b>",
                     ui.kb(("📥 Скачать", act.data("get", idx)),
                           ("♻️ Восстановить", act.data("rs", idx)),
                           ui.back(act.data("list"))))
@@ -89,6 +93,7 @@ async def _get(cb: CallbackQuery, state: FSMContext, idx: str) -> None:
     data, name = _pack(path)
     await ui.chat_of(cb).answer_document(BufferedInputFile(data, filename=name),
                                          caption="💾 В бэкапе приватные ключи — храни как пароль")
+    await _view_screen(ui.chat_of(cb), path, idx)
 
 
 @act("rs")

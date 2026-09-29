@@ -118,14 +118,12 @@ async def _check(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await _render_update(cb, d, d.get("latest") if d.get("newer") else "", checked=True)
 
 
-async def _after_update(bot, chat_id: int, st: dict) -> None:
-    await bot.send_message(chat_id, "awg2 обновлён. Если бот отстаёт от новой версии, обнови и его.",
-                           reply_markup=ui.kb(("⬆️ Обновить бота", "botm:update"), ui.HOME))
+AFTER_UPDATE = [("⬆️ Обновить и бота", "botm:update")]
 
 
 @upd("go")
 async def _go(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    await jobs.start(cb, "Обновление awg2", "update", "install", back_to="upd", done=_after_update)
+    await jobs.start(cb, "Обновление awg2", "update", "install", back_to="upd", ok_buttons=AFTER_UPDATE)
 
 
 @upd("force")
@@ -136,7 +134,7 @@ async def _force(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 @upd("forceok")
 async def _force_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    await jobs.start(cb, "Переустановка awg2", "update", "install", "force", back_to="upd", done=_after_update)
+    await jobs.start(cb, "Переустановка awg2", "update", "install", "force", back_to="upd", ok_buttons=AFTER_UPDATE)
 
 
 @upd("ch")

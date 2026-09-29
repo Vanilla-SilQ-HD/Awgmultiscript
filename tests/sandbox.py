@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 
-__all__ = ["HERE", "AWG2", "chk", "summary", "TMP", "BIN", "CALLS", "LINKS", "IPT_SAVE", "ROOT", "LIB",
+__all__ = ["HERE", "AWG2", "chk", "summary", "TMP", "BIN", "CALLS", "LINKS", "ACTIVE", "IPT_SAVE", "ROOT", "LIB",
            "PRELUDE", "ENV", "bash", "run_script", "calls", "reset_calls", "kv", "OLD20", "api_wrapper",
            "json", "os", "re", "shutil", "subprocess", "sys"]
 
@@ -40,8 +40,10 @@ BIN = os.path.join(TMP, "bin")
 os.makedirs(BIN)
 CALLS = os.path.join(TMP, "calls.log")
 LINKS = os.path.join(TMP, "links")          # «поднятые» интерфейсы, по строке
+ACTIVE = os.path.join(TMP, "active")        # «работающие» юниты systemd, по строке
 IPT_SAVE = os.path.join(TMP, "iptables-save.txt")
 open(LINKS, "w").close()
+open(ACTIVE, "w").close()
 open(IPT_SAVE, "w").close()
 
 STUBS = {
@@ -59,7 +61,10 @@ exit 0''',
     "iptables-save": r'''cat "$IPT_SAVE"''',
     "ip6tables": r'''echo "ip6tables $*" >> "$CALLS"; exit 1''',
     "systemctl": r'''echo "systemctl $*" >> "$CALLS"
-[[ "$1" == is-active || "$1" == is-enabled ]] && exit 1
+if [[ "$1" == is-active || "$1" == is-enabled ]]; then
+  for a in "$@"; do grep -qxF -- "$a" "$ACTIVE" && exit 0; done
+  exit 1
+fi
 exit 0''',
     "sysctl": r'''echo "sysctl $*" >> "$CALLS"; exit 0''',
     "awg": r'''case "$1" in
@@ -116,7 +121,7 @@ remove_unit() {{ :; }}
 mkdir -p "$AWG_DIR" "$CLIENT_DIR" "$STATE_DIR" "{ROOT}/scripts"
 '''
 
-ENV = dict(os.environ, PATH=BIN + ":" + os.environ["PATH"], CALLS=CALLS, LINKS=LINKS,
+ENV = dict(os.environ, PATH=BIN + ":" + os.environ["PATH"], CALLS=CALLS, LINKS=LINKS, ACTIVE=ACTIVE,
            IPT_SAVE=IPT_SAVE, LC_ALL="C.UTF-8")
 
 

@@ -55,23 +55,45 @@ for n in ("alice", "bob"):
 
 
 class FakeSession(BaseSession):
-    """Bot API без сети: запоминает вызовы и отвечает правдоподобно."""
+    """Bot API без сети: запоминает вызовы, ведёт «чат» (какие сообщения
+    бота живы и с кнопками ли они) и отвечает правдоподобно."""
 
     def __init__(self):
         super().__init__()
         self.sent = []
-        self.ids = itertools.count(1000)
+        self.ids = itertools.count(100000)
+        self.chat = {}          # id сообщения бота → "screen" | "text" | "file"
+        self.deleted = set()
 
     async def make_request(self, bot, method, timeout=None):
         name = type(method).__name__
         self.sent.append((name, method))
         if name == "GetMe":
             return User(id=999, is_bot=True, first_name="Bot", username="testbot").as_(bot)
+        if name == "DeleteMessage":
+            self.deleted.add(method.message_id)
+            self.chat.pop(method.message_id, None)
+            return True
+        if name == "EditMessageReplyMarkup":
+            if method.message_id in self.chat and not method.reply_markup:
+                self.chat[method.message_id] = "text"
+            return True
         if name in ("SendMessage", "EditMessageText", "SendDocument", "SendPhoto"):
             mid = getattr(method, "message_id", None) or next(self.ids)
+            if method.chat_id == OWNER.id:
+                self.chat[mid] = ("file" if name in ("SendDocument", "SendPhoto")
+                                  else "screen" if method.reply_markup else "text")
             return Message(message_id=mid, date=datetime.datetime.now(), chat=Chat(id=method.chat_id, type="private"),
                            text=getattr(method, "text", None)).as_(bot)
         return True
+
+    def texts(self):
+        """Живые текстовые сообщения бота у владельца (без файлов)."""
+        return [m for m, kind in self.chat.items() if kind != "file"]
+
+    def screen_id(self):
+        screens = [m for m, kind in self.chat.items() if kind == "screen"]
+        return max(screens) if screens else 0
 
     async def stream_content(self, *args, **kwargs):
         raise NotImplementedError
@@ -93,16 +115,32 @@ def _msg(user, text):
                    from_user=user, text=text)
 
 
+LAST_SAID = [0]
+
+
 async def say(text, user=OWNER):
     mark = len(SESSION.sent)
-    await DP.feed_update(BOT, Update(update_id=next(seq), message=_msg(user, text)))
+    msg = _msg(user, text)
+    LAST_SAID[0] = msg.message_id
+    await DP.feed_update(BOT, Update(update_id=next(seq), message=msg))
     return SESSION.sent[mark:]
 
 
+def one_screen(label):
+    """В чате владельца ровно одно текстовое сообщение бота — экран."""
+    live = SESSION.texts()
+    chk(f"{label}: в чате один экран", len(live) == 1 and SESSION.chat[live[0]] == "screen",
+        {m: SESSION.chat[m] for m in live})
+
+
 async def press(data, user=OWNER):
+    """Нажатие кнопки на текущем экране (как в настоящем чате)."""
     mark = len(SESSION.sent)
-    cb = CallbackQuery(id=str(next(seq)), from_user=user, chat_instance="ci", data=data,
-                       message=_msg(user, "экран"))
+    msg = _msg(user, "экран")
+    if user is OWNER and SESSION.screen_id():
+        msg = Message(message_id=SESSION.screen_id(), date=datetime.datetime.now(),
+                      chat=Chat(id=user.id, type="private"), text="экран")
+    cb = CallbackQuery(id=str(next(seq)), from_user=user, chat_instance="ci", data=data, message=msg)
     await DP.feed_update(BOT, Update(update_id=next(seq), callback_query=cb))
     return SESSION.sent[mark:]
 
@@ -144,8 +182,11 @@ async def run():
     datas = [d for _, d in buttons]
     chk("девять пунктов меню в одну колонку",
         datas[:9] == ["srv", "cl", "diag", "bk", "tun", "botm", "del", "upd", "wo"], buttons)
+    one_screen("/start")
+    chk("команда /start удалена из чата", LAST_SAID[0] in SESSION.deleted)
     text, _ = screen(await say("что-нибудь"))
     chk("любой текст вне ввода — меню", "AWG Toolza" in text, text)
+    one_screen("текст вне ввода")
     chk("устаревшая кнопка", any("устарела" in a for a in alerts(await press("zzz:1"))))
 
     print("Клиенты")
@@ -167,9 +208,12 @@ async def run():
     chk("и QR", any(n == "SendPhoto" for n, _ in sent))
     text, _ = screen(sent)
     chk("карточка нового клиента со сроком", "carol" in text and "через" in text, text)
+    one_screen("добавление клиента")
+    chk("экран — под файлами конфига", SESSION.screen_id() == max(SESSION.chat), SESSION.chat)
 
     await press("cl:note:carol")
     await say("домашний роутер")
+    chk("ответ на вопрос удалён из чата", LAST_SAID[0] in SESSION.deleted)
     await press("cl:mon:carol")
     chk("заметка и мониторинг", store.note("carol") == "домашний роутер #ping" and store.monitored("carol"),
         store.notes())
@@ -223,6 +267,38 @@ async def run():
     chk("мастер каскада добавляет правило", "✅" in text, text)
     text, _ = screen(await press("cas"))
     chk("правило в списке", "UDP 5555 → 5.6.7.8:5555" in text, text)
+    one_screen("мастер каскада")
+
+    print("Маршрут клиента")
+    with open(LINKS, "a") as f:
+        f.write("warp0\n")
+    text, _ = screen(await press("cl:v:alice"))
+    chk("маршрут через работающий WARP", "Маршрут: через WARP" in text, text)
+    # WARP выключили, работают exit-ноды в режиме «все клиенты»
+    awg_dir = os.path.join(ROOT, "etc/amnezia/amneziawg")
+    with open(os.path.join(awg_dir, "awg-exit-n1.conf"), "w") as f:
+        f.write("[Interface]\nPrivateKey = X\nTable = off\n\n[Peer]\nEndpoint = 1.2.3.4:51820\n")
+    with open(os.path.join(awg_dir, "exits_state"), "w") as f:
+        f.write("active\nmode=all\nbalancer=single\nsingle_exit=n1\n")
+    with open(LINKS, "w") as f:
+        f.write("awg-exit-n1\n")
+    with open(ACTIVE, "w") as f:
+        f.write("awg-exits-routing.service\n")
+    text, _ = screen(await press("cl:v:alice"))
+    chk("WARP выключен — в карточке его нет, маршрут через exit-ноды",
+        "exit-ноды, общий выход" in text and "WARP" not in text, text)
+    text, buttons = screen(await press("cl:tun:alice"))
+    labels = [t for t, _ in buttons]
+    chk("экран маршрута: выходы exit-нод без WARP",
+        "🔘 Общий выход" in labels and "⚪️ Нода n1" in labels and not any("WARP" in t for t in labels), labels)
+    text, buttons = screen(await press("cl:rt:exits|alice|n1"))
+    chk("клиент переведён на ноду n1", "🔘 Нода n1" in [t for t, _ in buttons], [t for t, _ in buttons])
+    text, _ = screen(await press("cl:v:alice"))
+    chk("карточка показывает ноду", "Маршрут: exit-нода n1" in text, text)
+    text, buttons = screen(await press("ex:cl"))
+    chk("exit-ноды → клиенты: у alice нода, у bob общий выход",
+        any(t == "alice · нода n1" for t, _ in buttons) and any(t == "bob · общий выход" for t, _ in buttons),
+        [t for t, _ in buttons][:4])
 
     print("Все экраны")
     screens = ["srv", "mod", "srv:proto", "srv:ep", "srv:install", "srv:reset", "srv:reboot",
@@ -239,14 +315,18 @@ async def run():
     chk(f"все {len(screens)} экранов открываются, у каждого есть кнопки", not broken, broken)
 
     print("Задачи")
+    screen_before = SESSION.screen_id()
     sent = await press("bk:create")
-    chk("задача запущена отдельным сообщением",
-        any(n == "SendMessage" and "Бэкап" in (m.text or "") for n, m in sent), [n for n, _ in sent])
+    chk("задача идёт в том же экране, без новых сообщений",
+        not any(n == "SendMessage" for n, _ in sent)
+        and any(n == "EditMessageText" and "Бэкап" in (m.text or "") and m.message_id == screen_before
+                for n, m in sent), [n for n, _ in sent])
     chk("задача завершилась", await wait_jobs())
-    finals = [m for n, m in SESSION.sent if n == "EditMessageText" and "Бэкап" in (m.text or "")]
-    chk("итог задачи в том же сообщении", finals and finals[-1].text.startswith("✅"),
-        finals[-1].text if finals else "")
     chk("архив бэкапа отправлен", any(n == "SendDocument" and "Бэкап" in (m.caption or "") for n, m in SESSION.sent))
+    last = [m for n, m in SESSION.sent if n in ("SendMessage", "EditMessageText") and "Бэкап" in (m.text or "")][-1]
+    chk("итог задачи — внизу, под архивом", last.text.startswith("✅") and SESSION.screen_id() == max(SESSION.chat),
+        last.text[:60])
+    one_screen("после задачи")
     chk("незавершённых задач не осталось", store.jobs() == {}, store.jobs())
 
 

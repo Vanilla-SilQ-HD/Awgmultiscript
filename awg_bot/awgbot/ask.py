@@ -8,11 +8,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from aiogram import Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
@@ -88,8 +90,12 @@ async def _answer(msg: Message, state: FSMContext) -> None:
     data = await state.get_data()
     await state.set_state(None)
     fn = _answers.get(str(data.get("ask")))
-    if fn is None:
-        return
-    await fn(msg, state, Ctx(str(data.get("ask")), str(data.get("back") or "main"),
-                             str(data.get("prompt") or ""), dict(data.get("ctx") or {}),
-                             list(data.get("buttons") or [])))
+    try:
+        if fn is not None:
+            await fn(msg, state, Ctx(str(data.get("ask")), str(data.get("back") or "main"),
+                                     str(data.get("prompt") or ""), dict(data.get("ctx") or {}),
+                                     list(data.get("buttons") or [])))
+    finally:
+        # Ответ уже в экране — в чате ему не место (а в нём бывают пароли и ключи)
+        with contextlib.suppress(TelegramBadRequest):
+            await msg.delete()
