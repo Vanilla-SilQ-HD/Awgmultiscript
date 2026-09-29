@@ -49,17 +49,19 @@ async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
                             "wg-obfuscator рядом с WireGuard (роутер Keenetic, Linux) — комплект это описывает.",
                         ui.kb(("📦 Установить", act.data("install")), ui.back()))
         return
-    await ui.render(cb, "<b>🛡 WG + обфускатор</b>\n" + ui.pre(r.log, 1500, tail=False), ui.kb(
-        ("➕ Добавить клиента", act.data("add")),
+    mask = "NONE" if d.get("masking") == "STUN" else "STUN"
+    await ui.render(cb, "<b>🛡 WG + обфускатор</b>\n" + ui.pre(r.log, 1500, tail=False)
+                    + f"\n<i>🎭 — маскировка клиентов: {esc(d.get('masking') or '?')} → {mask}\n"
+                      "🚪 — выдавать клиентам конфиги без обфускатора или с ним</i>", ui.kb(
+        ("➕ Добавить", act.data("add")),
         ("👥 Клиенты", act.data("list")),
-        ("🔄 Перезапустить", act.data("restart")),
-        (f"🎭 Маскировка клиентов: {d.get('masking')} → {'NONE' if d.get('masking') == 'STUN' else 'STUN'}",
-         act.data("mask", "NONE" if d.get("masking") == "STUN" else "STUN")),
-        (f"🚪 Клиенты без обфускатора: {'да → нет' if d.get('clean') else 'нет → да'}",
+        (f"🎭 → {mask}", act.data("mask", mask)),
+        ("🚪 С обфускатором" if d.get("clean") else "🚪 Без обфускатора",
          act.data("clean", "0" if d.get("clean") else "1")),
-        ("🔑 Сменить ключ обфускатора", act.data("key")),
+        ("🔄 Перезапустить", act.data("restart")),
+        ("🔑 Сменить ключ", act.data("key")),
         ("📜 Журнал", "diag:log:wgobf"),
-        ("🗑 Удалить WG + обфускатор", act.data("rm")),
+        ("🗑 Удалить", act.data("rm")),
         ui.back()))
 
 
@@ -72,11 +74,10 @@ async def _install_screen(target: ui.Target, state: FSMContext) -> None:
                             f"Клиенты без обфускатора: {'да' if o.get('clean') == '1' else 'нет'}\n"
                             f"Первый клиент: {esc(o.get('client') or 'client1')}",
                     ui.kb(("✏️ Порт", act.data("iport")),
-                          ("🎭 Маскировка: STUN ↔ NONE", act.data("iopt", "masking")),
-                          ("🚪 Без обфускатора: да ↔ нет", act.data("iopt", "clean")),
-                          ("✏️ Имя первого клиента", act.data("iname")),
-                          ("✅ Установить", act.data("igo")),
-                          ui.back("wo", "✖️ Отмена")))
+                          ("✏️ Первый клиент", act.data("iname")),
+                          ("🎭 STUN ↔ NONE", act.data("iopt", "masking")),
+                          ("🚪 Без обфускатора", act.data("iopt", "clean")),
+                          ui.Row(("✅ Установить", act.data("igo")), ui.back("wo", "✖️ Отмена"))))
 
 
 @act("install")
@@ -168,19 +169,22 @@ async def _add_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
 async def _list(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     rows = await api.data("wgobf", "clients", default=[]) or []
     page = int(arg) if arg.isdigit() else 0
-    await ui.render(cb, "<b>👥 Клиенты WG + обфускатор</b>" + ("" if rows else "\n\nКлиентов нет."),
-                    ui.kb(ui.paged([(f"{'🟢' if r.get('ago') is not None and r['ago'] < 180 else '⚪️'} "
-                                     f"{r['name']} · {r['ip']}"
-                                     + (f" · {ui.fmt_dur(r['ago'])} назад" if r.get("ago") is not None else ""),
-                                     act.data("v", r["name"])) for r in rows], page, lambda p: act.data("list", str(p))),
+    def dot(r: dict) -> str:
+        return "🟢" if r.get("ago") is not None and r["ago"] < 180 else "⚪️"
+
+    lines = [f"{dot(r)} <b>{esc(r['name'])}</b> <code>{esc(r['ip'])}</code>"
+             + (f" · {ui.fmt_dur(r['ago'])} назад" if r.get("ago") is not None else "") for r in rows[:40]]
+    await ui.render(cb, "<b>👥 Клиенты WG + обфускатор</b>\n\n" + ("\n".join(lines) or "Клиентов нет."),
+                    ui.kb(ui.paged([(f"{dot(r)} {r['name']}", act.data("v", r["name"])) for r in rows],
+                                   page, lambda p: act.data("list", str(p))),
                           ui.back("wo")))
 
 
 @act("v")
 async def _view(cb: ui.Target, state: FSMContext, name: str) -> None:
     await ui.render(cb, f"<b>🛡 {esc(name)}</b>",
-                    ui.kb(("📦 Комплект клиента", act.data("bundle", name)),
-                          ("🗑 Удалить клиента", act.data("del", name)),
+                    ui.kb(("📦 Комплект", act.data("bundle", name)),
+                          ("🗑 Удалить", act.data("del", name)),
                           ui.back(act.data("list"))))
 
 

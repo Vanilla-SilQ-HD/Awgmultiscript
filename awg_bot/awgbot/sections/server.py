@@ -57,15 +57,15 @@ async def screen(target: ui.Target) -> None:
         lines.append(f"\n<i>{esc(hint)}</i>")
     exists = bool(d.get("exists"))
     await ui.render(target, "\n".join(lines), ui.kb(
-        ("📦 Установить компоненты", act.data("install")),
+        ("📦 Компоненты", act.data("install")),
+        ("🧩 Модуль ядра", mod.data()),
         ("✨ Создать сервер", act.data("create")) if not exists else None,
-        ("🔄 Перезапустить awg0", act.data("restart")) if exists else None,
-        ("🔀 Протокол 2.0 / 3.1", act.data("proto")) if exists else None,
-        ("🧩 Модуль ядра и утилиты", mod.data()),
-        ("🛠 Проверить и починить", act.data("repair")),
+        ("🔄 Перезапуск awg0", act.data("restart")) if exists else None,
+        ("🔀 Протокол", act.data("proto")) if exists else None,
         ("🌍 Endpoint", act.data("ep")) if exists else None,
-        ("⚠️ Сбросить сервер", act.data("reset")) if exists else None,
-        ("♻️ Перезагрузить сервер", act.data("reboot")),
+        ("🛠 Починить", act.data("repair")),
+        ("♻️ Перезагрузка", act.data("reboot")),
+        ("⚠️ Сбросить", act.data("reset")) if exists else None,
         ui.back()))
 
 
@@ -97,7 +97,7 @@ async def _repair(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 async def _reset(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ui.confirm(cb, "<b>⚠️ Сброс сервера</b>\n\nawg0 и все клиенты будут удалены, туннели выключены. "
                          "Перед сбросом делается авто-бэкап. Компоненты остаются.",
-                     ("⚠️ Да, сбросить сервер", act.data("resetok")), "srv")
+                     ("⚠️ Да, сбросить", act.data("resetok")), "srv")
 
 
 @act("resetok")
@@ -108,7 +108,7 @@ async def _reset_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 @act("reboot")
 async def _reboot(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ui.confirm(cb, "Перезагрузить сервер? Бот вернётся сам через минуту-две.",
-                     ("♻️ Да, перезагрузить", act.data("rebootok")), "srv")
+                     ("♻️ Перезагрузить", act.data("rebootok")), "srv")
 
 
 @act("rebootok")
@@ -199,52 +199,52 @@ async def wizard(target: ui.Target, state: FSMContext) -> None:
         await ui.render(target, head + "<b>Профиль</b>\n"
                                        "• AmneziaVPN — как официальный клиент: MTU 1280, без I1-I5 (рекомендуется)\n"
                                        "• Мощный — широкие диапазоны и I1-I5, сильнее против DPI",
-                        ui.kb(("AmneziaVPN (рекомендуется)", _w("profile", "lite")),
-                              ("Мощный", _w("profile", "pro")), cancel))
+                        ui.kb(("AmneziaVPN", _w("profile", "lite")), ("Мощный", _w("profile", "pro")), cancel))
     elif step == "mimicry":
         if wiz["profile"] == "lite":
             await ui.render(target, head + "Добавить один компактный пакет мимикрии I1 (DNS, ~90 символов)? "
                                            "У официального клиента AmneziaVPN строк I нет.",
-                            ui.kb(("Без I1-I5", _w("mimicry", "none")), ("Один пакет I1 (DNS)", _w("mimicry", "dns:2")),
+                            ui.kb(("Без I1-I5", _w("mimicry", "none")), ("Пакет I1 (DNS)", _w("mimicry", "dns:2")),
                                   cancel))
             return
         if "level" not in wiz:
-            await ui.render(target, head + "<b>Уровень мимикрии</b>\nWireSock не читает I1-I5 → без них. "
-                                           "Keenetic → только I1.",
-                            ui.kb(("I1-I5 — полная цепочка (рекомендуется)", _w("level", "3")),
-                                  ("Только I1 — один пакет", _w("level", "2")),
+            await ui.render(target, head + "<b>Уровень мимикрии</b>\n"
+                                           "• Цепочка I1-I5 — полная (рекомендуется)\n"
+                                           "• Только I1 — один пакет: Keenetic читает только его\n"
+                                           "• Без I1-I5 — для WireSock, он их не читает",
+                            ui.kb(("Цепочка I1-I5", _w("level", "3")), ("Только I1", _w("level", "2")),
                                   ("Без I1-I5", _w("mimicry", "none")), cancel))
             return
         profiles = await api.data("mimicry", default=[])
         await ui.render(target, head + "<b>Профиль мимикрии</b>\nПять пакетов залпом естественны для DNS, "
-                                       "STUN и RTP; на высоком порту — STUN, WebRTC, RTP.",
-                        ui.kb([(f"{p['label']} — {p['hint']}", _w("mimicry", f"{p['id']}:{wiz['level']}"))
-                               for p in profiles], cancel))
+                                       "STUN и RTP; на высоком порту — STUN, WebRTC, RTP.\n\n" + ui.profile_hints(profiles),
+                        ui.kb([(p["label"], _w("mimicry", f"{p['id']}:{wiz['level']}")) for p in profiles], cancel))
     elif step == "proto":
         info = await api.data("server", "info", default={}) or {}
-        text = head + ("<b>Версия протокола</b> — на весь сервер.\nAWG 3.1 быстрее, заголовки под шифром; "
-                       "клиентам нужен AmneziaVPN 5.0.1.5+ или AmneziaWG с 3.1.")
-        buttons = [("AWG 3.1 (рекомендуется)", _w("proto", "3.1"))] if info.get("proto31") else []
+        text = head + ("<b>Версия протокола</b> — на весь сервер.\n"
+                       "• AWG 3.1 — быстрее, заголовки под шифром (рекомендуется); клиентам нужен "
+                       "AmneziaVPN 5.0.1.5+ или AmneziaWG с 3.1\n"
+                       "• AWG 2.0 — подключится любой клиент AmneziaWG")
+        buttons = [("AWG 3.1", _w("proto", "3.1"))] if info.get("proto31") else []
         if not info.get("proto31"):
             text += "\n\n▲ Установленные модуль и tools не умеют 3.1 — обнови их: Сервер → Модуль ядра."
-        await ui.render(target, text, ui.kb(buttons, ("AWG 2.0 — любой клиент AmneziaWG", _w("proto", "2.0")),
-                                            cancel))
+        await ui.render(target, text, ui.kb(buttons, ("AWG 2.0", _w("proto", "2.0")), cancel))
     elif step == "dns":
         await ui.render(target, head + "<b>DNS для клиентов</b>",
                         ui.kb([(label, _w("dns", str(i))) for i, (label, _) in enumerate(DNS)],
                               ("Вручную…", _w("dns", str(len(DNS)))), cancel))
     elif step == "mtu":
         rec = "1320" if wiz["profile"] == "pro" else "1280"
-        await ui.render(target, head + "<b>MTU</b>",
-                        ui.kb((f"{rec} (рекомендуется)", _w("mtu", rec)),
+        await ui.render(target, head + f"<b>MTU</b>\nРекомендуется {rec}.",
+                        ui.kb((f"⭐ {rec}", _w("mtu", rec)),
                               [(v, _w("mtu", v)) for v in ("1420", "1380", "1320", "1280") if v != rec], cancel))
     elif step == "port":
         await ui.render(target, head + "<b>UDP-порт</b>",
-                        ui.kb(("🎲 Случайный свободный", _w("port", "")), ("Ввести…", _w("port", "ask")), cancel))
+                        ui.kb(("🎲 Случайный", _w("port", "")), ("✏️ Ввести…", _w("port", "ask")), cancel))
     elif step == "endpoint":
         await ui.render(target, head + "<b>Адрес в конфигах клиентов</b>\nДомен вместо IP — переезд сервера "
                                        "без перевыдачи конфигов.",
-                        ui.kb(("IP этого сервера", _w("endpoint", "")), ("Домен…", _w("endpoint", "ask")), cancel))
+                        ui.kb(("IP этого сервера", _w("endpoint", "")), ("✏️ Домен…", _w("endpoint", "ask")), cancel))
     else:
         await ui.render(target, head + "\n".join([
             f"Регион: {'Россия' if wiz['region'] == 'ru' else 'мир'}",
@@ -252,7 +252,7 @@ async def wizard(target: ui.Target, state: FSMContext) -> None:
             f"Версия: AWG {wiz['proto']} · MTU {wiz['mtu']}",
             f"DNS: {esc(wiz['dns'])}",
             f"Порт: {wiz['port'] or 'случайный'} · endpoint: {esc(wiz['endpoint'] or 'IP сервера')}",
-        ]), ui.kb(("✅ Создать сервер", act.data("createok")), cancel))
+        ]), ui.kb(ui.Row(("✅ Создать сервер", act.data("createok")), cancel)))
 
 
 async def _send_first(bot: Bot, chat_id: int, st: dict) -> None:
@@ -281,10 +281,12 @@ async def _proto(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     info = await api.data("server", "info", default={}) or {}
     cur = info.get("proto", "2.0")
     n = info.get("clients", 0)
-    up = "🔁 Новые параметры AWG 3.1" if cur == "3.1" else "⬆️ Перейти на AWG 3.1 — быстрее 2.0"
-    down = "🔁 Перегенерировать параметры AWG 2.0" if cur == "2.0" else "⬇️ Вернуться на AWG 2.0 — для старых клиентов"
+    up = "🔁 Параметры 3.1" if cur == "3.1" else "⬆️ Перейти на 3.1"
+    down = "🔁 Параметры 2.0" if cur == "2.0" else "⬇️ Вернуть 2.0"
     note = "" if info.get("proto31") else "\n▲ Модуль не умеет 3.1 — при переходе он обновится (долго)."
     await ui.render(cb, f"<b>🔀 Протокол и параметры</b>\n\nСейчас: AWG {esc(cur)}, клиентов {n}.\n"
+                        "• 3.1 — быстрее, заголовки под шифром; 2.0 — для старых клиентов\n"
+                        "• 🔁 — новые параметры той же версии\n"
                         f"Ключи, адреса, имена и сроки сохраняются; все клиенты получают новые конфиги "
                         f"и до их замены не подключатся.{note}",
                     ui.kb((up, act.data("protogo", "3.1")), (down, act.data("protogo", "2.0")), ui.back("srv")))
@@ -294,14 +296,14 @@ async def _proto(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 async def _proto_go(cb: CallbackQuery, state: FSMContext, target: str) -> None:
     await ui.confirm(cb, f"Перегенерировать параметры на AWG {esc(target)}?\n"
                          "Все клиенты потеряют связь до получения нового конфига.",
-                     ("✅ Да, перегенерировать", act.data("protook", target)), act.data("proto"))
+                     ("✅ Да, выполнить", act.data("protook", target)), act.data("proto"))
 
 
 @act("protook")
 async def _proto_ok(cb: CallbackQuery, state: FSMContext, target: str) -> None:
     # Всем клиентам нужны новые конфиги — кнопки к ним прямо в итоге
     await jobs.start(cb, f"Переход на AWG {target}", "server", "proto", target, back_to="srv",
-                     ok_buttons=[("📦 Новые конфиги архивом", "cl:export"), ("👥 Клиенты", "cl")])
+                     ok_buttons=[("📦 Конфиги zip", "cl:export"), ("👥 Клиенты", "cl")])
 
 
 # ── Endpoint ──────────────────────────────────────────────
@@ -313,7 +315,7 @@ async def _ep(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
                         + ("Домен задан — сервер можно переносить без перевыдачи конфигов." if dom
                            else "Сейчас IP. С доменом переезд сервера не требует новых конфигов."),
                     ui.kb(("✏️ Указать домен", act.data("epdom")),
-                          ("🔢 Публичный IP вместо домена", act.data("epset", "ip")) if dom else None,
+                          ("🔢 Публичный IP", act.data("epset", "ip")) if dom else None,
                           ui.back("srv")))
 
 
@@ -341,9 +343,9 @@ async def _ep_rewrite(target: ui.Target, state: FSMContext, value: str) -> None:
     # Домен до 253 символов — в callback_data (64 байта) не влезет, держим в FSM
     await state.update_data(endpoint=value)
     await ui.render(target, f"Endpoint → <code>{esc(value if value != 'ip' else 'публичный IP')}</code>\n"
-                            "Переписать его и в уже выданных конфигах?",
-                    ui.kb(("✅ Да, во всех конфигах", act.data("epgo", "all")),
-                          ("Только для новых", act.data("epgo", "keep")), ui.back(act.data("ep"))))
+                            "Переписать его и в уже выданных конфигах — или только для новых клиентов?",
+                    ui.kb(("✅ Во всех", act.data("epgo", "all")),
+                          ("🆕 Только новые", act.data("epgo", "keep")), ui.back(act.data("ep"))))
 
 
 @act("epgo")
@@ -379,16 +381,16 @@ async def mod_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> Non
         lines.append(f"\n▲ {esc(d['reboot'])}")
     if d.get("secure_boot"):
         lines.append("▲ Secure Boot включён — неподписанный модуль ядро не загрузит")
-    upd = d.get("module_update")
+    lines.append("\n<i>🔁 — перезагрузить модуль без ребута · 🧱 — собрать под все установленные ядра</i>")
     await ui.render(cb, "\n".join(lines), ui.kb(
-        (f"⬆️ Обновить модуль{' до ' + upd if upd else ''}", mod.data("upd")),
-        ("📋 Выбрать версию модуля", mod.data("tags")),
-        ("⬆️ Обновить amneziawg-tools", mod.data("tools")),
-        ("🔁 Перезагрузить модуль — без ребута", mod.data("reload")),
-        ("🧱 Пересобрать под все ядра", mod.data("rebuild")),
-        ("⏪ Откат из резервной копии", mod.data("backups")) if d.get("backups") else None,
-        ("🔎 Проверить обновления", mod.data("check")),
-        ("📄 Подробный отчёт", mod.data("report")),
+        ("⬆️ Обновить модуль", mod.data("upd")),
+        ("📋 Версия модуля", mod.data("tags")),
+        ("⬆️ Обновить tools", mod.data("tools")),
+        ("🔁 Перезагрузить", mod.data("reload")),
+        ("🧱 Под все ядра", mod.data("rebuild")),
+        ("⏪ Откат модуля", mod.data("backups")) if d.get("backups") else None,
+        ("🔎 Проверить", mod.data("check")),
+        ("📄 Отчёт", mod.data("report")),
         ui.back("srv")))
 
 
@@ -460,8 +462,8 @@ async def _mod_backups(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     rows = await api.data("module", "backups", default=[]) or []
     await ui.remember(state, "modbk", [b["path"] for b in rows])
     await ui.render(cb, "<b>⏪ Резервные копии исходников модуля</b>\nСверху — новые.",
-                    ui.kb([(f"{ui.fmt_time(b['time'])} · {b['name']}", mod.data("rb", str(i)))
-                           for i, b in enumerate(rows)], ui.back("mod")))
+                    ui.kb([(ui.fmt_time(b["time"]), mod.data("rb", str(i))) for i, b in enumerate(rows)],
+                          ui.back("mod")))
 
 
 @mod("rb")

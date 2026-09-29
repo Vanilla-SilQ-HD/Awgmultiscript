@@ -32,11 +32,11 @@ async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
                         f"Версия: <b>{esc(__version__)}</b>\n"
                         f"Прокси до Telegram: {esc(d.get('proxy') or 'нет — напрямую')}\n"
                         f"Админов: владельцев {len(access.owners())}, приглашённых {len(admins.invited_ids())}",
-                    ui.kb(("⬆️ Обновить / переустановить", act.data("update")),
+                    ui.kb(("⬆️ Обновить", act.data("update")),
                           ("🔄 Перезапустить", act.data("restart")),
+                          ("🌐 Прокси", act.data("proxy")),
                           ("📜 Журнал", "diag:log:bot"),
-                          ("🌐 Прокси до Telegram", act.data("proxy")),
-                          ("👮 Админы и приглашения", adm.data()) if owner else None,
+                          ("👮 Админы", adm.data()) if owner else None,
                           ("🗑 Удалить бота", act.data("rm")) if owner else None,
                           ui.back()))
 
@@ -77,7 +77,7 @@ async def _proxy(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ui.render(cb, "<b>🌐 Прокси до Telegram</b>\nНужен, если Telegram у хостера заблокирован: "
                         "SOCKS5/HTTP-прокси или туннель этого сервера.\n\n"
                         f"Сейчас: <code>{esc(cur or 'нет — напрямую')}</code>",
-                    ui.kb(("🔎 Найти на сервере", act.data("pcand")),
+                    ui.kb(("🔎 На сервере", act.data("pcand")),
                           ("✏️ Ввести адрес", act.data("penter")),
                           ("🩺 Проверить", act.data("pcheck")) if cur else None,
                           ("🗑 Убрать прокси", act.data("pclear")) if cur else None,
@@ -93,9 +93,11 @@ async def _pcand(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
         await ui.render(cb, "Подходящих выходов на сервере нет — введи адрес вручную.",
                         ui.kb(("✏️ Ввести адрес", act.data("penter")), ui.back(act.data("proxy"))))
         return
-    await ui.render(cb, "<b>Выходы сервера</b>\n✅ — Telegram через него отвечает.",
-                    ui.kb([(f"{'✅' if r['ok'] else '❌'} {r['url']} — {r['label'].split(' — ')[0]}",
-                            act.data("pset", str(i))) for i, r in enumerate(rows)], ui.back(act.data("proxy"))))
+    lines = [f"{'✅' if r['ok'] else '❌'} {esc(r['label'].split(' — ')[0])} — <code>{esc(r['url'])}</code>"
+             for r in rows]
+    await ui.render(cb, "<b>Выходы сервера</b>\n✅ — Telegram через него отвечает.\n\n" + "\n".join(lines),
+                    ui.kb([(f"{'✅' if r['ok'] else '❌'} {r['label'].split(' — ')[0]}", act.data("pset", str(i)))
+                           for i, r in enumerate(rows)], ui.back(act.data("proxy"))))
 
 
 @act("pset")
@@ -132,8 +134,9 @@ async def _apply_proxy(target: ui.Target, state: FSMContext, url: str, force: bo
     # Адрес для «сохранить всё равно» — только в памяти бота: в callback_data
     # ему не место (там может быть пароль)
     await state.update_data(proxy_pending=url)
-    await ui.render(target, ui.fail(r, "Прокси"),
-                    ui.kb(("⚠️ Сохранить всё равно", act.data("pforce")) if not force else None,
+    await ui.render(target, ui.fail(r, "Прокси")
+                    + ("" if force else "\n\n<i>⚠️ Сохранить — записать адрес, хоть проверка и не прошла</i>"),
+                    ui.kb(("⚠️ Сохранить", act.data("pforce")) if not force else None,
                           ui.back(act.data("proxy"))))
 
 
@@ -195,11 +198,11 @@ async def admins_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> 
     pending = admins.pending_invites()
     if pending:
         lines.append(f"\nНеиспользованных приглашений: {pending}")
+    lines.append("\n<i>➕ Пригласить — ссылка на 15 минут · 🚫 — отозвать доступ</i>")
     await ui.render(cb, "\n".join(lines), ui.kb(
-        ("➕ Пригласить админа (ссылка на 15 минут)", adm.data("invite")),
-        [(f"🚫 Отозвать {a.uid}" + (f" @{a.username}" if a.username else ""), adm.data("rm", str(a.uid)))
-         for a in invited],
-        ("🧯 Погасить приглашения", adm.data("revoke")) if pending else None,
+        ("➕ Пригласить", adm.data("invite")),
+        ("🧯 Погасить ссылки", adm.data("revoke")) if pending else None,
+        [(f"🚫 @{a.username}" if a.username else f"🚫 {a.uid}", adm.data("rm", str(a.uid))) for a in invited],
         ui.back("botm")))
 
 

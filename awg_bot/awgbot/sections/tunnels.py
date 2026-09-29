@@ -37,30 +37,25 @@ async def quick(target: ui.Target, title: str, back_to: str, *args: str) -> None
 async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
     d = await api.data("tunnels", "status", default={}) or {}
 
-    def item(key: str, label: str, to: str) -> ui.Button:
-        st = d.get(key, "none")
-        return (f"{ui.state_icon(st)} {label} — {ui.state_word(st)}", to)
-
+    names = [("warp", "WARP", "warp"), ("xray", "Xray", "xr"), ("tun2socks", "tun2socks", "t2s"),
+             ("exits", "Exit-ноды", "ex"), ("dns", "Шифр. DNS", "dns")]
     n = d.get("cascade", 0)
-    text = "<b>🌐 Туннели и DNS</b>\n\nОдновременно работает только один туннель для клиентов."
-    if d.get("active"):
-        text += f"\nСейчас: <b>{esc(d['active'])}</b>"
-    await ui.render(cb, text, ui.kb(
-        item("warp", "WARP (Cloudflare)", "warp"),
-        item("xray", "Xray", "xr"),
-        item("tun2socks", "tun2socks", "t2s"),
-        item("exits", "AWG exit-ноды", "ex"),
-        (f"{'🟢' if n else '▫️'} Каскад портов — {'правил: ' + str(n) if n else 'правил нет'}", "cas"),
-        item("dns", "Шифрованный DNS", "dns"),
-        ("🚨 Аварийный сброс — все клиенты напрямую", tun.data("panic")),
-        ui.back()))
+    lines = [f"{ui.state_icon(d.get(k, 'none'))} {label} — {ui.state_word(d.get(k, 'none'))}" for k, label, _ in names]
+    lines.insert(4, f"{'🟢' if n else '▫️'} Каскад портов — {'правил: ' + str(n) if n else 'правил нет'}")
+    text = ("<b>🌐 Туннели и DNS</b>\n\nОдновременно работает только один туннель для клиентов."
+            + (f"\nСейчас: <b>{esc(d['active'])}</b>" if d.get("active") else "")
+            + "\n\n" + "\n".join(lines)
+            + "\n\n<i>🚨 Всё напрямую — аварийно выключить туннели, настройки сохранятся</i>")
+    buttons = [(f"{ui.state_icon(d.get(k, 'none'))} {label}", to) for k, label, to in names]
+    buttons.insert(4, (f"{'🟢' if n else '▫️'} Каскад", "cas"))
+    await ui.render(cb, text, ui.kb(buttons, ("🚨 Всё напрямую", tun.data("panic")), ui.back()))
 
 
 @tun("panic")
 async def _panic(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ui.confirm(cb, "Выключить все туннели (WARP, Xray, tun2socks, exit-ноды)? Клиенты пойдут напрямую "
                          "через сервер, настройки сохранятся.",
-                     ("🚨 Да, выключить всё", tun.data("panicok")), "tun")
+                     ("🚨 Да, выключить", tun.data("panicok")), "tun")
 
 
 @tun("panicok")
@@ -78,10 +73,10 @@ async def clients_screen(cb: CallbackQuery, state: FSMContext, kind: str, page: 
         return
     await ui.render(cb, f"<b>👥 Клиенты в {'WARP' if kind == 'warp' else 'Xray'}</b>\n"
                         "✅ — через туннель, ➖ — напрямую. Нажатие переключает.",
-                    ui.kb(ui.paged([(f"{'✅' if r['on'] else '➖'} {r['name']} · {r['ip']}",
+                    ui.kb(ui.paged([(f"{'✅' if r['on'] else '➖'} {r['name']}",
                                      tc.data("t", f"{kind}|{r['name']}|{page}")) for r in rows],
                                    page, lambda p: tc.data("pg", f"{kind}|{p}")),
-                          ("✅ Все через туннель", tc.data("a", f"{kind}|all")),
+                          ("✅ Все в туннель", tc.data("a", f"{kind}|all")),
                           ("➖ Все напрямую", tc.data("a", f"{kind}|none")),
                           ui.back(back_to)))
 
@@ -121,18 +116,25 @@ async def warp_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> No
         return
     d = r.data
     wg = d.get("backend") == "wg"
-    await ui.render(cb, "<b>☁️ WARP (Cloudflare)</b>\n" + ui.pre(r.log, 1500, tail=False), ui.kb(
-        (f"📦 Установить и зарегистрировать ({d.get('backend')})", warp.data("install")),
-        ("▶️ Включить туннель", warp.data("up")) if d.get("configured") and not d.get("up") else None,
-        ("⏹ Выключить туннель", warp.data("down")) if d.get("up") else None,
-        ("👥 Клиенты в WARP", tc.data("", "warp")) if d.get("configured") else None,
-        (f"❤️ Health-check: {'выключить' if d.get('health') else 'включить'}",
-         warp.data("health", "off" if d.get("health") else "on")) if d.get("configured") else None,
-        ("🔑 Warp+ (ключ)", warp.data("key")) if wg and d.get("configured") else None,
-        ("📥 Импорт wgcf-profile.conf", warp.data("import")) if wg else None,
-        ("🔎 Поиск рабочего endpoint", warp.data("ep")) if wg and d.get("configured") else None,
-        ("🔀 Сменить бэкенд (wg ↔ usque)", warp.data("backend")),
-        ("🗑 Удалить WARP", warp.data("rm")) if d.get("configured") else None,
+    conf = d.get("configured")
+    hints = [f"📦 — {'переустановить' if conf else 'установить'} и зарегистрировать (бэкенд {esc(d.get('backend') or '?')})"]
+    if conf:
+        hints.append("✅ Health-check — сам перезапускает WARP, если тот перестал отвечать")
+    if wg:
+        hints.append("📥 Импорт — свой wgcf-profile.conf, если регистрация отсюда не проходит")
+    await ui.render(cb, "<b>☁️ WARP (Cloudflare)</b>\n" + ui.pre(r.log, 1500, tail=False)
+                    + "\n<i>" + "\n".join(hints) + "</i>", ui.kb(
+        ("📦 Переустановить" if conf else "📦 Установить", warp.data("install")),
+        ("▶️ Включить", warp.data("up")) if conf and not d.get("up") else None,
+        ("⏹ Выключить", warp.data("down")) if d.get("up") else None,
+        ("👥 Клиенты", tc.data("", "warp")) if conf else None,
+        (f"{'✅' if d.get('health') else '⬜️'} Health-check",
+         warp.data("health", "off" if d.get("health") else "on")) if conf else None,
+        ("🔑 Ключ Warp+", warp.data("key")) if wg and conf else None,
+        ("📥 Импорт профиля", warp.data("import")) if wg else None,
+        ("🔎 Поиск endpoint", warp.data("ep")) if wg and conf else None,
+        ("🔀 Сменить бэкенд", warp.data("backend")),
+        ("🗑 Удалить", warp.data("rm")) if conf else None,
         ui.back("tun")))
 
 
@@ -253,20 +255,25 @@ async def xray_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> No
         return
     d = r.data
     inst, up, tags = d.get("installed"), d.get("up"), d.get("tags") or []
-    await ui.render(cb, "<b>🛰 Xray</b>\n" + ui.pre(r.log, 1500, tail=False), ui.kb(
+    text = "<b>🛰 Xray</b>\n" + ui.pre(r.log, 1500, tail=False)
+    if inst:
+        text += ("\n<i>➕ Добавить выход — ссылкой vless://, vmess://, trojan://, ss://, hysteria2://\n"
+                 "✅ РФ напрямую — российские сайты мимо Xray"
+                 + (f"\n⚖️ — как делить трафик между выходами (сейчас {esc(d.get('balancer') or '?')})"
+                    if len(tags) > 1 else "") + "</i>")
+    await ui.render(cb, text, ui.kb(
         (f"📦 {'Обновить' if inst else 'Установить'} Xray", xr.data("install")),
-        ("➕ Добавить выход (ссылка)", xr.data("add")) if inst else None,
+        ("➕ Добавить выход", xr.data("add")) if inst else None,
         ("➖ Удалить выход", xr.data("del")) if tags else None,
-        (f"⚖️ Балансировщик: {d.get('balancer')}", xr.data("bal")) if len(tags) > 1 else None,
-        ("▶️ Включить туннель", xr.data("up")) if inst and tags and not up else None,
-        ("⏹ Выключить туннель", xr.data("down")) if up else None,
-        ("🔄 Перезапустить туннель", xr.data("restart")) if up else None,
-        ("👥 Клиенты в Xray", tc.data("", "xray")) if inst else None,
-        (f"🇷🇺 РФ-сайты напрямую: {'выключить' if d.get('ru') else 'включить'}",
-         xr.data("ru", "off" if d.get("ru") else "on")) if inst else None,
+        ("⚖️ Балансировщик", xr.data("bal")) if len(tags) > 1 else None,
+        ("▶️ Включить", xr.data("up")) if inst and tags and not up else None,
+        ("⏹ Выключить", xr.data("down")) if up else None,
+        ("🔄 Перезапустить", xr.data("restart")) if up else None,
+        ("👥 Клиенты", tc.data("", "xray")) if inst else None,
+        (f"{'✅' if d.get('ru') else '⬜️'} РФ напрямую", xr.data("ru", "off" if d.get("ru") else "on")) if inst else None,
         ("🩺 Диагностика", xr.data("diag")) if inst else None,
-        ("🛠 Исправить конфиг", xr.data("fix")) if inst else None,
-        ("🗑 Удалить Xray", xr.data("rm")) if inst else None,
+        ("🛠 Починить конфиг", xr.data("fix")) if inst else None,
+        ("🗑 Удалить", xr.data("rm")) if inst else None,
         ui.back("tun")))
 
 
@@ -308,8 +315,9 @@ async def _xr_del_ok(cb: CallbackQuery, state: FSMContext, idx: str) -> None:
 
 @xr("bal")
 async def _xr_bal(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    await ui.render(cb, "<b>⚖️ Балансировщик выходов</b>",
-                    ui.kb([(f"{k} — {label}", xr.data("balset", k)) for k, label in BALANCERS], ui.back("xr")))
+    await ui.render(cb, "<b>⚖️ Балансировщик выходов</b>\n\n"
+                        + "\n".join(f"• <b>{k}</b> — {label}" for k, label in BALANCERS),
+                    ui.kb([(k, xr.data("balset", k)) for k, _ in BALANCERS], ui.back("xr")))
 
 
 @xr("balset")
@@ -418,15 +426,16 @@ async def exits_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> N
     d = r.data
     nodes, up = d.get("nodes") or [], d.get("up")
     await ui.render(cb, "<b>🚪 AWG exit-ноды</b>\nКлиенты выходят в интернет через другие AWG/WG-серверы.\n"
-                        + ui.pre(r.log, 1800, tail=False), ui.kb(
+                        + ui.pre(r.log, 1800, tail=False)
+                        + ("\n<i>Маршруты: ▶️ все клиенты через ноды · 🎯 только выбранные клиенты</i>"
+                           if nodes else ""), ui.kb(
         ("➕ Добавить ноду", ex.data("add")),
         ("➖ Удалить ноду", ex.data("del")) if nodes else None,
-        ("▶️ Маршруты: все клиенты", ex.data("up", "all")) if nodes and (not up or d.get("mode") != "all") else None,
-        ("🎯 Маршруты: выбранные клиенты", ex.data("up", "peers"))
-        if nodes and (not up or d.get("mode") != "peers") else None,
-        ("⏹ Выключить маршруты", ex.data("down")) if up else None,
+        ("▶️ Все клиенты", ex.data("up", "all")) if nodes and (not up or d.get("mode") != "all") else None,
+        ("🎯 Выбранные", ex.data("up", "peers")) if nodes and (not up or d.get("mode") != "peers") else None,
+        ("⏹ Выключить", ex.data("down")) if up else None,
         ("⚖️ Балансировка", ex.data("bal")) if nodes else None,
-        ("👥 Клиенты и их ноды", ex.data("cl")) if nodes else None,
+        ("👥 Клиенты и ноды", ex.data("cl")) if nodes else None,
         ui.back("tun")))
 
 
@@ -487,9 +496,9 @@ async def _ex_bal(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     cur = "ecmp" if d.get("balancer") == "ecmp" else d.get("single") or ""
     await ui.render(cb, "<b>⚖️ Балансировка</b>\nОдна нода — весь общий трафик через неё; "
                         "ECMP — поровну между поднятыми нодами.",
-                    ui.kb([(f"{'🔘' if cur == n['name'] else '⚪️'} Одна нода: {n['name']}",
+                    ui.kb([(f"{'🔘' if cur == n['name'] else '⚪️'} {n['name']}",
                             ex.data("balset", f"single|{n['name']}")) for n in nodes],
-                          (f"{'🔘' if cur == 'ecmp' else '⚪️'} ECMP — все поднятые", ex.data("balset", "ecmp|")),
+                          (f"{'🔘' if cur == 'ecmp' else '⚪️'} ECMP", ex.data("balset", "ecmp|")),
                           ui.back("ex")))
 
 
@@ -504,13 +513,13 @@ async def _ex_clients(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     rows = await api.data("clients", "list", default=[]) or []
     d = await api.data("exits", "status", default={}) or {}
     route = {"kind": "exits", "mode": d.get("mode") or "all"}
-    label = {"off": "напрямую", "shared": "общий выход"}
+    label = {"off": "напрямую", "shared": "общий"}
     page = int(arg) if arg.isdigit() else 0
     text = "<b>👥 Клиенты и exit-ноды</b>\n"
     text += ("Нажми клиента, чтобы выбрать его выход." if d.get("up")
              else "Маршруты выключены — выбор вступит в силу, когда их включишь.")
     await ui.render(cb, text, ui.kb(
-        ui.paged([(f"{c['name']} · {label.get(clients.exit_of(c, route), 'нода ' + clients.exit_of(c, route))}",
+        ui.paged([(f"{c['name']} → {label.get(clients.exit_of(c, route), clients.exit_of(c, route))}",
                    ex.data("pick", c["name"])) for c in rows], page, lambda p: ex.data("cl", str(p))),
         ui.back("ex")))
 
@@ -551,19 +560,19 @@ async def cascade_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") ->
     await ui.render(cb, "<b>🔀 Каскад портов</b>\nТрафик на порт этого сервера уходит на другой сервер.\n\n"
                         + ("\n".join(lines) + "\n\n🟢 применено · 🔴 записано, но в iptables нет" if rows
                            else "Правил нет."), ui.kb(
-        ("➕ Добавить правило", cas.data("add")),
-        ("➖ Удалить правило", cas.data("del")) if rows else None,
-        ("🔁 Переприменить правила", cas.data("reapply")) if rows else None,
+        ("➕ Добавить", cas.data("add")),
+        ("➖ Удалить", cas.data("del")) if rows else None,
+        ("🔁 Переприменить", cas.data("reapply")) if rows else None,
         ("🩺 Диагностика", cas.data("diag")),
-        ("🧹 Удалить все правила", cas.data("clear")) if rows else None,
-        ("🗑 Удалить каскад полностью", cas.data("rm")),
+        ("🧹 Удалить все", cas.data("clear")) if rows else None,
+        ("🗑 Удалить каскад", cas.data("rm")),
         ui.back("tun")))
 
 
 @cas("add")
 async def _cas_add(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    await ui.render(cb, "<b>➕ Правило каскада</b>\nПротокол:",
-                    ui.kb(("UDP (AWG, WireGuard)", cas.data("p", "udp")), ("TCP", cas.data("p", "tcp")),
+    await ui.render(cb, "<b>➕ Правило каскада</b>\nПротокол: UDP — для AWG и WireGuard.",
+                    ui.kb(("UDP", cas.data("p", "udp")), ("TCP", cas.data("p", "tcp")),
                           ("UDP и TCP", cas.data("p", "both")), ui.back("cas", "✖️ Отмена")))
 
 
@@ -641,9 +650,10 @@ async def _cas_save(target: ui.Target, state: FSMContext, rule: dict) -> None:
 @cas("del")
 async def _cas_del(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     rows = await api.data("cascade", "list", default=[]) or []
-    await ui.render(cb, "<b>➖ Удалить правило</b>",
-                    ui.kb([(f"{r['proto'].upper()} {r['in']} → {r['dst']}:{r['out']}",
-                            cas.data("delok", f"{r['proto']}|{r['in']}")) for r in rows], ui.back("cas")))
+    await ui.render(cb, "<b>➖ Удалить правило</b>\n\n"
+                        + "\n".join(f"{r['proto'].upper()} {r['in']} → {r['dst']}:{r['out']}" for r in rows),
+                    ui.kb([(f"{r['proto'].upper()} {r['in']}", cas.data("delok", f"{r['proto']}|{r['in']}"))
+                           for r in rows], ui.back("cas")))
 
 
 @cas("delok")
@@ -694,9 +704,11 @@ async def dns_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> Non
     d = r.data
     inst = d.get("installed")
     await ui.render(cb, "<b>🔐 Шифрованный DNS</b>\nЗапросы клиентов идут через dnscrypt-proxy по DoH, "
-                        "DoT (853) закрыт.\n" + ui.pre(r.log, 1200, tail=False), ui.kb(
+                        "DoT (853) закрыт.\n" + ui.pre(r.log, 1200, tail=False)
+                        + ("" if inst else "\n<i>⚠️ Принудительно — если на сервере уже работает свой DNS "
+                                           "(Pi-hole, Unbound, bind)</i>"), ui.kb(
         ("▶️ Включить", dns.data("install")) if not inst else None,
-        ("⚠️ Включить поверх другого DNS на сервере", dns.data("force")) if not inst else None,
+        ("⚠️ Принудительно", dns.data("force")) if not inst else None,
         ("🔄 Перезапустить", dns.data("restart")) if inst else None,
         ("🌐 Резолверы", dns.data("up")) if inst else None,
         ("📜 Журнал", "diag:log:dns"),
@@ -731,8 +743,10 @@ async def _dns_upstream(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     d = await api.data("dns", "status", default={}) or {}
     presets = d.get("presets") or []
     await ui.remember(state, "dnsp", [p["names"] for p in presets])
-    await ui.render(cb, f"<b>🌐 Резолверы</b>\nСейчас: <code>{esc(d.get('upstream') or '—')}</code>",
-                    ui.kb([(p["label"], dns.data("set", str(i))) for i, p in enumerate(presets)],
+    await ui.render(cb, f"<b>🌐 Резолверы</b>\nСейчас: <code>{esc(d.get('upstream') or '—')}</code>\n\n"
+                        + "\n".join(f"• {esc(p['label'])}" for p in presets),
+                    ui.kb([(p["label"].replace("Только ", "").split(" (")[0], dns.data("set", str(i)))
+                           for i, p in enumerate(presets)],
                           ("✏️ Вручную", dns.data("manual")), ui.back("dns")))
 
 
@@ -761,8 +775,9 @@ async def _dns_names(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
 
 @dns("rm")
 async def _dns_rm(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    await ui.render(cb, "Выключить шифрованный DNS? Клиенты вернутся к DNS из своих конфигов.",
-                    ui.kb(("⏹ Выключить", dns.data("rmok")), ("🗑 Выключить и удалить dnscrypt-proxy", dns.data("rmok", "purge")),
+    await ui.render(cb, "Выключить шифрованный DNS? Клиенты вернутся к DNS из своих конфигов.\n\n"
+                        "<i>🗑 Удалить совсем — ещё и удалить dnscrypt-proxy</i>",
+                    ui.kb(("⏹ Выключить", dns.data("rmok")), ("🗑 Удалить совсем", dns.data("rmok", "purge")),
                           ui.back("dns", "✖️ Отмена")))
 
 

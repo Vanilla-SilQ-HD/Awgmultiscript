@@ -18,8 +18,10 @@ upd = ui.Actions(router, "upd")
 @rm()
 async def uninstall_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
     owner = access.is_owner(cb.from_user.id)
-    await ui.render(cb, "<b>🗑 Удаление</b>\n\nПеред удалением делается бэкап в <code>~/awg_backup</code>.",
-                    ui.kb(("🧹 Удалить всех клиентов — сервер остаётся", rm.data("clients")),
+    await ui.render(cb, "<b>🗑 Удаление</b>\n\nПеред удалением делается бэкап в <code>~/awg_backup</code>.\n\n"
+                        "• Всех клиентов — сервер, параметры и туннели остаются\n"
+                        + ("• Удалить всё — сервер, туннели, модуль ядра и утилиты" if owner else ""),
+                    ui.kb(("🧹 Всех клиентов", rm.data("clients")),
                           ("💣 Удалить всё", rm.data("all")) if owner else None,
                           ui.back()))
 
@@ -28,7 +30,7 @@ async def uninstall_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") 
 async def _clients(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ui.confirm(cb, "Удалить <b>всех</b> клиентов? Их конфиги перестанут работать; сервер, его параметры "
                          "и туннели останутся. Перед удалением — авто-бэкап.",
-                     ("🧹 Да, удалить всех клиентов", rm.data("clientsok")), "del")
+                     ("🧹 Да, удалить", rm.data("clientsok")), "del")
 
 
 @rm("clientsok")
@@ -44,11 +46,10 @@ async def _all_screen(target: ui.Target, state: FSMContext) -> None:
     mark = lambda k: "✅" if opts.get(k) else "⬜️"                        # noqa: E731
     await ui.render(target, "<b>💣 Удалить всё</b>\n\nСервер AWG, клиенты, туннели, модуль ядра и утилиты. "
                             "Отметь, что удалить вместе с ними:",
-                    ui.kb((f"{mark('bot')} Telegram-бот (этот бот)", rm.data("opt", "bot")),
+                    ui.kb((f"{mark('bot')} Telegram-бот", rm.data("opt", "bot")),
                           (f"{mark('wgobf')} WG + обфускатор", rm.data("opt", "wgobf")),
-                          (f"{mark('self')} Сам скрипт awg2", rm.data("opt", "self")),
-                          ("💣 Удалить", rm.data("allgo")),
-                          ui.back("del", "✖️ Отмена")))
+                          (f"{mark('self')} Скрипт awg2", rm.data("opt", "self")),
+                          ui.Row(("💣 Удалить", rm.data("allgo")), ui.back("del", "✖️ Отмена"))))
 
 
 @rm("all")
@@ -99,11 +100,12 @@ async def _render_update(target: ui.Target, d: dict, latest: str, checked: bool 
         text += f"\nДоступна: <b>{esc(latest)}</b>"
     elif checked:
         text += "\nОбновлений нет."
+    text += "\n\n<i>♻️ Переустановить — заново из текущего канала, даже без новой версии</i>"
     await ui.render(target, text, ui.kb(
-        (f"⬆️ Обновить до {latest}", upd.data("go")) if latest else None,
-        ("🔎 Проверить обновления", upd.data("check")),
-        ("♻️ Переустановить из канала", upd.data("force")),
-        ("🔀 Вернуться на стабильный канал" if beta else "🧪 Бета-канал", upd.data("ch", "stable" if beta else "beta")),
+        ("⬆️ Обновить", upd.data("go")) if latest else None,
+        ("🔎 Проверить", upd.data("check")),
+        ("♻️ Переустановить", upd.data("force")),
+        ("🔀 На стабильный" if beta else "🧪 Бета-канал", upd.data("ch", "stable" if beta else "beta")),
         ui.back()))
 
 

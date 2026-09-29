@@ -84,19 +84,18 @@ def status_text(d: dict) -> str:
 
 
 def menu_kb(d: dict) -> ui.InlineKeyboardMarkup:
-    upd = f"есть {d['update']}" if d.get("update") else ("бета" if d.get("channel") == "beta" else "стабильный")
-    wo = "установлен" if d.get("wgobf", "none") != "none" else "как Phobos"
+    """Девять разделов awg2 в два столбца, в том же порядке."""
     return ui.kb(
-        ("🖥 Сервер — установка", "srv"),
-        ("👥 Клиенты — конфиги", "cl"),
-        ("🩺 Диагностика — проверки", "diag"),
-        ("💾 Бэкапы — сохранить", "bk"),
-        ("🌐 Туннели и DNS — WARP, Xray", "tun"),
-        ("🤖 Telegram-бот — управление", "botm"),
-        ("🗑 Удаление — очистка", "del"),
-        (f"⬆️ Обновление — {upd}", "upd"),
-        (f"🛡 WG + обфускатор — {wo}", "wo"),
-        ("🔄 Обновить сводку", "main"),
+        ("🖥 Сервер", "srv"),
+        ("👥 Клиенты", "cl"),
+        ("🩺 Диагностика", "diag"),
+        ("💾 Бэкапы", "bk"),
+        ("🌐 Туннели и DNS", "tun"),
+        ("🤖 Telegram-бот", "botm"),
+        ("🗑 Удаление", "del"),
+        (f"⬆️ Есть {d['update']}" if d.get("update") else "⬆️ Обновление", "upd"),
+        ("🛡 WG + обфускатор", "wo"),
+        ("🔄 Обновить", "main"),
     )
 
 
@@ -105,7 +104,7 @@ async def show_menu(target: ui.Target) -> None:
     if not r.ok or not isinstance(r.data, dict):
         # Без awg2 остаётся управление самим ботом — через него его и чинят
         await ui.render(target, ui.fail(r, "awg2 недоступен"),
-                        ui.kb(("🤖 Telegram-бот — управление", "botm"), ("🔄 Повторить", "main")))
+                        ui.kb(("🤖 Telegram-бот", "botm"), ("🔄 Повторить", "main")))
         return
     await ui.render(target, status_text(r.data), menu_kb(r.data))
 

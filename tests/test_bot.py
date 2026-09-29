@@ -39,7 +39,9 @@ os.environ.update(AWG2_BIN=API, AWG_BOT_STATE=STATE, AWG_ADMINS_FILE=os.path.joi
                   AWG_BOT_CONF=BOT_CONF)
 sys.path.insert(0, os.path.join(HERE, "..", "awg_bot"))
 
-from awgbot import bot as botmod, jobs, store  # noqa: E402
+from awgbot import bot as botmod, jobs, store, ui  # noqa: E402
+
+USER_NAMED = ("cl:v:", "tc:t:", "ex:pick:", "xr:delok:", "wo:v:", "adm:rm:", "diag:sn:", "mod:tag:")
 
 logging.getLogger("aiogram").setLevel(logging.WARNING)
 
@@ -52,6 +54,10 @@ with open(os.path.join(ROOT, "etc/amnezia/amneziawg/awg0.conf"), "w") as f:
 for n in ("alice", "bob"):
     with open(os.path.join(ROOT, "root", n + "_awg2.conf"), "w") as f:
         f.write("[Interface]\nPrivateKey = X\nAddress = 10.23.45.2/32\n")
+
+
+# AWG_DUMP_KB=файл — все экраны с раскладкой кнопок, для глаз
+DUMP = open(os.environ["AWG_DUMP_KB"], "w") if os.environ.get("AWG_DUMP_KB") else None
 
 
 class FakeSession(BaseSession):
@@ -68,6 +74,10 @@ class FakeSession(BaseSession):
     async def make_request(self, bot, method, timeout=None):
         name = type(method).__name__
         self.sent.append((name, method))
+        if DUMP and name in ("SendMessage", "EditMessageText") and method.reply_markup:
+            DUMP.write("\n" + "═" * 60 + "\n" + (method.text or "")[:300] + "\n")
+            for row in method.reply_markup.inline_keyboard:
+                DUMP.write("  " + " | ".join(f"[{b.text}]" for b in row) + "\n")
         if name == "GetMe":
             return User(id=999, is_bot=True, first_name="Bot", username="testbot").as_(bot)
         if name == "DeleteMessage":
@@ -156,6 +166,14 @@ def screen(sent):
     return "", []
 
 
+def keyboard(sent):
+    """Строки кнопок последнего экрана."""
+    for name, m in reversed(sent):
+        if name in ("SendMessage", "EditMessageText"):
+            return m.reply_markup.inline_keyboard if m.reply_markup else []
+    return []
+
+
 def alerts(sent):
     return [m.text or "" for name, m in sent if name == "AnswerCallbackQuery"]
 
@@ -183,8 +201,10 @@ async def run():
     chk("сводка сервера", "AWG Toolza" in text and "AWG 2.0" in text and "2 клиента · 0 онлайн" in text, text)
     chk("шапка блоками", text.count("<blockquote>") >= 3 and "<b>vm" not in text.split("<blockquote>")[0], text)
     datas = [d for _, d in buttons]
-    chk("девять пунктов меню в одну колонку",
+    chk("девять пунктов меню в порядке awg2",
         datas[:9] == ["srv", "cl", "diag", "bk", "tun", "botm", "del", "upd", "wo"], buttons)
+    chk("главное меню — два столбца", [len(r) for r in keyboard(SESSION.sent)] == [2, 2, 2, 2, 2],
+        [[b.text for b in r] for r in keyboard(SESSION.sent)])
     menu_id = SESSION.screen_id()
     sent = await say("/start")
     chk("повторный /start — всегда новое меню внизу, старое не трогается",
@@ -253,7 +273,7 @@ async def run():
         [n for n, _ in sent])
     text, buttons = screen(sent)
     chk("итог массового создания — на месте «⏳», архив под ним",
-        "Создано клиентов: 2" in text and "u-001" in text and ("👥 К списку клиентов", "cl") in buttons
+        "Создано клиентов: 2" in text and "u-001" in text and ("👥 Клиенты", "cl") in buttons
         and SESSION.screen_id() < max(SESSION.chat), [text, buttons])
     no_hourglass("массовое создание")
 
@@ -338,7 +358,7 @@ async def run():
     chk("карточка показывает ноду", "Маршрут: exit-нода n1" in text, text)
     text, buttons = screen(await press("ex:cl"))
     chk("exit-ноды → клиенты: у alice нода, у bob общий выход",
-        any(t == "alice · нода n1" for t, _ in buttons) and any(t == "bob · общий выход" for t, _ in buttons),
+        any(t == "alice → n1" for t, _ in buttons) and any(t == "bob → общий" for t, _ in buttons),
         [t for t, _ in buttons][:4])
 
     print("Прокси и перезапуск бота")
@@ -396,6 +416,15 @@ async def run():
         if any("Ошибка" in a for a in alerts(sent)) or not text or not buttons:
             broken.append((data, text[:80]))
     chk(f"все {len(screens)} экранов открываются, у каждого есть кнопки", not broken, broken)
+    # Подписи — в половину экрана: иначе Telegram режет их многоточием.
+    # Имена клиентов, нод и тегов задаёт пользователь — их не считаем.
+    wide = sorted({b.text for name, m in SESSION.sent if name in ("SendMessage", "EditMessageText")
+                   and m.reply_markup for row in m.reply_markup.inline_keyboard for b in row
+                   if ui.width(b.text) > ui.WIDE and not b.callback_data.startswith(USER_NAMED)})
+    chk("все кнопки влезают в два столбца", not wide, wide)
+    rows = [len(row) for name, m in SESSION.sent if name in ("SendMessage", "EditMessageText") and m.reply_markup
+            for row in m.reply_markup.inline_keyboard]
+    chk("в два столбца, не одним списком", rows.count(2) >= rows.count(1), (rows.count(2), rows.count(1)))
 
     print("Задачи")
     screen_before = SESSION.screen_id()

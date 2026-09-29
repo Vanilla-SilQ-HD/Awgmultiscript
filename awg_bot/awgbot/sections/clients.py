@@ -17,10 +17,10 @@ from ..ui import esc
 router = Router()
 act = ui.Actions(router, "cl")
 
-PAGE = 10
+PAGE = 20
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 EXPIRES = [("1 час", "+1h"), ("1 день", "+1d"), ("7 дней", "+7d"), ("30 дней", "+30d")]
-LEVELS = [("I1-I5 — полная цепочка", "3"), ("Только I1 — один пакет", "2")]
+LEVELS = [("Цепочка I1-I5", "3"), ("Только I1", "2")]
 
 
 # ── Данные ────────────────────────────────────────────────
@@ -98,19 +98,19 @@ async def list_screen(target: ui.Target, page: int = 0) -> None:
     buttons: list[ui.Button] = []
     for c in rows[page * PAGE:(page + 1) * PAGE]:
         bell = " 🔔" if store.MONITOR_TAG in notes.get(c["name"], "").lower() else ""
-        buttons.append((f"{icon(c)} {c['name'] or '(без имени)'}{bell} · {c['ip']}", act.data("v", c["name"])))
+        buttons.append((f"{icon(c)} {c['name'] or '(без имени)'}{bell}", act.data("v", c["name"])))
     nav: list[ui.Button] = []
     if page > 0:
-        nav.append((f"◀️ Страница {page}", act.data("p", str(page - 1))))
+        nav.append((f"◀️ Стр. {page}", act.data("p", str(page - 1))))
     if page < pages - 1:
-        nav.append((f"Страница {page + 2} ▶️", act.data("p", str(page + 1))))
+        nav.append((f"Стр. {page + 2} ▶️", act.data("p", str(page + 1))))
     await ui.render(target, text, ui.kb(
         buttons, nav,
-        ("➕ Добавить клиента", act.data("add")),
-        ("➕ Создать несколько", act.data("bulk")),
-        ("📊 Активность и трафик", act.data("activity")) if rows else None,
-        ("📦 Экспорт всех (zip)", act.data("export")) if rows else None,
-        ("🧹 Удалить заблокированных", act.data("purge")) if blocked else None,
+        ("➕ Добавить", act.data("add")),
+        ("➕ Несколько", act.data("bulk")),
+        ("📊 Активность", act.data("activity")) if rows else None,
+        ("📦 Экспорт zip", act.data("export")) if rows else None,
+        ("🧹 Убрать истёкших", act.data("purge")) if blocked else None,
         ui.back()))
 
 
@@ -145,7 +145,7 @@ async def _export(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 @act("purge")
 async def _purge(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ui.confirm(cb, "Удалить всех клиентов с истёкшим сроком? Их конфиги перестанут существовать.",
-                     ("🗑 Да, удалить заблокированных", act.data("purgeok")), "cl")
+                     ("🗑 Да, удалить", act.data("purgeok")), "cl")
 
 
 @act("purgeok")
@@ -230,7 +230,7 @@ async def card(target: ui.Target, name: str) -> None:
         ("🎭 Мимикрия", act.data("mim", name)),
         ("🌐 Маршрут", act.data("tun", name)) if route["kind"] in ("warp", "xray", "exits") else None,
         ("📝 Заметка", act.data("note", name)),
-        ("🔕 Выключить мониторинг" if mon else "🔔 Мониторинг активности", act.data("mon", name)),
+        ("🔕 Без мониторинга" if mon else "🔔 Мониторинг", act.data("mon", name)),
         ("🗑 Удалить", act.data("del", name)),
         ui.back("cl", "◀️ К списку")))
 
@@ -315,7 +315,7 @@ def expire_kb(prefix: str, arg: str, has: bool, back_to: str) -> ui.InlineKeyboa
     """Сроки кнопками. prefix — действие, arg — имя клиента или пусто."""
     tag = f"{arg}|" if arg else ""
     return ui.kb(
-        ("♾ Бессрочно" + (" / разблокировать" if has else ""), act.data(prefix, tag + "none")),
+        ("♾ Снять срок" if has else "♾ Бессрочно", act.data(prefix, tag + "none")),
         [(f"⏳ {label}", act.data(prefix, tag + v)) for label, v in EXPIRES],
         ("📅 До даты…", act.data(prefix, tag + "date")),
         ui.back(back_to))
@@ -375,18 +375,19 @@ async def mimicry_screen(target: ui.Target, title: str, pick: str, back_to: str,
     tag = f"{arg}|" if arg else ""
     profiles = await api.data("mimicry", default=[])
     await ui.render(target, f"<b>🎭 {esc(title)}</b>\n\nПакеты I1-I5 перед рукопожатием — под какой протокол "
-                            "маскироваться. Меняются только у клиента: сервер их не проверяет.",
+                            "маскироваться. Меняются только у клиента: сервер их не проверяет.\n\n"
+                            + ui.profile_hints(profiles),
                     ui.kb(("Как у сервера", act.data(pick, tag + "server")),
                           ("Без I1-I5", act.data(pick, tag + "none")),
-                          [(f"{p['label']} — {p['hint']}", act.data("lvl", f"{pick}|{tag}{p['id']}"))
-                           for p in profiles],
+                          [(p["label"], act.data("lvl", f"{pick}|{tag}{p['id']}")) for p in profiles],
                           ui.back(back_to)))
 
 
 @act("lvl")
 async def _lvl(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     pick, _, rest = arg.partition("|")
-    await ui.render(cb, "<b>Уровень мимикрии</b>\nWireSock не читает I1-I5; Keenetic — только I1.",
+    await ui.render(cb, "<b>Уровень мимикрии</b>\n• Цепочка I1-I5 — полная\n"
+                        "• Только I1 — один пакет: Keenetic читает только его\nWireSock не читает I1-I5 вовсе.",
                     ui.kb([(label, act.data(pick, f"{rest}:{lvl}")) for label, lvl in LEVELS],
                           ui.back("cl")))
 
@@ -554,9 +555,10 @@ COUNTS = (2, 3, 5, 10, 20, 50)
 
 @act("bulk")
 async def _bulk(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    await ui.render(cb, "<b>➕ Несколько клиентов</b>\nКак назвать?",
-                    ui.kb(("🔢 Префикс и количество — user-001, user-002…", act.data("bpre")),
-                          ("✍️ Имена через запятую", act.data("bnames")),
+    await ui.render(cb, "<b>➕ Несколько клиентов</b>\nКак назвать?\n"
+                        "• Префикс + номер — user-001, user-002…\n• Имена списком — через запятую",
+                    ui.kb(("🔢 Префикс + номер", act.data("bpre")),
+                          ("✍️ Имена списком", act.data("bnames")),
                           ui.back("cl")))
 
 
@@ -585,7 +587,7 @@ async def _bulk_count(target: ui.Target, state: FSMContext, prefix: str) -> None
     await state.update_data(bulk_prefix=prefix)
     await ui.render(target, f"<b>➕ Несколько клиентов</b>\nСколько создать? Имена: <code>{esc(prefix)}-001</code>…",
                     ui.kb([(str(n), act.data("bn", str(n))) for n in COUNTS],
-                          ("Другое число (1-200)…", act.data("bn", "ask")), ui.back(act.data("bulk"))))
+                          ("✏️ Другое…", act.data("bn", "ask")), ui.back(act.data("bulk"))))
 
 
 @act("bn")
@@ -668,7 +670,7 @@ async def _bulk_create(target: ui.Target, state: FSMContext, expire: str) -> Non
     shown = ", ".join(created[:30]) + (f" и ещё {len(created) - 30}" if len(created) > 30 else "")
     await ui.render(target, f"✅ <b>Создано клиентов: {len(created)}</b>\n{esc(shown)}\n\n"
                             "Конфиги — архивом ниже.",
-                    ui.kb(("👥 К списку клиентов", "cl"), ui.HOME))
+                    ui.kb(ui.Row(("👥 Клиенты", "cl"), ui.HOME)))
     files = [c["file"] for c in await clients() or [] if c["name"] in set(created)]
     await ui.chat_of(target).answer_document(
         BufferedInputFile(media.zip_files(files), filename="awg_clients.zip"),

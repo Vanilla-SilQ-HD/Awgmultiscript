@@ -1,6 +1,6 @@
-"""ui.py — экраны бота: клавиатуры в одну колонку, форматирование, отрисовка.
+"""ui.py — экраны бота: клавиатуры в два столбца, форматирование, отрисовка.
 
-Каждый экран — текст и кнопки, по одной в строке, как пункты меню awg2.
+Каждый экран — текст с пояснениями и кнопки с короткими подписями.
 Нажатие кнопки правит её сообщение, ответ на ввод текста приходит новым
 сообщением. Бот ничего не удаляет.
 """
@@ -32,16 +32,71 @@ esc = html.escape
 
 
 # ── Клавиатуры ────────────────────────────────────────────
+# Кнопки идут в два столбца. Подписи короткие — в половину экрана телефона;
+# длинная (имя клиента, например) встаёт отдельной строкой. Навигация —
+# «Назад», «Отмена», «Главное меню», страницы — строкой ниже, парами между
+# собой. Row — строка как есть (например, «Да» и «Отмена» рядом).
+COLS = 2
+WIDE = 18           # ширина подписи, после которой кнопка — во всю строку
+
+
+class Row(tuple):
+    """Кнопки одной строкой, без раскладки."""
+
+    def __new__(cls, *buttons: Button | None) -> "Row":
+        return super().__new__(cls, [b for b in buttons if b])
+
+
+def width(text: str) -> int:
+    """Ширина подписи в «буквах»: эмодзи — за две, селекторы вариантов — ноль."""
+    n = 0
+    for ch in text:
+        if ch in "️‍":
+            continue
+        n += 2 if ord(ch) >= 0x1F000 or 0x2600 <= ord(ch) <= 0x27BF else 1
+    return n
+
+
+def _nav(text: str) -> bool:
+    return text.startswith(("◀️", "🏠", "✖️")) or text.endswith("▶️")
+
+
+def _page(text: str) -> bool:
+    return text.startswith("◀️ Стр") or text.endswith("▶️")
+
+
 def kb(*items: Button | Iterable[Button] | None) -> InlineKeyboardMarkup:
-    """Кнопки по одной в строке. Элемент — (текст, данные), список таких
-    пар или None (пропуск: удобно для условных пунктов)."""
+    """Клавиатура в два столбца. Элемент — (текст, данные), список таких пар,
+    Row или None (пропуск: удобно для условных пунктов). Порядок кнопок
+    сохраняется: пары складываются слева направо, сверху вниз."""
     rows: list[list[InlineKeyboardButton]] = []
+    pending: list[InlineKeyboardButton] = []
+    kind = ""
+
+    def flush() -> None:
+        rows.extend(pending[i:i + COLS] for i in range(0, len(pending), COLS))
+        pending.clear()
+
     for item in items:
         if not item:
             continue
-        pairs = [item] if isinstance(item, tuple) else list(item)
+        if isinstance(item, Row):
+            flush()
+            rows.append([InlineKeyboardButton(text=t, callback_data=d) for t, d in item])
+            continue
+        pairs = [item] if isinstance(item, tuple) else [p for p in item if p]
         for text, data in pairs:
-            rows.append([InlineKeyboardButton(text=text, callback_data=data)])
+            button = InlineKeyboardButton(text=text, callback_data=data)
+            if width(text) > WIDE:
+                flush()
+                rows.append([button])
+                continue
+            k = "page" if _page(text) else "nav" if _nav(text) else "item"
+            if pending and k != kind:
+                flush()
+            kind = k
+            pending.append(button)
+    flush()
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -52,9 +107,9 @@ def paged(buttons: list[Button], page: int, nav: Callable[[int], str], size: int
     page = min(max(page, 0), pages - 1)
     out = buttons[page * size:(page + 1) * size]
     if page > 0:
-        out.append((f"◀️ Страница {page}", nav(page - 1)))
+        out.append((f"◀️ Стр. {page}", nav(page - 1)))
     if page < pages - 1:
-        out.append((f"Страница {page + 2} ▶️", nav(page + 1)))
+        out.append((f"Стр. {page + 2} ▶️", nav(page + 1)))
     return out
 
 
@@ -107,6 +162,11 @@ def fmt_expire(ts: int | None) -> str:
         return "бессрочно"
     left = int(ts) - int(time.time())
     return f"{fmt_time(ts)} ({'через ' + fmt_dur(left) if left > 0 else 'истёк'})"
+
+
+def profile_hints(profiles: list[dict]) -> str:
+    """Подсказки к профилям мимикрии — текстом: на кнопке им тесно."""
+    return "\n".join(f"• <b>{esc(p['label'])}</b> — {esc(p['hint'])}" for p in profiles)
 
 
 def state_icon(state: str) -> str:
@@ -219,7 +279,7 @@ async def result(target: Target, r: api.Result, title: str, back_to: str,
 
 
 async def confirm(target: Target, text: str, yes: Button, no_to: str) -> None:
-    await render(target, text, kb(yes, back(no_to, "✖️ Отмена")))
+    await render(target, text, kb(Row(yes, back(no_to, "✖️ Отмена"))))
 
 
 # ── Колбэки разделов ──────────────────────────────────────

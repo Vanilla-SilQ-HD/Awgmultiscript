@@ -14,7 +14,7 @@ router = Router()
 act = ui.Actions(router, "diag")
 
 LOGS = [
-    ("manager", "awg2 — действия"), ("install", "установка компонентов"), ("module", "сборка модуля"),
+    ("manager", "awg2 — действия"), ("install", "компоненты"), ("module", "сборка модуля"),
     ("awg", "awg0 (awg-quick)"), ("expire", "сроки клиентов"), ("warp", "WARP"),
     ("warp-health", "WARP health-check"), ("xray", "Xray"), ("xray-routing", "маршруты Xray"),
     ("tun2socks", "tun2socks"), ("exits", "exit-ноды"), ("cascade", "каскад"),
@@ -39,14 +39,17 @@ DPI_HINT = (
 
 @act()
 async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
-    await ui.render(cb, "<b>🩺 Диагностика</b>", ui.kb(
-        ("📋 Сводка состояния", act.data("status")),
-        ("🌍 Домены мимикрии — мир", act.data("dom", "world")),
-        ("🇷🇺 Домены мимикрии — Россия", act.data("dom", "ru")),
-        ("🎯 Тест мимикрии — захват пакетов клиента", act.data("sniff")),
-        ("🔍 DPI со стороны клиента", act.data("dpi")),
-        ("🧩 Модуль ядра и утилиты", "mod"),
+    await ui.render(cb, "<b>🩺 Диагностика</b>\n\n"
+                        "• Домены — какие домены мимикрии отвечают (мир или Россия)\n"
+                        "• Тест мимикрии — захват первых пакетов клиента\n"
+                        "• DPI клиента — проверка со стороны клиента", ui.kb(
+        ("📋 Сводка", act.data("status")),
         ("📜 Журналы", act.data("logs")),
+        ("🌍 Домены: мир", act.data("dom", "world")),
+        ("🇷🇺 Домены: РФ", act.data("dom", "ru")),
+        ("🎯 Тест мимикрии", act.data("sniff")),
+        ("🔍 DPI клиента", act.data("dpi")),
+        ("🧩 Модуль ядра", "mod"),
         ui.back()))
 
 
@@ -77,15 +80,14 @@ async def _sniff(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
         return
     await ui.render(cb, "<b>🎯 Тест мимикрии</b>\nСервер 20 секунд слушает первые пакеты клиента и "
                         "проверяет, видны ли пакеты мимикрии и на что они похожи.\n\nКлиент:",
-                    ui.kb([(f"{r['name']} · {r['endpoint'].rsplit(':', 1)[0]}", act.data("sn", r["name"]))
-                           for r in rows[:40]], ui.back("diag")))
+                    ui.kb([(r["name"], act.data("sn", r["name"])) for r in rows[:40]], ui.back("diag")))
 
 
 @act("sn")
 async def _sniff_client(cb: CallbackQuery, state: FSMContext, name: str) -> None:
     await ui.render(cb, f"<b>🎯 {esc(name)}</b>\n\nНа устройстве клиента: отключись, нажми «Слушать» и "
                         "в течение 20 секунд подключись снова.",
-                    ui.kb(("👂 Слушать 20 секунд", act.data("sngo", name)), ui.back(act.data("sniff"))))
+                    ui.kb(("👂 Слушать 20 с", act.data("sngo", name)), ui.back(act.data("sniff"))))
 
 
 @act("sngo")

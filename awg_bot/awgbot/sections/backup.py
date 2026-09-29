@@ -7,6 +7,7 @@ import io
 import os
 import tarfile
 import time
+from pathlib import Path
 
 from aiogram import Bot, Router
 from aiogram.fsm.context import FSMContext
@@ -24,10 +25,13 @@ UPLOADS = store.STATE_DIR / "uploads"
 @act()
 async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
     await ui.render(cb, "<b>💾 Бэкапы</b>\n\nПолный бэкап: сервер и клиенты, аккаунт WARP, WG + обфускатор, "
-                        "настройки туннелей. Хранятся в <code>~/awg_backup</code> на сервере.",
-                    ui.kb(("💾 Создать и прислать бэкап", act.data("create")),
-                          ("📂 Бэкапы на сервере", act.data("list")),
-                          ("📤 Восстановить из файла", act.data("upload")),
+                        "настройки туннелей. Хранятся в <code>~/awg_backup</code> на сервере.\n\n"
+                        "• Создать — бэкап сразу приходит сюда файлом\n"
+                        "• Сохранённые — скачать или восстановить бэкап с сервера\n"
+                        "• Из файла — восстановить из присланного архива",
+                    ui.kb(("💾 Создать", act.data("create")),
+                          ("📂 Сохранённые", act.data("list")),
+                          ("📤 Из файла", act.data("upload")),
                           ui.back()))
 
 
@@ -52,7 +56,7 @@ async def _list(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
         await ui.render(cb, "Бэкапов на сервере нет.", ui.kb(ui.back("bk")))
         return
     await ui.render(cb, "<b>📂 Бэкапы на сервере</b>\nСверху — новые. 📁 — полный, 🗜 — архив.",
-                    ui.kb([(f"{'📁' if b['full'] else '🗜'} {b['name']} · {ui.fmt_bytes(b['size'])}",
+                    ui.kb([(f"{'📁' if b['full'] else '🗜'} {time.strftime('%d.%m %H:%M', time.localtime(b['time']))}",
                             act.data("v", str(i))) for i, b in enumerate(rows)], ui.back("bk")))
 
 
@@ -66,7 +70,9 @@ async def _view(cb: CallbackQuery, state: FSMContext, idx: str) -> None:
 
 
 async def _view_screen(target: ui.Target, path: str, idx: str) -> None:
-    await ui.render(target, f"<b>{esc(os.path.basename(path))}</b>",
+    size = sum(f.stat().st_size for f in Path(path).rglob("*") if f.is_file()) if os.path.isdir(path) \
+        else os.path.getsize(path) if os.path.exists(path) else 0
+    await ui.render(target, f"<b>{esc(os.path.basename(path))}</b>\n{ui.fmt_bytes(size)}",
                     ui.kb(("📥 Скачать", act.data("get", idx)),
                           ("♻️ Восстановить", act.data("rs", idx)),
                           ui.back(act.data("list"))))
@@ -144,14 +150,15 @@ async def _options(target: ui.Target, state: FSMContext) -> None:
         await ui.render(target, "Бэкап не выбран.", ui.kb(ui.back("bk")))
         return
     lines = [f"<b>♻️ Восстановление</b>\n<code>{esc(os.path.basename(rs['path']))}</code>\n",
-             "Сервер и клиенты восстанавливаются всегда; текущий awg0.conf сохраняется рядом.",
+             "Сервер и клиенты восстанавливаются всегда — <b>текущий сервер будет заменён</b>; "
+             "его awg0.conf сохраняется рядом.",
              "Туннели восстанавливаются выключенными — их включают вручную."]
+    if rs["has_tunnels"]:
+        lines.append("Туннели — настройки Xray, exit-нод, каскада и DNS.")
     await ui.render(target, "\n".join(lines), ui.kb(
         (f"{'✅' if rs['wgobf'] else '⬜️'} WG + обфускатор", act.data("opt", "wgobf")) if rs["has_wgobf"] else None,
-        (f"{'✅' if rs['tunnels'] else '⬜️'} Настройки туннелей (Xray, exit-ноды, каскад, DNS)",
-         act.data("opt", "tunnels")) if rs["has_tunnels"] else None,
-        ("♻️ Восстановить — текущий сервер будет заменён", act.data("go")),
-        ui.back("bk", "✖️ Отмена")))
+        (f"{'✅' if rs['tunnels'] else '⬜️'} Туннели", act.data("opt", "tunnels")) if rs["has_tunnels"] else None,
+        ui.Row(("♻️ Восстановить", act.data("go")), ui.back("bk", "✖️ Отмена"))))
 
 
 @act("opt")
