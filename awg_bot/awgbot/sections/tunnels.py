@@ -69,7 +69,7 @@ async def _panic_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 # ── Клиенты туннеля (WARP, Xray) ──────────────────────────
 @tc()
-async def clients_screen(cb: CallbackQuery, state: FSMContext, kind: str) -> None:
+async def clients_screen(cb: CallbackQuery, state: FSMContext, kind: str, page: int = 0) -> None:
     rows = await api.data("tunnels", "clients", kind, default=[]) or []
     back_to = "warp" if kind == "warp" else "xr"
     if not rows:
@@ -77,22 +77,29 @@ async def clients_screen(cb: CallbackQuery, state: FSMContext, kind: str) -> Non
         return
     await ui.render(cb, f"<b>👥 Клиенты в {'WARP' if kind == 'warp' else 'Xray'}</b>\n"
                         "✅ — через туннель, ➖ — напрямую. Нажатие переключает.",
-                    ui.kb([(f"{'✅' if r['on'] else '➖'} {r['name']} · {r['ip']}", tc.data("t", f"{kind}|{r['name']}"))
-                           for r in rows],
+                    ui.kb(ui.paged([(f"{'✅' if r['on'] else '➖'} {r['name']} · {r['ip']}",
+                                     tc.data("t", f"{kind}|{r['name']}|{page}")) for r in rows],
+                                   page, lambda p: tc.data("pg", f"{kind}|{p}")),
                           ("✅ Все через туннель", tc.data("a", f"{kind}|all")),
                           ("➖ Все напрямую", tc.data("a", f"{kind}|none")),
                           ui.back(back_to)))
 
 
+@tc("pg")
+async def _page(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    kind, _, page = arg.partition("|")
+    await clients_screen(cb, state, kind, int(page) if page.isdigit() else 0)
+
+
 @tc("t")
 async def _toggle(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    kind, _, name = arg.partition("|")
+    kind, name, page = (arg.split("|") + ["", "0"])[:3]
     rows = await api.data("tunnels", "clients", kind, default=[]) or []
     on = next((r["on"] for r in rows if r["name"] == name), False)
     r = await api.call("tunnels", "client", kind, name, "off" if on else "on")
     if not r.ok:
         await cb.answer(r.message[:190], show_alert=True)
-    await clients_screen(cb, state, kind)
+    await clients_screen(cb, state, kind, int(page) if page.isdigit() else 0)
 
 
 @tc("a")
@@ -495,9 +502,11 @@ async def _ex_bal_set(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 async def _ex_clients(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     rows = await api.data("clients", "list", default=[]) or []
     label = {"off": "напрямую", "shared": "общий выход", None: "общий выход"}
+    page = int(arg) if arg.isdigit() else 0
     await ui.render(cb, "<b>👥 Клиенты и exit-ноды</b>\nВыбор ноды переводит маршруты в режим «выбранные клиенты».",
-                    ui.kb([(f"{c['name']} · {label.get(c.get('exit'), 'нода ' + str(c.get('exit')))}",
-                            f"cl:tun:{c['name']}") for c in rows], ui.back("ex")))
+                    ui.kb(ui.paged([(f"{c['name']} · {label.get(c.get('exit'), 'нода ' + str(c.get('exit')))}",
+                                     f"cl:tun:{c['name']}") for c in rows], page, lambda p: ex.data("cl", str(p))),
+                          ui.back("ex")))
 
 
 # ── Каскад портов ─────────────────────────────────────────

@@ -163,10 +163,13 @@ async def _add_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
 @act("list")
 async def _list(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     rows = await api.data("wgobf", "clients", default=[]) or []
+    page = int(arg) if arg.isdigit() else 0
     await ui.render(cb, "<b>👥 Клиенты WG + обфускатор</b>" + ("" if rows else "\n\nКлиентов нет."),
-                    ui.kb([(f"{'🟢' if r.get('ago') is not None and r['ago'] < 180 else '⚪️'} {r['name']} · {r['ip']}"
-                            + (f" · {ui.fmt_dur(r['ago'])} назад" if r.get("ago") is not None else ""),
-                            act.data("v", r["name"])) for r in rows], ui.back("wo")))
+                    ui.kb(ui.paged([(f"{'🟢' if r.get('ago') is not None and r['ago'] < 180 else '⚪️'} "
+                                     f"{r['name']} · {r['ip']}"
+                                     + (f" · {ui.fmt_dur(r['ago'])} назад" if r.get("ago") is not None else ""),
+                                     act.data("v", r["name"])) for r in rows], page, lambda p: act.data("list", str(p))),
+                          ui.back("wo")))
 
 
 @act("v")

@@ -189,11 +189,28 @@ async def run():
     chk("несколько клиентов — zip", d and d[0].document.filename == "awg_clients.zip" and len(d[0].document.data) > 100,
         [n for n, _ in sent])
 
+    await press("cl:bulk")
+    await say("p:25")
+    await press("cl:be:none")
+    text, buttons = screen(await press("tc::warp"))
+    datas = [d for _, d in buttons]
+    chk("длинный список клиентов туннеля — по страницам", "tc:pg:warp|1" in datas and len(buttons) <= 25, len(buttons))
+    text, buttons = screen(await press("tc:pg:warp|1"))
+    first = next(d for _, d in buttons if d.startswith("tc:t:"))
+    text, buttons = screen(await press(first))
+    chk("переключение клиента не сбрасывает страницу", "tc:pg:warp|0" in [d for _, d in buttons], buttons[:3])
+
     print("Сервер и туннели")
     text, buttons = screen(await press("srv"))
     chk("экран сервера", "AWG 2.0" in text and "srv:proto" in [d for _, d in buttons], text)
     text, buttons = screen(await press("srv:create"))
     chk("мастер создания начинается с региона", "srv:w:region=ru" in [d for _, d in buttons], buttons)
+    long_domain = "a" * 60 + ".example.com"
+    await press("srv:epdom")
+    text, buttons = screen(await say(long_domain))
+    chk("длинный домен endpoint не ломает кнопки", "srv:epgo:keep" in [d for _, d in buttons], [text, buttons])
+    text, _ = screen(await press("srv:epgo:keep"))
+    chk("endpoint применён", "✅" in text and long_domain in text, text)
     text, buttons = screen(await press("tun"))
     chk("экран туннелей", "warp" in [d for _, d in buttons] and "tun:panic" in [d for _, d in buttons], buttons)
 

@@ -78,7 +78,7 @@ async def _sniff(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ui.render(cb, "<b>🎯 Тест мимикрии</b>\nСервер 20 секунд слушает первые пакеты клиента и "
                         "проверяет, видны ли пакеты мимикрии и на что они похожи.\n\nКлиент:",
                     ui.kb([(f"{r['name']} · {r['endpoint'].rsplit(':', 1)[0]}", act.data("sn", r["name"]))
-                           for r in rows], ui.back("diag")))
+                           for r in rows[:40]], ui.back("diag")))
 
 
 @act("sn")

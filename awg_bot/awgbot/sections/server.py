@@ -332,24 +332,30 @@ async def _ep_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
     if not DOMAIN_RE.match(v):
         await ask.retry(msg, state, ctx, "Нужно имя вида vpn.example.com")
         return
-    await _ep_rewrite(msg, v)
+    await _ep_rewrite(msg, state, v)
 
 
 @act("epset")
 async def _ep_set(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    await _ep_rewrite(cb, arg)
+    await _ep_rewrite(cb, state, "ip")
 
 
-async def _ep_rewrite(target: ui.Target, value: str) -> None:
+async def _ep_rewrite(target: ui.Target, state: FSMContext, value: str) -> None:
+    # Домен до 253 символов — в callback_data (64 байта) не влезет, держим в FSM
+    await state.update_data(endpoint=value)
     await ui.render(target, f"Endpoint → <code>{esc(value if value != 'ip' else 'публичный IP')}</code>\n"
                             "Переписать его и в уже выданных конфигах?",
-                    ui.kb(("✅ Да, во всех конфигах", act.data("epgo", f"{value}|all")),
-                          ("Только для новых", act.data("epgo", f"{value}|keep")), ui.back(act.data("ep"))))
+                    ui.kb(("✅ Да, во всех конфигах", act.data("epgo", "all")),
+                          ("Только для новых", act.data("epgo", "keep")), ui.back(act.data("ep"))))
 
 
 @act("epgo")
-async def _ep_go(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    value, _, mode = arg.partition("|")
+async def _ep_go(cb: CallbackQuery, state: FSMContext, mode: str) -> None:
+    value = (await state.get_data()).get("endpoint")
+    if not value:
+        await _ep(cb, state, "")
+        return
+    await state.update_data(endpoint="")
     args = ["server", "endpoint", value] + (["keep"] if mode == "keep" else [])
     await ui.result(cb, await api.call(*args), "Endpoint", "srv")
 

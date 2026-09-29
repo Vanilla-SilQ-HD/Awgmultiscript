@@ -43,6 +43,19 @@ def kb(*items: Button | Iterable[Button] | None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def paged(buttons: list[Button], page: int, nav: Callable[[int], str], size: int = 20) -> list[Button]:
+    """Страница списка кнопок и переходы между страницами: у клавиатуры
+    Telegram есть предел числа кнопок."""
+    pages = max(1, (len(buttons) + size - 1) // size)
+    page = min(max(page, 0), pages - 1)
+    out = buttons[page * size:(page + 1) * size]
+    if page > 0:
+        out.append((f"◀️ Страница {page}", nav(page - 1)))
+    if page < pages - 1:
+        out.append((f"Страница {page + 2} ▶️", nav(page + 1)))
+    return out
+
+
 def back(to: str = "main", text: str = "◀️ Назад") -> Button:
     return (text, to)
 
