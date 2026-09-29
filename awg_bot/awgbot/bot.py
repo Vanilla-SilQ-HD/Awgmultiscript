@@ -19,7 +19,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from aiogram.types import BotCommand, CallbackQuery, ErrorEvent, Message
 
-from . import __version__, access, admins, api, ask, jobs, monitor, net
+from . import __version__, access, admins, api, ask, jobs, monitor, net, store, ui
 from .config import load_config
 from .sections import backup, botself, clients, diag, main as main_menu, server, system, tunnels, wgobf
 
@@ -66,6 +66,21 @@ def build(session: BaseSession | None = None) -> tuple[Bot, Dispatcher]:
     return bot, dp
 
 
+async def restore(bot: Bot) -> None:
+    """После старта: дочитать задачи и поправить экран «перезапускаюсь»."""
+    n = jobs.resume(bot)
+    if n:
+        log.info("Дослеживаю задач: %d", n)
+    notice = store.notice_pop()
+    if notice.get("chat") and notice.get("msg"):
+        text = (f"✅ {ui.esc(str(notice.get('text') or 'Бот перезапущен'))}\n"
+                f"Бот снова на связи. Telegram — {ui.esc(net.route_note)}.")
+        with contextlib.suppress(Exception):
+            await bot.edit_message_text(text, chat_id=int(notice["chat"]), message_id=int(notice["msg"]),
+                                        reply_markup=ui.kb(ui.back(str(notice.get("back") or "main"))))
+            ui.set_screen(int(notice["chat"]), int(notice["msg"]))
+
+
 async def main() -> None:
     bot, dp = build()
     tasks: list[asyncio.Task] = []
@@ -79,9 +94,7 @@ async def main() -> None:
             await bot.delete_webhook(drop_pending_updates=True)
         with contextlib.suppress(Exception):
             await bot.set_my_commands([BotCommand(command="start", description="Главное меню")])
-        n = jobs.resume(bot)
-        if n:
-            log.info("Дослеживаю задач: %d", n)
+        await restore(bot)
         tasks.append(asyncio.create_task(monitor.loop(bot), name="monitor"))
 
     @dp.shutdown()

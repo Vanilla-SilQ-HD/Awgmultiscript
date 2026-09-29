@@ -129,8 +129,25 @@ bot_proxy_set() {
   else
     ok "Прокси убран"
   fi
-  unit_active "$BOT_UNIT" && systemctl restart "$BOT_UNIT" && ok "Бот перезапущен"
+  bot_restart
   return 0
+}
+
+# Перезапуск бота. Если зовёт сам бот (awg2 api), этот процесс живёт в его
+# cgroup: мгновенный restart убил бы его раньше ответа («awg2 ответил не
+# JSON»). Тогда перезапуск откладывается на 2 секунды в отдельный юнит.
+bot_restart() {
+  unit_active "$BOT_UNIT" || return 0
+  if (( ! API_MODE )); then
+    systemctl restart "$BOT_UNIT" && ok "Бот перезапущен"
+    return
+  fi
+  if ! systemd-run --on-active=2 --unit="awg2-bot-restart-$(date +%s%N)" --collect --quiet \
+       /bin/systemctl restart "$BOT_UNIT" &>/dev/null; then
+    # Без systemd-run: отдельная сессия без дескрипторов ответа
+    setsid bash -c "sleep 2; systemctl restart $BOT_UNIT" </dev/null &>/dev/null 3>&- 4>&- 8>&- &
+  fi
+  ok "Бот перезапустится через пару секунд"
 }
 
 # ── Установка / удаление ──────────────────────────────────

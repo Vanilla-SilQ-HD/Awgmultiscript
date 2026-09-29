@@ -14,7 +14,7 @@ from aiogram import Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from .. import __version__, access, admins, api, ask, jobs, ui
+from .. import __version__, access, admins, api, ask, jobs, store, ui
 from ..ui import esc
 
 router = Router()
@@ -51,9 +51,20 @@ async def _update_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await jobs.start(cb, "Обновление бота", "bot", "update", back_to="botm")
 
 
+async def restart_screen(target: ui.Target, r: api.Result, text: str) -> None:
+    """Бот сейчас перезапустится: экран «перезапускаюсь», который новый
+    процесс бота после старта заменит итогом (см. bot.restore)."""
+    if not r.ok:
+        await ui.render(target, ui.fail(r, "Перезапуск бота"), ui.kb(ui.back("botm")))
+        return
+    msg = await ui.render(target, f"🔄 {text}\n<i>Бот перезапускается — через несколько секунд он снова на связи.</i>")
+    if msg is not None:
+        store.notice_set(msg.chat.id, msg.message_id, text, "botm")
+
+
 @act("restart")
 async def _restart(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    await jobs.start(cb, "Перезапуск бота", "bot", "restart", back_to="botm")
+    await restart_screen(cb, await api.call("bot", "restart"), "Перезапуск бота")
 
 
 # ── Прокси ────────────────────────────────────────────────
@@ -109,8 +120,7 @@ async def _apply_proxy(target: ui.Target, state: FSMContext, url: str, force: bo
     r = await api.call("bot", "proxy", "set", url, *(["force"] if force else []))
     if r.ok:
         await state.update_data(proxy_pending="")
-        await ui.render(target, "✅ Прокси сохранён. Бот перезапускается — через несколько секунд он снова "
-                                "на связи.", ui.kb(ui.back("botm")))
+        await restart_screen(target, r, "Прокси до Telegram сохранён")
         return
     # Адрес для «сохранить всё равно» — только в памяти бота: в callback_data
     # ему не место (там может быть пароль)
@@ -138,8 +148,7 @@ async def _pcheck(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 @act("pclear")
 async def _pclear(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    r = await api.call("bot", "proxy", "clear")
-    await ui.result(cb, r, "Прокси убран", "botm", "Бот ходит напрямую и сейчас перезапустится." if r.ok else "")
+    await restart_screen(cb, await api.call("bot", "proxy", "clear"), "Прокси до Telegram убран")
 
 
 # ── Удаление бота ─────────────────────────────────────────

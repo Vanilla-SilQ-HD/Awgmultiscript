@@ -300,6 +300,31 @@ async def run():
         any(t == "alice · нода n1" for t, _ in buttons) and any(t == "bob · общий выход" for t, _ in buttons),
         [t for t, _ in buttons][:4])
 
+    print("Прокси и перезапуск бота")
+    with open(os.path.join(ROOT, "bot.conf"), "w") as f:
+        f.write("BOT_TOKEN=1:A\nADMIN_ID=111\n")
+    with open(ACTIVE, "a") as f:
+        f.write("awg-bot.service\n")
+    await press("botm:penter")
+    text, _ = screen(await say("socks5://127.0.0.1:10808"))
+    chk("прокси сохраняется без «awg2 ответил не JSON»", "Бот перезапускается" in text, text)
+    chk("адрес прокси удалён из чата", LAST_SAID[0] in SESSION.deleted)
+    with open(os.path.join(ROOT, "bot.conf")) as f:
+        chk("BOT_PROXY записан", "BOT_PROXY=socks5://127.0.0.1:10808" in f.read())
+    notice_msg = store.load(store.NOTICE).get("msg")
+    chk("экран «перезапускаюсь» запомнен", notice_msg == max(SESSION.chat), store.load(store.NOTICE))
+    mark = len(SESSION.sent)
+    await botmod.restore(BOT)
+    fixed = [m for n, m in SESSION.sent[mark:] if n == "EditMessageText" and m.message_id == notice_msg]
+    chk("после перезапуска экран поправлен: бот на связи и каким путём",
+        fixed and "Бот снова на связи" in fixed[0].text and "Telegram —" in fixed[0].text,
+        fixed[0].text if fixed else [n for n, _ in SESSION.sent[mark:]])
+    text, _ = screen(await press("botm:restart"))
+    chk("перезапуск из меню — сразу, без ошибки", "Бот перезапускается" in text, text)
+    await botmod.restore(BOT)
+    with open(ACTIVE, "w") as f:
+        f.write("awg-exits-routing.service\n")
+
     print("Все экраны")
     screens = ["srv", "mod", "srv:proto", "srv:ep", "srv:install", "srv:reset", "srv:reboot",
                "cl:activity", "cl:exp:alice", "cl:mim:alice", "cl:tun:alice", "cl:ren:alice",

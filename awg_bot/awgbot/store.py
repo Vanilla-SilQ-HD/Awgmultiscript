@@ -5,6 +5,8 @@
   monitor_state.json  кто из наблюдаемых клиентов сейчас офлайн;
   jobs.json           незавершённые задачи awg2 и сообщения с их журналом —
                       после перезапуска бота он доводит их до итога;
+  restart_notice.json экран, который бот поправит, когда перезапустится
+                      (смена прокси, перезапуск из меню);
   admins.json         приглашённые админы (ведёт admins.py).
 """
 
@@ -24,6 +26,7 @@ STATE_DIR = Path(os.environ.get("AWG_BOT_STATE", "/var/lib/awg-bot"))
 NOTES = STATE_DIR / "notes.json"
 MONITOR = STATE_DIR / "monitor_state.json"
 JOBS = STATE_DIR / "jobs.json"
+NOTICE = STATE_DIR / "restart_notice.json"
 
 MONITOR_TAG = "#ping"
 NOTE_MAX = 200
@@ -106,6 +109,17 @@ def set_monitored(name: str, on: bool) -> None:
     if on:
         base = f"{base[:NOTE_MAX - len(MONITOR_TAG) - 1].rstrip()} {MONITOR_TAG}".strip()
     set_note(name, base)
+
+
+# ── Сообщение, которое бот поправит после своего перезапуска ──
+def notice_set(chat: int, msg: int, text: str, back: str) -> None:
+    save(NOTICE, {"chat": chat, "msg": msg, "text": text, "back": back})
+
+
+def notice_pop() -> dict:
+    data = load(NOTICE)
+    NOTICE.unlink(missing_ok=True)
+    return data
 
 
 # ── Незавершённые задачи ──────────────────────────────────

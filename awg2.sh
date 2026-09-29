@@ -7284,8 +7284,25 @@ bot_proxy_set() {
   else
     ok "Прокси убран"
   fi
-  unit_active "$BOT_UNIT" && systemctl restart "$BOT_UNIT" && ok "Бот перезапущен"
+  bot_restart
   return 0
+}
+
+# Перезапуск бота. Если зовёт сам бот (awg2 api), этот процесс живёт в его
+# cgroup: мгновенный restart убил бы его раньше ответа («awg2 ответил не
+# JSON»). Тогда перезапуск откладывается на 2 секунды в отдельный юнит.
+bot_restart() {
+  unit_active "$BOT_UNIT" || return 0
+  if (( ! API_MODE )); then
+    systemctl restart "$BOT_UNIT" && ok "Бот перезапущен"
+    return
+  fi
+  if ! systemd-run --on-active=2 --unit="awg2-bot-restart-$(date +%s%N)" --collect --quiet \
+       /bin/systemctl restart "$BOT_UNIT" &>/dev/null; then
+    # Без systemd-run: отдельная сессия без дескрипторов ответа
+    setsid bash -c "sleep 2; systemctl restart $BOT_UNIT" </dev/null &>/dev/null 3>&- 4>&- 8>&- &
+  fi
+  ok "Бот перезапустится через пару секунд"
 }
 
 # ── Установка / удаление ──────────────────────────────────
@@ -7853,6 +7870,7 @@ main_menu() {
 # Изменяющие команды выполняются по одной (flock); чтение — без очереди.
 
 API_VERSION=1
+API_MODE=0          # 1 — вызов пришёл из awg2 api (например, от бота)
 API_JOBS="" API_LOCK="" API_LOG="" API_DATA="" API_IN="" API_RESULT="" API_SELF=""
 API_STDIN_READ=0
 API_ARGS=()
@@ -8464,7 +8482,7 @@ _api_bot() {
     status)
       { _kv installed:b "$(_b bot_installed)"; _kv active:b "$(_b unit_active "$BOT_UNIT")"
         _kv version "$(bot_version)"; _kv proxy "$(bot_proxy_mask "$(bot_proxy_get)")"; } | api_obj ;;
-    restart) systemctl restart "$BOT_UNIT" && ok "Бот перезапущен" ;;
+    restart) unit_active "$BOT_UNIT" || { err "Бот не запущен"; return 1; }; bot_restart ;;
     update) bot_installed || { err "Бот не установлен"; return 1; }; bot_install ;;
     proxy)
       case "${1:-}" in
@@ -8654,7 +8672,7 @@ _api_job_prepare() {
 
 api_main() {
   local rc=0 envelope
-  AUTO_MODE=1
+  AUTO_MODE=1 API_MODE=1
   API_SELF=$(readlink -f "$0")
   API_JOBS="$STATE_DIR/jobs" API_LOCK="$STATE_DIR/api.lock"
   if ! command -v python3 &>/dev/null; then

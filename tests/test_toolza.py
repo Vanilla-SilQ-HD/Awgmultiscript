@@ -390,6 +390,20 @@ chk("неизвестная команда — rc 2", r.get("ok") is False and r
 r = api("server", "proto", "9.9")
 chk("проверка аргументов", r.get("ok") is False and r["rc"] == 2 and "server proto" in r["error"], r)
 
+# Перезапуск бота по просьбе самого бота — отложенный: awg2 живёт в cgroup
+# бота и обязан успеть ответить до того, как systemd его остановит
+with open(ACTIVE, "a") as f:
+    f.write("awg-bot.service\n")
+reset_calls()
+t0 = time.time()
+r = api("bot", "restart")
+quick_log = calls()
+chk("api bot restart отвечает сразу, до перезапуска", r.get("ok") and time.time() - t0 < 2
+    and "systemctl restart awg-bot.service" not in quick_log, [r.get("error"), quick_log[-200:]])
+time.sleep(3)
+chk("бот перезапускается через пару секунд", "systemctl restart awg-bot.service" in calls(), calls()[-300:])
+open(ACTIVE, "w").close()
+
 # Очередь: пока занят замок, изменяющая команда отказывает, чтение — нет
 lock = os.path.join(ROOT, "var/lib/awg2/api.lock")
 holder = subprocess.Popen(["flock", lock, "sleep", "8"])

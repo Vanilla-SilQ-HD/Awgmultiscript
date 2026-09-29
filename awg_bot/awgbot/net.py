@@ -32,6 +32,9 @@ from urllib.parse import urlsplit
 
 log = logging.getLogger("awgbot.net")
 
+# Каким путём бот на самом деле ходит в Telegram — для сообщения после рестарта.
+route_note = "напрямую"
+
 TELEGRAM_API_HOST = "api.telegram.org"
 
 # Адреса api.telegram.org, встречающиеся на практике. Порядок не важен:
@@ -220,6 +223,8 @@ def build_session(proxy: str = "") -> Any:
     """
     from aiogram.client.session.aiohttp import AiohttpSession
 
+    global route_note
+    route_note = "напрямую"
     if proxy and not proxy_alive(proxy):
         # Молчать нельзя: бот будет работать, но не так, как настроено, и
         # если блокировка именно та, ради которой прокси заводили, помощи
@@ -228,13 +233,17 @@ def build_session(proxy: str = "") -> Any:
                     "туннелем awg2 — включи туннель (Туннели и DNS), затем: "
                     "systemctl restart awg-bot",
                     mask_proxy(proxy))
+        route_note = f"напрямую — прокси {mask_proxy(proxy)} не отвечает"
         proxy = ""
 
     dev = iface_of(proxy)
     if dev:
         session = AiohttpSession()
-        if not _bind_iface(session, dev):
+        if _bind_iface(session, dev):
+            route_note = f"через интерфейс {dev}"
+        else:
             log.warning("Привязка к %s недоступна — иду напрямую", dev)
+            route_note = f"напрямую — привязка к {dev} недоступна (обнови бота)"
     elif proxy:
         try:
             session = AiohttpSession(proxy=proxy)
@@ -249,6 +258,7 @@ def build_session(proxy: str = "") -> Any:
             ) from e
         # В логе только адрес: у прокси с авторизацией до @ стоят логин и пароль.
         log.info("Telegram API через прокси %s", mask_proxy(proxy))
+        route_note = f"через прокси {mask_proxy(proxy)}"
     else:
         session = AiohttpSession()
 
