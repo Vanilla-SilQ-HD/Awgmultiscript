@@ -19,52 +19,71 @@ act = ui.Actions(router, "main")
 PROFILE = {"lite": "AmneziaVPN", "pro": "Мощный", "standard": "Standard"}
 
 
-def _components(c: dict) -> str:
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """1 клиент, 2 клиента, 5 клиентов."""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    return few if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else many
+
+
+def block(*lines: str) -> str:
+    """Блок-цитата Telegram: цветная полоса слева, пустые строки пропускаются."""
+    body = "\n".join(line for line in lines if line)
+    return f"<blockquote>{body}</blockquote>" if body else ""
+
+
+def _attention(d: dict) -> str:
+    """То, что требует действий: только когда есть что сказать."""
+    c, s = d.get("components") or {}, d.get("server") or {}
+    return block(
+        "⚠️ awg0 не поднят — <i>Сервер → Проверить и починить</i>" if s.get("exists") and not s.get("up") else "",
+        f"▲ {esc(c['reboot'])}" if c.get("installed") and c.get("reboot") else "",
+        f"⬆️ Доступна {esc(d['update'])} — <i>Обновление</i>" if d.get("update") else "",
+    )
+
+
+def _server(d: dict) -> str:
+    c, s = d.get("components") or {}, d.get("server") or {}
     if not c.get("installed"):
-        return "❌ не установлены — <i>Сервер → Установить компоненты</i>"
-    line = f"модуль <code>{esc(c.get('module') or '?')}</code>"
-    if c.get("reboot"):
-        line += f"\n   ▲ {esc(c['reboot'])}"
-    elif c.get("module_update"):
-        line += f" · ⬆️ есть {esc(c['module_update'])}"
-    else:
-        line += " ✓"
-    return line
-
-
-def _server(s: dict) -> str:
+        return block("❌ Компоненты не установлены", "<i>Сервер → Установить компоненты</i>")
+    module = f"🧩 модуль <code>{esc(c.get('module') or '?')}</code> " + (
+        f"· ⬆️ есть {esc(c['module_update'])}" if c.get("module_update") else "✓")
     if not s.get("exists"):
-        return "не создан — <i>Сервер → Создать сервер</i>"
-    up = "🟢" if s.get("up") else "🔴 не поднят ·"
-    return (f"{up} AWG {esc(s.get('proto', '?'))} · {esc(PROFILE.get(s.get('profile', ''), s.get('profile', '')))}"
-            f" · порт {s.get('port')} · клиентов {s.get('clients', 0)}")
+        return block("⚪️ Сервер не создан — <i>Сервер → Создать сервер</i>", module)
+    n, online = int(s.get("clients") or 0), int(s.get("online") or 0)
+    return block(
+        f"{'🟢' if s.get('up') else '🔴'} AWG {esc(s.get('proto', '?'))} · "
+        f"{esc(PROFILE.get(s.get('profile', ''), s.get('profile', '')))} · порт {s.get('port')}",
+        f"👥 {n} {plural(n, 'клиент', 'клиента', 'клиентов')} · {online} онлайн",
+        module,
+    )
 
 
 def _tunnels(d: dict) -> str:
+    """Работающие туннели первыми, затем настроенные и выключенные."""
     t = d.get("tunnels") or {}
     names = [("warp", "WARP"), ("xray", "Xray"), ("tun2socks", "tun2socks"),
              ("exits", "Exit-ноды"), ("dns", "DNS")]
-    parts = [f"{ui.state_icon(t[k])} {n}" for k, n in names if t.get(k, "none") != "none"]
+    items = [(t[k], n) for k, n in names if t.get(k, "none") != "none"]
+    if d.get("wgobf", "none") != "none":
+        items.append((d["wgobf"], "WG+обф."))
+    items.sort(key=lambda it: it[0] != "up")
+    parts = [f"{ui.state_icon(st)} {n}" for st, n in items]
     if t.get("cascade"):
         parts.append(f"🔀 каскад {t['cascade']}")
-    if d.get("wgobf", "none") != "none":
-        parts.append(f"{ui.state_icon(d['wgobf'])} WG+обф.")
-    return " · ".join(parts) or "не настроены"
+    return block("  ·  ".join(parts) or "Туннели не настроены")
 
 
 def status_text(d: dict) -> str:
     channel = "бета" if d.get("channel") == "beta" else "стабильный"
-    head = f"<b>AWG Toolza</b> {esc(d.get('version', ''))} · {channel}"
-    if d.get("update"):
-        head += f" · ⬆️ {esc(d['update'])}"
-    return "\n".join([
-        head,
-        f"🖥 {esc(d.get('host', ''))} · <code>{esc(d.get('ip', ''))}</code> · {esc(d.get('os', ''))}",
-        "",
-        f"Компоненты: {_components(d.get('components') or {})}",
-        f"Сервер: {_server(d.get('server') or {})}",
-        f"Туннели: {_tunnels(d)}",
-    ])
+    return "\n".join(filter(None, [
+        f"<b>AWG Toolza</b>  {esc(d.get('version', ''))} · {channel}",
+        _attention(d),
+        block(f"🖥 <b>{esc(d.get('host', ''))}</b> · <code>{esc(d.get('ip', ''))}</code>", esc(d.get("os", ""))),
+        _server(d),
+        _tunnels(d),
+    ]))
 
 
 def menu_kb(d: dict) -> ui.InlineKeyboardMarkup:

@@ -90,6 +90,9 @@ _api_status() {
       _kv server.endpoint "$(endpoint_host):$(server_port)"; _kv server.domain "$(endpoint_domain)"
       _kv server.region "$(server_region)"; _kv server.mtu:n "$(conf_iface_get MTU)"
       _kv server.mimicry "$(conf_marker AWG_MIMICRY)"; _kv server.clients:n "$n"
+      # Онлайн — рукопожатие за последние 3 минуты
+      _kv server.online:n "$(awg show "$AWG_IF" latest-handshakes 2>/dev/null \
+        | awk -v now="$(date +%s)" '$2 > 0 && now - $2 < 180' | wc -l)"
     fi
     _kv tunnels.warp "$(_api_tun warp_is_up "$WARP_CONF" "$USQUE_CONF")"
     _kv tunnels.xray "$(_api_tun xray_is_up "$XRAY_CONF")"

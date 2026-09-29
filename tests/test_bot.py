@@ -178,7 +178,8 @@ async def run():
 
     print("Главное меню")
     text, buttons = screen(await say("/start"))
-    chk("сводка сервера", "AWG Toolza" in text and "AWG 2.0" in text and "клиентов 2" in text, text)
+    chk("сводка сервера", "AWG Toolza" in text and "AWG 2.0" in text and "2 клиента · 0 онлайн" in text, text)
+    chk("шапка блоками", text.count("<blockquote>") >= 3 and "<b>vm" not in text.split("<blockquote>")[0], text)
     datas = [d for _, d in buttons]
     chk("девять пунктов меню в одну колонку",
         datas[:9] == ["srv", "cl", "diag", "bk", "tun", "botm", "del", "upd", "wo"], buttons)
