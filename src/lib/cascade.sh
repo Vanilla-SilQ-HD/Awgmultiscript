@@ -166,7 +166,7 @@ cascade_list() {
     if iptables-save -t nat 2>/dev/null | grep -qE -- "$(cascade_tag "$p" "$in")\"?( |$)"; then mark="${G}●${N}"; else mark="${R}○${N}"; fi
     printf "  %-3s %b %-4s %-6s %-16s %-6s %s\n" "$((i + 1)))" "$mark" "${p^^}" "$in" "$dst" "$out" "${cm:-—}"
   done
-  echo -e "  ${D}● применено, ○ записано, но в iptables нет (Переприменить — пункт 5)${N}"
+  echo -e "  ${D}● применено, ○ записано, но в iptables нет (Переприменить правила)${N}"
 }
 
 cascade_delete() {

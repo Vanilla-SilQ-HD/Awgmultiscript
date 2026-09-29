@@ -60,7 +60,7 @@ t2s_up() {
   if ! why=$(socks_probe "$proxy"); then
     err "Через $proxy трафик не идёт (ответ: $why) — туннель не включаю"
     [[ "$proxy" == "$XRAY_SOCKS" || "$proxy" == "localhost:${XRAY_SOCKS##*:}" ]] \
-      && info "Это SOCKS-вход Xray — Xray включается своим пунктом (Туннели → 2)"
+      && info "Это SOCKS-вход Xray — Xray включается в своём разделе (Туннели → Xray)"
     return 1
   fi
   mkdir -p "$T2S_DIR"

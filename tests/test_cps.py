@@ -11,13 +11,13 @@ ClientHello, DNS/SIP/STUN/DTLS/NTP/RTP/SSDP проверяются по свои
 Генератор берётся прямо из awg2.sh (блок _CPS_GENERATOR между якорями
 CPS_GENERATOR_BEGIN/END v2) — тестируется то, что реально поедет пользователю.
 
-Запуск:  python3 tests/test_cps.py [путь/к/awg2.sh]
+Запуск:  python3 tests/test_cps.py [путь/к/dist/awg2.sh]
 Выход:   0 — все пакеты валидны, 1 — есть провалы.
 """
 import os, random, re, subprocess, sys, tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-AWG2 = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_HERE, "..", "awg2.sh")
+AWG2 = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_HERE, "..", "dist", "awg2.sh")
 
 _MARKER_RE = re.compile(
     r"# CPS_GENERATOR_BEGIN v2\b.*?^_CPS_GENERATOR='\n(.*?)\n'\n# CPS_GENERATOR_END v2\b",

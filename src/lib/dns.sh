@@ -206,7 +206,7 @@ dns_install() {  # [force] — включить поверх стороннег�
   info "Жду, пока загрузятся резолверы..."
   if ! _dns_wait_ready; then
     err "dnscrypt-proxy не отвечает на $DNS_PROXY_ADDR:$DNS_PROXY_PORT"
-    info "С некоторых хостингов DoH Cloudflare недоступен — попробуй другие резолверы (пункт 4)"
+    info "С некоторых хостингов DoH Cloudflare недоступен — попробуй другие резолверы"
     journalctl -u "$DNS_UNIT" -n 10 --no-pager 2>/dev/null | sed 's/^/    /'
     return 1
   fi
@@ -250,7 +250,7 @@ dns_status() {
 
 dns_change_upstream() {
   local c i names="" manual
-  [[ -f "$DNS_PROXY_CONF" ]] || { err "Сначала включи шифрованный DNS (пункт 1)"; return 1; }
+  [[ -f "$DNS_PROXY_CONF" ]] || { err "Сначала включи шифрованный DNS"; return 1; }
   for i in "${!DNS_PRESETS[@]}"; do echo -e "  ${C}$((i + 1)))${N} ${DNS_PRESETS[$i]#*|}"; done
   echo -e "  ${C}$(( ${#DNS_PRESETS[@]} + 1 )))${N} Вручную ${D}(имена из public-resolvers.md)${N}"
   read_choice c "${C}  Выбор (0 — отмена): ${N}" 0 $(( ${#DNS_PRESETS[@]} + 1 )) 0

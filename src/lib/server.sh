@@ -435,7 +435,7 @@ _choose_endpoint() {
 # Можно ли создавать сервер. Предупреждение о перезагрузке — в REBOOT_WHY.
 REBOOT_WHY=""
 server_create_ready() {
-  command -v awg &>/dev/null || { err "Компоненты не установлены — Сервер → 1"; return 1; }
+  command -v awg &>/dev/null || { err "Компоненты не установлены — Сервер → Установить компоненты"; return 1; }
   if server_exists; then
     err "Сервер уже создан (профиль $(profile_label), AWG $(server_proto))"
     info "Сменить версию или параметры: Сервер → Протокол; всё заново — сброс сервера"
@@ -444,7 +444,7 @@ server_create_ready() {
   REBOOT_WHY=$(reboot_reason)
   if [[ "$REBOOT_WHY" == *modprobe* ]]; then modprobe "$MOD_NAME" 2>/dev/null; REBOOT_WHY=$(reboot_reason); fi
   if [[ "$REBOOT_WHY" == *"не собран"* ]]; then
-    err "Модуль не собран под работающее ядро $(uname -r) — Сервер → 1 (установка)"
+    err "Модуль не собран под работающее ядро $(uname -r) — Сервер → Установить компоненты"
     return 1
   fi
   return 0
@@ -494,6 +494,9 @@ server_create_opts() {
   done
   if [[ -z "$S_PROTO" ]]; then
     if proto_supported 3.1; then S_PROTO=3.1; else S_PROTO=2.0; fi
+  elif [[ "$S_PROTO" == 3.1 ]] && ! proto_supported 3.1; then
+    err "Модуль или tools не умеют AWG 3.1 — обнови их (Сервер → Модуль ядра) или выбери 2.0"
+    return 1
   fi
   [[ -n "$MTU" ]] || { [[ "$S_PROFILE" == pro ]] && MTU=1320 || MTU=1280; }
   [[ -n "$mim" ]] || { [[ "$S_PROFILE" == pro ]] && mim="dns:3" || mim=none; }
@@ -651,9 +654,9 @@ proto_upgrade_hint() {
   server_exists || return 0
   [[ "$(server_proto)" == 3.1 ]] && return 0
   if proto_supported 3.1; then
-    echo -e "${G}⬆ доступен переход на AWG 3.1${N} ${D}— Сервер → 4${N}"
+    echo -e "${G}⬆ доступен переход на AWG 3.1${N} ${D}— Сервер → Протокол${N}"
   else
-    echo -e "${Y}для AWG 3.1 обнови модуль${N} ${D}— Сервер → 5${N}"
+    echo -e "${Y}для AWG 3.1 обнови модуль${N} ${D}— Сервер → Модуль ядра${N}"
   fi
 }
 

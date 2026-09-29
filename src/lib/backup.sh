@@ -165,7 +165,7 @@ do_restore() {
 backup_restore() {
   local src="$1" label="${1##*/}" port f
   shift
-  command -v awg-quick &>/dev/null || { err "Нет awg-quick — сначала установи компоненты (Сервер → 1)"; return 1; }
+  command -v awg-quick &>/dev/null || { err "Нет awg-quick — сначала установи компоненты (Сервер → Установить компоненты)"; return 1; }
   _restore_prepare "$src" || return 1
   src="$RESTORE_SRC"
   awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true

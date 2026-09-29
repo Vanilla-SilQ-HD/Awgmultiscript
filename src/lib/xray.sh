@@ -89,7 +89,7 @@ xray_install() {  # [update] — без вопроса обновить уже �
 # ── Выходы (outbounds) ────────────────────────────────────
 xray_add_outbound() {
   local link
-  xray_installed || { err "Сначала установи Xray (пункт 1)"; return 1; }
+  xray_installed || { err "Сначала установи Xray"; return 1; }
   read_line link "${C}  Ссылка (vless:// vmess:// hysteria2://): ${N}"
   link="${link//[[:space:]]/}"
   [[ -n "$link" ]] || return 0
@@ -124,7 +124,7 @@ xray_add_link() {  # ссылка
 _xray_pick_tag() {  # → CHOSEN
   local tags=() i c
   mapfile -t tags < <(xray_tags)
-  (( ${#tags[@]} )) || { warn "Выходов нет — добавь ссылку (пункт 2)"; return 1; }
+  (( ${#tags[@]} )) || { warn "Выходов нет — добавь выход ссылкой"; return 1; }
   for i in "${!tags[@]}"; do echo -e "  ${C}$((i + 1)))${N} ${tags[$i]}"; done
   read_choice c "${C}  Выбор (0 — отмена): ${N}" 0 "${#tags[@]}" 0
   (( c )) || return 1
@@ -336,9 +336,9 @@ EOF
 xray_up() {
   local mode=native why owners i units
   server_exists || { err "Сначала создай сервер"; return 1; }
-  xray_installed || { err "Сначала установи Xray (пункт 1)"; return 1; }
+  xray_installed || { err "Сначала установи Xray"; return 1; }
   xray_is_up && { info "Xray уже включён"; return 0; }
-  [[ -n "$(xray_tags)" ]] || { err "Нет ни одного выхода — добавь ссылку (пункт 2)"; return 1; }
+  [[ -n "$(xray_tags)" ]] || { err "Нет ни одного выхода — добавь выход ссылкой"; return 1; }
   tunnel_guard xray || return 1
   if ! xray_tun_supported; then
     mode=tun2socks
@@ -359,7 +359,7 @@ xray_up() {
   if ! why=$(xray_test); then
     err "Xray отверг конфиг:"
     sed 's/^/      /' <<< "$why"
-    info "Разбор по выходам — «Диагностика» (пункт 9)"
+    info "Разбор по выходам — «Диагностика»"
     return 1
   fi
   peers_sync "$XRAY_PEERS"; peers_seed "$XRAY_PEERS"

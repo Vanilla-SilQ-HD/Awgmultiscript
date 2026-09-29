@@ -1,171 +1,33 @@
 """
 test_toolza.py — проверка собранного awg2 (dist/awg2.sh) без root и без сети.
 
-Функции берутся из самого собранного файла: он подключается в bash как
-библиотека (без последней строки «main "$@"»), пути состояния переводятся во
-временный каталог, а системные команды (ip, iptables, systemctl, awg...)
-подменены заглушками, которые пишут вызовы в журнал.
+Функции берутся из самого собранного файла (песочница — sandbox.py): он
+подключается в bash как библиотека, пути состояния переводятся во временный
+каталог, а системные команды (ip, iptables, systemctl, awg...) подменены
+заглушками, которые пишут вызовы в журнал.
 
 Что проверяется:
   • генератор параметров AWG 2.0 / 3.0 / 3.1 — инварианты длин, H1-H4,
-    таймеры 3.x, совместимость набора ключей с ботом;
+    таймеры 3.x;
   • чтение конфигов прежних версий (метки, версия по ключам, подсеть);
   • встроенный helper.py — клиенты, сроки, замена параметров, Xray, exit-ноды;
   • служебные скрипты (emit_script) — синтаксис и запуск: нет «command not
     found», правила iptables ставятся с нужными метками;
-  • разбор iptables-save с комментарием в кавычках.
+  • разбор iptables-save с комментарием в кавычках;
+  • машинный API (awg2 api): ответы, очередь, задачи.
 
 Запуск:  python3 tests/test_toolza.py [путь/к/dist/awg2.sh]
 Выход:   0 — всё прошло, 1 — есть провалы.
 """
-import json
 import os
-import re
-import shutil
-import subprocess
 import sys
-import tempfile
+import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-AWG2 = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "dist", "awg2.sh"))
-BOT_CORE = os.path.join(HERE, "..", "awg_bot", "awgbot", "core.py")
-
-fails = 0
-checks = 0
-
-
-def chk(label, cond, detail=""):
-    global fails, checks
-    checks += 1
-    if cond:
-        print(f"  OK   {label}")
-    else:
-        fails += 1
-        print(f"  FAIL {label}" + (f"\n       {detail}" if detail else ""))
-
-
-# ── Песочница ─────────────────────────────────────────────
-TMP = tempfile.mkdtemp(prefix="awg2-test.")
-BIN = os.path.join(TMP, "bin")
-os.makedirs(BIN)
-CALLS = os.path.join(TMP, "calls.log")
-LINKS = os.path.join(TMP, "links")          # «поднятые» интерфейсы, по строке
-IPT_SAVE = os.path.join(TMP, "iptables-save.txt")
-open(LINKS, "w").close()
-open(IPT_SAVE, "w").close()
-
-STUBS = {
-    # ip link show X — успех, если X в файле links; остальное — только журнал
-    "ip": r'''echo "ip $*" >> "$CALLS"
-if [[ "$1" == link && "$2" == show ]]; then grep -qx "${3:-}" "$LINKS"; exit; fi
-if [[ "$1" == -4 && "$2" == route && "$3" == show ]]; then echo "default via 192.0.2.1 dev eth0"; exit 0; fi
-if [[ "$1" == -4 && "$2" == -o && "$3" == addr ]]; then echo "2: eth0    inet 203.0.113.10/24 brd 203.0.113.255 scope global eth0"; exit 0; fi
-if [[ "$1" == rule && "$2" == del ]]; then exit 1; fi
-if [[ "$1" == rule && "$2" == show ]]; then exit 0; fi
-exit 0''',
-    "iptables": r'''echo "iptables $*" >> "$CALLS"
-for a in "$@"; do [[ "$a" == -C ]] && exit 1; [[ "$a" == -D ]] && exit 1; done
-exit 0''',
-    "iptables-save": r'''cat "$IPT_SAVE"''',
-    "ip6tables": r'''echo "ip6tables $*" >> "$CALLS"; exit 1''',
-    "systemctl": r'''echo "systemctl $*" >> "$CALLS"
-[[ "$1" == is-active || "$1" == is-enabled ]] && exit 1
-exit 0''',
-    "sysctl": r'''echo "sysctl $*" >> "$CALLS"; exit 0''',
-    "awg": r'''case "$1" in
-  genkey|genpsk) head -c 32 /dev/urandom | base64 ;;
-  pubkey) sha256sum | head -c 43; echo "=" ;;
-  *) echo "awg $*" >> "$CALLS" ;;
-esac
-exit 0''',
-    "awg-quick": r'''echo "awg-quick $*" >> "$CALLS"
-[[ "$1" == strip ]] && printf '[Interface]\nPrivateKey = x\n'
-exit 0''',
-    "wg": r'''echo "wg $*" >> "$CALLS"; exit 0''',
-    "conntrack": r'''exit 0''',
-    "ss": r'''exit 0''',
-    "curl": r'''for a in "$@"; do [[ "$a" == *http_code* ]] && { echo 204; exit 0; }; done
-exit 1''',
-    "ufw": r'''exit 1''',
-    "modprobe": r'''exit 0''',
-}
-for name, body in STUBS.items():
-    p = os.path.join(BIN, name)
-    with open(p, "w") as f:
-        f.write("#!/usr/bin/env bash\n" + body + "\n")
-    os.chmod(p, 0o755)
-
-LIB = os.path.join(TMP, "lib.sh")
-with open(AWG2, encoding="utf-8") as f:
-    src = f.read()
-assert src.rstrip().endswith('main "$@"'), "последняя строка сборки — main"
-with open(LIB, "w", encoding="utf-8") as f:
-    f.write(src.rstrip()[: -len('main "$@"')])
-
-ROOT = os.path.join(TMP, "root")
-os.makedirs(ROOT)
-# Все пути состояния — в песочницу; юниты пишутся в каталог вместо /etc/systemd.
-PRELUDE = f'''
-source "{LIB}"
-AWG_DIR="{ROOT}/etc/amnezia/amneziawg"; SERVER_CONF="$AWG_DIR/awg0.conf"
-CLIENT_DIR="{ROOT}/root"; STATE_DIR="{ROOT}/var/lib/awg2"; LOG_FILE="{ROOT}/awg.log"
-INSTALL_LOG="{ROOT}/install.log"; EXITS_DIR="$AWG_DIR"
-EXITS_PEERS="$EXITS_DIR/exits_peers.list"; EXITS_STATE="$EXITS_DIR/exits_state"
-for v in DNS_PERSIST_SCRIPT DNS_HEALTH_SCRIPT CASCADE_SCRIPT T2S_ROUTING_SCRIPT XRAY_ROUTING_SCRIPT \\
-         EXITS_SCRIPT EXPIRE_BIN WARP_AUTOSTART_SCRIPT WARP_HEALTH_SCRIPT WGOBF_FW USQUE_UP_HOOK; do
-  printf -v "$v" '%s' "{ROOT}/scripts/$v"
-done
-CASCADE_DIR="{ROOT}/etc/awg-cascade"; CASCADE_RULES="$CASCADE_DIR/rules.conf"; CASCADE_LOG="{ROOT}/cascade.log"
-WGOBF_DIR="{ROOT}/etc/awg-wgobf"; WGOBF_STATE="$WGOBF_DIR/state"
-EXPIRE_STATE_DIR="{ROOT}/var/lib/awg2-expire"; EXPIRE_LOG="{ROOT}/expire.log"; BOT_CONF="{ROOT}/bot.conf"
-BOT_ADMINS="{ROOT}/admins.json"
-WARP_PEERS="{ROOT}/warp.peers"; XRAY_PEERS="{ROOT}/xray.peers"; USQUE_LOG="{ROOT}/usque.log"
-write_unit() {{ mkdir -p "{ROOT}/units"; cat > "{ROOT}/units/$1"; }}
-remove_unit() {{ :; }}
-mkdir -p "$AWG_DIR" "$CLIENT_DIR" "$STATE_DIR" "{ROOT}/scripts"
-'''
-
-ENV = dict(os.environ, PATH=BIN + ":" + os.environ["PATH"], CALLS=CALLS, LINKS=LINKS,
-           IPT_SAVE=IPT_SAVE, LC_ALL="C.UTF-8")
-
-
-def bash(code, stdin=None):
-    r = subprocess.run(["bash", "-c", PRELUDE + code], input=stdin, capture_output=True,
-                       text=True, env=ENV, timeout=300)
-    return r.returncode, r.stdout, r.stderr
-
-
-def run_script(path, *args):
-    r = subprocess.run(["bash", path, *args], capture_output=True, text=True, env=ENV, timeout=60)
-    return r.returncode, r.stdout, r.stderr
-
-
-def calls():
-    with open(CALLS) as f:
-        return f.read()
-
-
-def reset_calls():
-    open(CALLS, "w").close()
-
-
-def kv(text):
-    out = {}
-    for line in text.splitlines():
-        if " = " in line:
-            k, v = line.split(" = ", 1)
-            out[k.strip()] = v.strip()
-    return out
-
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sandbox import *  # noqa: E402,F401,F403
 
 # ── 1. Генератор параметров ───────────────────────────────
 print("Параметры AWG")
-BOT_KEYS = set()
-if os.path.exists(BOT_CORE):
-    m = re.search(r'for key in \(("Jc".*?)\):', open(BOT_CORE, encoding="utf-8").read(), re.S)
-    if m:
-        BOT_KEYS = set(re.findall(r'"([A-Za-z0-9]+)"', m.group(1)))
-
 N = 120
 for proto in ("2.0", "3.0", "3.1"):
     for profile in ("lite", "standard", "pro"):
@@ -204,8 +66,6 @@ for proto in ("2.0", "3.0", "3.1"):
                     bad.append(("H-диапазоны", H))
                 if any(k in p for k in ("HeaderProtectionKey", "RandomTrailers")):
                     bad.append(("3.x-ключи в 2.0", sorted(p)))
-            if BOT_KEYS and not set(p) <= BOT_KEYS:
-                bad.append(("ключи, которых не знает бот", sorted(set(p) - BOT_KEYS)))
         chk(f"{label}: инварианты", not bad, str(bad[:3]))
 
 rc, out, _ = bash('MTU=1420; AUTO_MODE=1; gen_awg_params pro 3.1 >/dev/null; echo "$MTU"')
@@ -213,41 +73,6 @@ chk("MTU 1420 на 3.1 снижается до запаса", rc == 0 and int(ou
 
 # ── 2. Конфиги прежних версий ─────────────────────────────
 print("Конфиги")
-OLD20 = """# AWG_PROFILE=pro
-# AmneziaWG Toolza — AWG 2.0 server config
-# Region: ru
-# AWG_MIMICRY=quic
-[Interface]
-PrivateKey = sPRIV=
-Address = 10.23.45.1/24
-ListenPort = 51820
-MTU = 1320
-Jc = 5
-Jmin = 10
-Jmax = 90
-S1 = 40
-S2 = 60
-S3 = 20
-S4 = 10
-H1 = 100-2000
-H2 = 536870912-536880000
-H3 = 1073741824-1073750000
-H4 = 1610612736-1610620000
-PostUp = true
-PostDown = true
-
-[Peer]
-# alice
-PublicKey = PUBALICE=
-PresharedKey = PSK=
-AllowedIPs = 10.23.45.2/32
-
-[Peer]
-# bob
-# expires=1
-PublicKey = PUBBOB=
-AllowedIPs = 10.23.45.3/32
-"""
 os.makedirs(os.path.join(ROOT, "etc/amnezia/amneziawg"), exist_ok=True)
 conf = os.path.join(ROOT, "etc/amnezia/amneziawg/awg0.conf")
 with open(conf, "w") as f:
@@ -293,6 +118,18 @@ with open(EXIT, "w") as f:
     f.write("[Interface]\nPrivateKey = X\nAddress = 10.9.0.2/32\nDNS = 1.1.1.1\nTable = auto\n\n[Peer]\nEndpoint = 1.2.3.4:51820\nAllowedIPs = 0.0.0.0/0\n")
 rc, out, _ = bash(f'py exit-conf-fix "{EXIT}"; cat "{EXIT}"')
 chk("exit-нода: Table = off, без DNS", "Table = off" in out and "DNS" not in out and "Table = auto" not in out, out)
+
+WG = os.path.join(ROOT, "etc/wireguard/wgobf0.conf")
+os.makedirs(os.path.dirname(WG), exist_ok=True)
+with open(WG, "w") as f:
+    f.write("[Interface]\nPrivateKey = S\nListenPort = 5\n\n[Peer]\n# client=a\nPublicKey = A\nAllowedIPs = 10.77.1.2/32\n\n"
+            "[Peer]\n# client=b\nPublicKey = B\nAllowedIPs = 10.77.1.3/32\n\n"
+            "[Peer]\n# client=c\nPublicKey = C\nAllowedIPs = 10.77.1.4/32\n")
+rc, out, _ = bash("wgobf_delete_client b >/dev/null && wgobf_clients")
+with open(WG) as f:
+    wg = f.read()
+chk("WG + обфускатор: удаляется ровно свой [Peer]", out.split() == ["a", "c"] and "PublicKey = B" not in wg
+    and "PublicKey = A" in wg and "PublicKey = C" in wg and wg.startswith("[Interface]\nPrivateKey = S"), wg)
 
 rc, out, _ = bash('printf "10.10.0.0/16\\n10.20.1.1/24\\n" | py pick-net awg')
 net = out.strip()
@@ -440,15 +277,7 @@ chk("VERSION в первых 4 КБ (самообновление и бот)", r
 
 # ── 7. Машинный API (awg2 api) ────────────────────────────
 print("API")
-# Обёртка вместо установленного awg2: те же функции, пути — песочница.
-# systemd-run «нет» — задачи идут запасным путём через setsid.
-API_WRAP = os.path.join(TMP, "awg2-api")
-with open(API_WRAP, "w") as f:
-    f.write("#!/usr/bin/env bash\n" + PRELUDE + '[[ "${1:-}" == api ]] && shift\napi_main "$@"\n')
-os.chmod(API_WRAP, 0o755)
-with open(os.path.join(BIN, "systemd-run"), "w") as f:
-    f.write("#!/usr/bin/env bash\nexit 1\n")
-os.chmod(os.path.join(BIN, "systemd-run"), 0o755)
+API_WRAP = api_wrapper()
 with open(conf, "w") as f:
     f.write(OLD20)
 for n in ("alice", "bob"):
@@ -528,7 +357,6 @@ chk("проверка аргументов", r.get("ok") is False and r["rc"] ==
 # Очередь: пока занят замок, изменяющая команда отказывает, чтение — нет
 lock = os.path.join(ROOT, "var/lib/awg2/api.lock")
 holder = subprocess.Popen(["flock", lock, "sleep", "8"])
-import time
 time.sleep(0.5)
 r = api("client", "del", "t-001", env={"API_LOCK_WAIT": "1"})
 chk("занятая очередь — rc 75", r.get("ok") is False and r["rc"] == 75 and "другая операция" in r["error"], r)
@@ -562,6 +390,4 @@ for _ in range(60):
     time.sleep(0.5)
 chk("ошибка задачи в итоге", st.get("state") == "done" and st.get("ok") is False and st.get("rc") == 2, st)
 
-shutil.rmtree(TMP, ignore_errors=True)
-print(f"\nпроверок: {checks}, провалов: {fails}")
-sys.exit(1 if fails else 0)
+summary()

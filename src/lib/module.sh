@@ -189,14 +189,14 @@ tools_update_available() {
 # Строка состояния для шапки меню.
 components_summary() {
   local tag upd reason
-  command -v awg &>/dev/null || { echo -e "${R}не установлены${N} ${D}— Сервер → 1${N}"; return; }
+  command -v awg &>/dev/null || { echo -e "${R}не установлены${N} ${D}— Сервер → Установить компоненты${N}"; return; }
   tag=$(mod_tag)
   reason=$(reboot_reason)
   upd=$(mod_update_available)
   if [[ -n "$reason" ]]; then
     echo -e "${Y}${tag:-?} ▲ ${reason}${N}"
   elif [[ -n "$upd" ]]; then
-    echo -e "${W}${tag}${N} ${G}⬆ есть $upd${N} ${D}— Сервер → 5${N}"
+    echo -e "${W}${tag}${N} ${G}⬆ есть $upd${N} ${D}— Сервер → Модуль ядра${N}"
   else
     echo -e "${W}${tag:-?}${N} ${G}✓${N}"
   fi

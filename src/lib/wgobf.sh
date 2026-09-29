@@ -659,7 +659,7 @@ do_wgobf_menu() {
       continue
     fi
     if wgobf_running; then echo -e "  ${G}● работает${N}  ${D}вход $(wgobf_get ENDPOINT):$(wgobf_get PORT)/udp${N}"
-    else echo -e "  ${R}○ не работает${N} ${D}— пункт 6${N}"; fi
+    else echo -e "  ${R}○ не работает${N} ${D}— «Перезапустить»${N}"; fi
     echo ""
     echo -e "  ${C}1)${N} Добавить клиента"
     echo -e "  ${C}2)${N} Список"

@@ -1,0 +1,207 @@
+"""
+sandbox.py — песочница для тестов awg2 и бота: собранный awg2 подключается
+как библиотека, пути состояния уходят во временный каталог, системные
+команды (ip, iptables, systemctl, awg...) подменены заглушками с журналом.
+
+  from sandbox import *   — chk(), bash(), api_wrapper() и остальное
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+__all__ = ["HERE", "AWG2", "chk", "summary", "TMP", "BIN", "CALLS", "LINKS", "IPT_SAVE", "ROOT", "LIB",
+           "PRELUDE", "ENV", "bash", "run_script", "calls", "reset_calls", "kv", "OLD20", "api_wrapper",
+           "json", "os", "re", "shutil", "subprocess", "sys"]
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+AWG2 = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "dist", "awg2.sh"))
+
+fails = 0
+checks = 0
+
+
+def chk(label, cond, detail=""):
+    global fails, checks
+    checks += 1
+    if cond:
+        print(f"  OK   {label}")
+    else:
+        fails += 1
+        print(f"  FAIL {label}" + (f"\n       {detail}" if detail else ""))
+
+
+# ── Песочница ─────────────────────────────────────────────
+TMP = tempfile.mkdtemp(prefix="awg2-test.")
+BIN = os.path.join(TMP, "bin")
+os.makedirs(BIN)
+CALLS = os.path.join(TMP, "calls.log")
+LINKS = os.path.join(TMP, "links")          # «поднятые» интерфейсы, по строке
+IPT_SAVE = os.path.join(TMP, "iptables-save.txt")
+open(LINKS, "w").close()
+open(IPT_SAVE, "w").close()
+
+STUBS = {
+    # ip link show X — успех, если X в файле links; остальное — только журнал
+    "ip": r'''echo "ip $*" >> "$CALLS"
+if [[ "$1" == link && "$2" == show ]]; then grep -qx "${3:-}" "$LINKS"; exit; fi
+if [[ "$1" == -4 && "$2" == route && "$3" == show ]]; then echo "default via 192.0.2.1 dev eth0"; exit 0; fi
+if [[ "$1" == -4 && "$2" == -o && "$3" == addr ]]; then echo "2: eth0    inet 203.0.113.10/24 brd 203.0.113.255 scope global eth0"; exit 0; fi
+if [[ "$1" == rule && "$2" == del ]]; then exit 1; fi
+if [[ "$1" == rule && "$2" == show ]]; then exit 0; fi
+exit 0''',
+    "iptables": r'''echo "iptables $*" >> "$CALLS"
+for a in "$@"; do [[ "$a" == -C ]] && exit 1; [[ "$a" == -D ]] && exit 1; done
+exit 0''',
+    "iptables-save": r'''cat "$IPT_SAVE"''',
+    "ip6tables": r'''echo "ip6tables $*" >> "$CALLS"; exit 1''',
+    "systemctl": r'''echo "systemctl $*" >> "$CALLS"
+[[ "$1" == is-active || "$1" == is-enabled ]] && exit 1
+exit 0''',
+    "sysctl": r'''echo "sysctl $*" >> "$CALLS"; exit 0''',
+    "awg": r'''case "$1" in
+  genkey|genpsk) head -c 32 /dev/urandom | base64 ;;
+  pubkey) sha256sum | head -c 43; echo "=" ;;
+  *) echo "awg $*" >> "$CALLS" ;;
+esac
+exit 0''',
+    "awg-quick": r'''echo "awg-quick $*" >> "$CALLS"
+[[ "$1" == strip ]] && printf '[Interface]\nPrivateKey = x\n'
+exit 0''',
+    "wg": r'''echo "wg $*" >> "$CALLS"; exit 0''',
+    "conntrack": r'''exit 0''',
+    "ss": r'''exit 0''',
+    "curl": r'''for a in "$@"; do [[ "$a" == *http_code* ]] && { echo 204; exit 0; }; done
+exit 1''',
+    "ufw": r'''exit 1''',
+    "modprobe": r'''exit 0''',
+}
+for name, body in STUBS.items():
+    p = os.path.join(BIN, name)
+    with open(p, "w") as f:
+        f.write("#!/usr/bin/env bash\n" + body + "\n")
+    os.chmod(p, 0o755)
+
+LIB = os.path.join(TMP, "lib.sh")
+with open(AWG2, encoding="utf-8") as f:
+    src = f.read()
+assert src.rstrip().endswith('main "$@"'), "последняя строка сборки — main"
+with open(LIB, "w", encoding="utf-8") as f:
+    f.write(src.rstrip()[: -len('main "$@"')])
+
+ROOT = os.path.join(TMP, "root")
+os.makedirs(ROOT)
+# Все пути состояния — в песочницу; юниты пишутся в каталог вместо /etc/systemd.
+PRELUDE = f'''
+source "{LIB}"
+AWG_DIR="{ROOT}/etc/amnezia/amneziawg"; SERVER_CONF="$AWG_DIR/awg0.conf"
+CLIENT_DIR="{ROOT}/root"; STATE_DIR="{ROOT}/var/lib/awg2"; LOG_FILE="{ROOT}/awg.log"
+INSTALL_LOG="{ROOT}/install.log"; EXITS_DIR="$AWG_DIR"
+EXITS_PEERS="$EXITS_DIR/exits_peers.list"; EXITS_STATE="$EXITS_DIR/exits_state"
+for v in DNS_PERSIST_SCRIPT DNS_HEALTH_SCRIPT CASCADE_SCRIPT T2S_ROUTING_SCRIPT XRAY_ROUTING_SCRIPT \\
+         EXITS_SCRIPT EXPIRE_BIN WARP_AUTOSTART_SCRIPT WARP_HEALTH_SCRIPT WGOBF_FW USQUE_UP_HOOK; do
+  printf -v "$v" '%s' "{ROOT}/scripts/$v"
+done
+CASCADE_DIR="{ROOT}/etc/awg-cascade"; CASCADE_RULES="$CASCADE_DIR/rules.conf"; CASCADE_LOG="{ROOT}/cascade.log"
+WGOBF_DIR="{ROOT}/etc/awg-wgobf"; WGOBF_STATE="$WGOBF_DIR/state"
+WGOBF_WG_CONF="{ROOT}/etc/wireguard/wgobf0.conf"; WGOBF_CLIENTS="{ROOT}/root/wgobf"
+EXPIRE_STATE_DIR="{ROOT}/var/lib/awg2-expire"; EXPIRE_LOG="{ROOT}/expire.log"; BOT_CONF="{ROOT}/bot.conf"
+BOT_ADMINS="{ROOT}/admins.json"
+WARP_PEERS="{ROOT}/warp.peers"; XRAY_PEERS="{ROOT}/xray.peers"; USQUE_LOG="{ROOT}/usque.log"
+write_unit() {{ mkdir -p "{ROOT}/units"; cat > "{ROOT}/units/$1"; }}
+remove_unit() {{ :; }}
+mkdir -p "$AWG_DIR" "$CLIENT_DIR" "$STATE_DIR" "{ROOT}/scripts"
+'''
+
+ENV = dict(os.environ, PATH=BIN + ":" + os.environ["PATH"], CALLS=CALLS, LINKS=LINKS,
+           IPT_SAVE=IPT_SAVE, LC_ALL="C.UTF-8")
+
+
+def bash(code, stdin=None):
+    r = subprocess.run(["bash", "-c", PRELUDE + code], input=stdin, capture_output=True,
+                       text=True, env=ENV, timeout=300)
+    return r.returncode, r.stdout, r.stderr
+
+
+def run_script(path, *args):
+    r = subprocess.run(["bash", path, *args], capture_output=True, text=True, env=ENV, timeout=60)
+    return r.returncode, r.stdout, r.stderr
+
+
+def calls():
+    with open(CALLS) as f:
+        return f.read()
+
+
+def reset_calls():
+    open(CALLS, "w").close()
+
+
+def kv(text):
+    out = {}
+    for line in text.splitlines():
+        if " = " in line:
+            k, v = line.split(" = ", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+# Сервер «прежней версии»: профиль pro, AWG 2.0, два клиента, у bob — срок.
+OLD20 = """# AWG_PROFILE=pro
+# AmneziaWG Toolza — AWG 2.0 server config
+# Region: ru
+# AWG_MIMICRY=quic
+[Interface]
+PrivateKey = sPRIV=
+Address = 10.23.45.1/24
+ListenPort = 51820
+MTU = 1320
+Jc = 5
+Jmin = 10
+Jmax = 90
+S1 = 40
+S2 = 60
+S3 = 20
+S4 = 10
+H1 = 100-2000
+H2 = 536870912-536880000
+H3 = 1073741824-1073750000
+H4 = 1610612736-1610620000
+PostUp = true
+PostDown = true
+
+[Peer]
+# alice
+PublicKey = PUBALICE=
+PresharedKey = PSK=
+AllowedIPs = 10.23.45.2/32
+
+[Peer]
+# bob
+# expires=1
+PublicKey = PUBBOB=
+AllowedIPs = 10.23.45.3/32
+"""
+
+
+def api_wrapper():
+    """Исполняемая обёртка «awg2» для API: те же функции, пути — песочница.
+    systemd-run «нет» — задачи идут запасным путём через setsid."""
+    path = os.path.join(TMP, "awg2-api")
+    with open(path, "w") as f:
+        f.write("#!/usr/bin/env bash\n" + PRELUDE + '[[ "${1:-}" == api ]] && shift\napi_main "$@"\n')
+    os.chmod(path, 0o755)
+    stub = os.path.join(BIN, "systemd-run")
+    with open(stub, "w") as f:
+        f.write("#!/usr/bin/env bash\nexit 1\n")
+    os.chmod(stub, 0o755)
+    return path
+
+
+def summary():
+    shutil.rmtree(TMP, ignore_errors=True)
+    print(f"\nпроверок: {checks}, провалов: {fails}")
+    sys.exit(1 if fails else 0)

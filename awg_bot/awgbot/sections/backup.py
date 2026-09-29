@@ -1,0 +1,170 @@
+"""Бэкапы: создать и скачать, список на сервере, восстановление — в том
+числе из присланного в чат архива."""
+
+from __future__ import annotations
+
+import io
+import os
+import tarfile
+import time
+
+from aiogram import Bot, Router
+from aiogram.fsm.context import FSMContext
+from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, Message
+
+from .. import api, ask, jobs, store, ui
+from ..ui import esc
+
+router = Router()
+act = ui.Actions(router, "bk")
+
+UPLOADS = store.STATE_DIR / "uploads"
+
+
+@act()
+async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
+    await ui.render(cb, "<b>💾 Бэкапы</b>\n\nПолный бэкап: сервер и клиенты, аккаунт WARP, WG + обфускатор, "
+                        "настройки туннелей. Хранятся в <code>~/awg_backup</code> на сервере.",
+                    ui.kb(("💾 Создать и прислать бэкап", act.data("create")),
+                          ("📂 Бэкапы на сервере", act.data("list")),
+                          ("📤 Восстановить из файла", act.data("upload")),
+                          ui.back()))
+
+
+async def _send_backup(bot: Bot, chat_id: int, st: dict) -> None:
+    path = (st.get("data") or {}).get("path")
+    if path and os.path.isfile(path):
+        await bot.send_document(chat_id, FSInputFile(path),
+                                caption="💾 Бэкап — в нём приватные ключи, храни как пароль")
+
+
+@act("create")
+async def _create(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await jobs.start(cb, "Бэкап", "backup", "create", back_to="bk", done=_send_backup)
+
+
+@act("list")
+async def _list(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    rows = await api.data("backup", "list", default=[]) or []
+    rows = rows[:20]
+    await ui.remember(state, "bk", [b["path"] for b in rows])
+    if not rows:
+        await ui.render(cb, "Бэкапов на сервере нет.", ui.kb(ui.back("bk")))
+        return
+    await ui.render(cb, "<b>📂 Бэкапы на сервере</b>\nСверху — новые. 📁 — полный, 🗜 — архив.",
+                    ui.kb([(f"{'📁' if b['full'] else '🗜'} {b['name']} · {ui.fmt_bytes(b['size'])}",
+                            act.data("v", str(i))) for i, b in enumerate(rows)], ui.back("bk")))
+
+
+@act("v")
+async def _view(cb: CallbackQuery, state: FSMContext, idx: str) -> None:
+    path = await ui.recall(state, "bk", idx)
+    if not path:
+        await _list(cb, state, "")
+        return
+    await ui.render(cb, f"<b>{esc(os.path.basename(path))}</b>",
+                    ui.kb(("📥 Скачать", act.data("get", idx)),
+                          ("♻️ Восстановить", act.data("rs", idx)),
+                          ui.back(act.data("list"))))
+
+
+def _pack(path: str) -> tuple[bytes, str]:
+    """Каталог полного бэкапа — в tar.gz на лету, архив — как есть."""
+    if os.path.isfile(path):
+        with open(path, "rb") as f:
+            return f.read(), os.path.basename(path)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        tar.add(path, arcname=os.path.basename(path))
+    return buf.getvalue(), os.path.basename(path) + ".tar.gz"
+
+
+@act("get")
+async def _get(cb: CallbackQuery, state: FSMContext, idx: str) -> None:
+    path = await ui.recall(state, "bk", idx)
+    if not path or not os.path.exists(path):
+        await cb.answer("Бэкапа уже нет", show_alert=True)
+        return
+    await cb.answer("Отправляю…")
+    data, name = _pack(path)
+    await ui.chat_of(cb).answer_document(BufferedInputFile(data, filename=name),
+                                         caption="💾 В бэкапе приватные ключи — храни как пароль")
+
+
+@act("rs")
+async def _restore_saved(cb: CallbackQuery, state: FSMContext, idx: str) -> None:
+    path = await ui.recall(state, "bk", idx)
+    if path:
+        await _inspect(cb, state, path)
+
+
+# ── Восстановление ────────────────────────────────────────
+@act("upload")
+async def _upload(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await ask.ask(cb, state, "bk_file", "Пришли архив бэкапа (<code>.tar.gz</code>) — awg2 или прежнего бота.",
+                  "bk")
+
+
+@ask.on("bk_file")
+async def _upload_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
+    data = await ask.file_of(msg)
+    if not data:
+        await ask.retry(msg, state, ctx, "Нужен файл-архив до 20 МБ")
+        return
+    UPLOADS.mkdir(parents=True, exist_ok=True)
+    os.chmod(UPLOADS, 0o700)
+    for old in UPLOADS.iterdir():                      # прежние загрузки больше не нужны
+        if time.time() - old.stat().st_mtime > 86400:
+            old.unlink(missing_ok=True)
+    path = UPLOADS / f"backup-{int(time.time())}.tar.gz"
+    path.write_bytes(data)
+    os.chmod(path, 0o600)
+    await _inspect(msg, state, str(path))
+
+
+async def _inspect(target: ui.Target, state: FSMContext, path: str) -> None:
+    r = await api.call("backup", "inspect", path)
+    if not r.ok or not isinstance(r.data, dict):
+        await ui.render(target, ui.fail(r, "Это не бэкап awg2"), ui.kb(ui.back("bk")))
+        return
+    d = r.data
+    await state.update_data(restore={"path": path, "wgobf": bool(d.get("wgobf")),
+                                     "tunnels": bool(d.get("tunnels")),
+                                     "has_wgobf": bool(d.get("wgobf")), "has_tunnels": bool(d.get("tunnels"))})
+    await _options(target, state)
+
+
+async def _options(target: ui.Target, state: FSMContext) -> None:
+    rs = (await state.get_data()).get("restore") or {}
+    if not rs:
+        await ui.render(target, "Бэкап не выбран.", ui.kb(ui.back("bk")))
+        return
+    lines = [f"<b>♻️ Восстановление</b>\n<code>{esc(os.path.basename(rs['path']))}</code>\n",
+             "Сервер и клиенты восстанавливаются всегда; текущий awg0.conf сохраняется рядом.",
+             "Туннели восстанавливаются выключенными — их включают вручную."]
+    await ui.render(target, "\n".join(lines), ui.kb(
+        (f"{'✅' if rs['wgobf'] else '⬜️'} WG + обфускатор", act.data("opt", "wgobf")) if rs["has_wgobf"] else None,
+        (f"{'✅' if rs['tunnels'] else '⬜️'} Настройки туннелей (Xray, exit-ноды, каскад, DNS)",
+         act.data("opt", "tunnels")) if rs["has_tunnels"] else None,
+        ("♻️ Восстановить — текущий сервер будет заменён", act.data("go")),
+        ui.back("bk", "✖️ Отмена")))
+
+
+@act("opt")
+async def _opt(cb: CallbackQuery, state: FSMContext, key: str) -> None:
+    rs = dict((await state.get_data()).get("restore") or {})
+    if key in ("wgobf", "tunnels") and rs:
+        rs[key] = not rs.get(key)
+        await state.update_data(restore=rs)
+    await _options(cb, state)
+
+
+@act("go")
+async def _go(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    rs = (await state.get_data()).get("restore") or {}
+    if not rs:
+        await show(cb, state)
+        return
+    await state.update_data(restore={})
+    opts = [k for k in ("wgobf", "tunnels") if rs.get(k)]
+    await jobs.start(cb, "Восстановление из бэкапа", "backup", "restore", rs["path"], *opts, back_to="bk")

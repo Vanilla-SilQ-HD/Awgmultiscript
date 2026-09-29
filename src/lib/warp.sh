@@ -268,14 +268,14 @@ warp_up() {
   be=$(warp_backend)
   peers_sync "$WARP_PEERS"; peers_seed "$WARP_PEERS"
   if [[ "$be" == usque ]]; then
-    [[ -s "$USQUE_CONF" && -x "$USQUE_BIN" ]] || { err "usque не установлен — пункт 1"; return 1; }
+    [[ -s "$USQUE_CONF" && -x "$USQUE_BIN" ]] || { err "usque не установлен — «Установить и зарегистрировать»"; return 1; }
     _usque_write || return 1
     systemctl enable awg-usque.service &>/dev/null
     systemctl restart awg-usque.service || { err "awg-usque не стартовал: journalctl -u awg-usque"; return 1; }
     for i in {1..20}; do warp_is_up && break; sleep 1; done
   else
     _warp_deps || return 1
-    [[ -f "$WARP_CONF" ]] || { err "Нет профиля WARP — пункт 1 или импорт"; return 1; }
+    [[ -f "$WARP_CONF" ]] || { err "Нет профиля WARP — «Установить и зарегистрировать» или импорт"; return 1; }
     warp_wg_bringup || { err "warp0 не поднялся"; return 1; }
   fi
   info "Проверяю выход через Cloudflare..."

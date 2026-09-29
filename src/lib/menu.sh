@@ -6,7 +6,7 @@ show_header() {
   [[ "$UPDATE_CHANNEL" == beta ]] && ch=" ${Y}[beta]${N}"
   upd=$(update_available || true)
   echo -e "${B}${LINE}${N}"
-  echo -e "  ${W}AWG Toolza $VERSION${N}$ch${upd:+   ${G}⬆ есть $upd${N} ${D}— пункт 8${N}}"
+  echo -e "  ${W}AWG Toolza $VERSION${N}$ch${upd:+   ${G}⬆ есть $upd${N} ${D}— Обновление${N}}"
   echo -e "  ${C}TG: @awgToolza${N}"
   echo -e "${B}${LINE}${N}"
   why=$(os_supported) || echo -e "  ${Y}▲ $why${N}"
@@ -20,7 +20,7 @@ show_header() {
     hint=$(proto_upgrade_hint)
     [[ -n "$hint" ]] && echo -e "  $hint"
   else
-    echo -e "  Сервер     : ${D}не создан — Сервер → 2${N}"
+    echo -e "  Сервер     : ${D}не создан — Сервер → Создать сервер${N}"
   fi
   echo -e "${B}${LINE}${N}"
 }
@@ -76,7 +76,7 @@ do_backup_menu() {
 
 _need_server() {
   server_exists && return 0
-  warn "Сначала создай сервер: Сервер → 2"
+  warn "Сначала создай сервер: Сервер → Создать сервер"
   pause
   return 1
 }
