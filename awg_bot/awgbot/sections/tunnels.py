@@ -262,7 +262,7 @@ async def xray_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> No
                  + (f"\n⚖️ — как делить трафик между выходами (сейчас {esc(d.get('balancer') or '?')})"
                     if len(tags) > 1 else "") + "</i>")
     await ui.render(cb, text, ui.kb(
-        (f"📦 {'Обновить' if inst else 'Установить'} Xray", xr.data("install")),
+        (f"📦 {'Обновить' if inst else 'Установить'}", xr.data("install")),
         ("➕ Добавить выход", xr.data("add")) if inst else None,
         ("➖ Удалить выход", xr.data("del")) if tags else None,
         ("⚖️ Балансировщик", xr.data("bal")) if len(tags) > 1 else None,
@@ -272,7 +272,7 @@ async def xray_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> No
         ("👥 Клиенты", tc.data("", "xray")) if inst else None,
         (f"{'✅' if d.get('ru') else '⬜️'} РФ напрямую", xr.data("ru", "off" if d.get("ru") else "on")) if inst else None,
         ("🩺 Диагностика", xr.data("diag")) if inst else None,
-        ("🛠 Починить конфиг", xr.data("fix")) if inst else None,
+        ("🛠 Починить", xr.data("fix")) if inst else None,
         ("🗑 Удалить", xr.data("rm")) if inst else None,
         ui.back("tun")))
 

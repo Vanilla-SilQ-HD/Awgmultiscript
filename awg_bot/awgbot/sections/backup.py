@@ -156,7 +156,7 @@ async def _options(target: ui.Target, state: FSMContext) -> None:
     if rs["has_tunnels"]:
         lines.append("Туннели — настройки Xray, exit-нод, каскада и DNS.")
     await ui.render(target, "\n".join(lines), ui.kb(
-        (f"{'✅' if rs['wgobf'] else '⬜️'} WG + обфускатор", act.data("opt", "wgobf")) if rs["has_wgobf"] else None,
+        (f"{'✅' if rs['wgobf'] else '⬜️'} WG+обфускатор", act.data("opt", "wgobf")) if rs["has_wgobf"] else None,
         (f"{'✅' if rs['tunnels'] else '⬜️'} Туннели", act.data("opt", "tunnels")) if rs["has_tunnels"] else None,
         ui.Row(("♻️ Восстановить", act.data("go")), ui.back("bk", "✖️ Отмена"))))
 

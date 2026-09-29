@@ -18,8 +18,8 @@ act = ui.Actions(router, "srv")
 mod = ui.Actions(router, "mod")
 
 PROFILE = {"lite": "AmneziaVPN", "pro": "Мощный", "standard": "Standard"}
-DNS = [("Cloudflare 1.1.1.1", "1.1.1.1, 1.0.0.1"), ("Google 8.8.8.8", "8.8.8.8, 8.8.4.4"),
-       ("Quad9 9.9.9.9", "9.9.9.9, 149.112.112.112"), ("Яндекс 77.88.8.8", "77.88.8.8, 77.88.8.1")]
+DNS = [("Cloudflare", "1.1.1.1, 1.0.0.1"), ("Google", "8.8.8.8, 8.8.4.4"),
+       ("Quad9", "9.9.9.9, 149.112.112.112"), ("Яндекс", "77.88.8.8, 77.88.8.1")]
 DOMAIN_RE = re.compile(r"^(?=.{4,253}$)([A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,63}$")
 
 
@@ -60,7 +60,7 @@ async def screen(target: ui.Target) -> None:
         ("📦 Компоненты", act.data("install")),
         ("🧩 Модуль ядра", mod.data()),
         ("✨ Создать сервер", act.data("create")) if not exists else None,
-        ("🔄 Перезапуск awg0", act.data("restart")) if exists else None,
+        ("🔄 Рестарт awg0", act.data("restart")) if exists else None,
         ("🔀 Протокол", act.data("proto")) if exists else None,
         ("🌍 Endpoint", act.data("ep")) if exists else None,
         ("🛠 Починить", act.data("repair")),
@@ -256,7 +256,8 @@ async def wizard(target: ui.Target, state: FSMContext) -> None:
             text += "\n\n▲ Установленные модуль и tools не умеют 3.1 — обнови их: Сервер → Модуль ядра."
         await ui.render(target, text, ui.kb(buttons, ("AWG 2.0", _w("proto", "2.0")), cancel))
     elif step == "dns":
-        await ui.render(target, head + "<b>DNS для клиентов</b>",
+        await ui.render(target, head + "<b>DNS для клиентов</b>\n"
+                        + "\n".join(f"• {label} — <code>{ips}</code>" for label, ips in DNS),
                         ui.kb([(label, _w("dns", str(i))) for i, (label, _) in enumerate(DNS)],
                               ("Вручную…", _w("dns", str(len(DNS)))), cancel))
     elif step == "mtu":
@@ -414,11 +415,12 @@ async def mod_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> Non
         lines.append(f"\n▲ {esc(d['reboot'])}")
     if d.get("secure_boot"):
         lines.append("▲ Secure Boot включён — неподписанный модуль ядро не загрузит")
-    lines.append("\n<i>🔁 — перезагрузить модуль без ребута · 🧱 — собрать под все установленные ядра</i>")
+    lines.append("\n<i>⬆️ — обновить до последней версии · 🔁 — перезагрузить модуль без ребута · "
+                 "🧱 — собрать под все установленные ядра</i>")
     await ui.render(cb, "\n".join(lines), ui.kb(
-        ("⬆️ Обновить модуль", mod.data("upd")),
+        ("⬆️ Модуль", mod.data("upd")),
         ("📋 Версия модуля", mod.data("tags")),
-        ("⬆️ Обновить tools", mod.data("tools")),
+        ("⬆️ Tools", mod.data("tools")),
         ("🔁 Перезагрузить", mod.data("reload")),
         ("🧱 Под все ядра", mod.data("rebuild")),
         ("⏪ Откат модуля", mod.data("backups")) if d.get("backups") else None,
@@ -431,7 +433,7 @@ async def mod_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> Non
 async def _mod_upd(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ui.confirm(cb, "Собрать и поставить последнюю версию модуля? Туннели лягут на несколько секунд "
                          "при перезагрузке модуля.",
-                     ("✅ Обновить модуль", mod.data("updok")), mod.data())
+                     ("✅ Обновить", mod.data("updok")), mod.data())
 
 
 @mod("updok")

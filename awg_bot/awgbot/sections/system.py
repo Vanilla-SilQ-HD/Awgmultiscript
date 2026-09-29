@@ -47,7 +47,7 @@ async def _all_screen(target: ui.Target, state: FSMContext) -> None:
     await ui.render(target, "<b>💣 Удалить всё</b>\n\nСервер AWG, клиенты, туннели, модуль ядра и утилиты. "
                             "Отметь, что удалить вместе с ними:",
                     ui.kb((f"{mark('bot')} Telegram-бот", rm.data("opt", "bot")),
-                          (f"{mark('wgobf')} WG + обфускатор", rm.data("opt", "wgobf")),
+                          (f"{mark('wgobf')} WG+обфускатор", rm.data("opt", "wgobf")),
                           (f"{mark('self')} Скрипт awg2", rm.data("opt", "self")),
                           ui.Row(("💣 Удалить", rm.data("allgo")), ui.back("del", "✖️ Отмена"))))
 
@@ -72,7 +72,7 @@ async def _opt(cb: CallbackQuery, state: FSMContext, key: str) -> None:
 @rm("allgo")
 async def _all_go(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ui.confirm(cb, "⚠️ Это необратимо: VPN-сервер перестанет существовать. Точно удалить?",
-                     ("💣 Да, удалить всё", rm.data("allok")), rm.data("all"))
+                     ("💣 Да, удалить", rm.data("allok")), rm.data("all"))
 
 
 @rm("allok")
@@ -120,7 +120,7 @@ async def _check(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await _render_update(cb, d, d.get("latest") if d.get("newer") else "", checked=True)
 
 
-AFTER_UPDATE = [("⬆️ Обновить и бота", "botm:update")]
+AFTER_UPDATE = [("⬆️ Обновить бота", "botm:update")]
 
 
 @upd("go")

@@ -204,7 +204,7 @@ async def admins_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> 
     lines.append("\n<i>➕ Пригласить — ссылка на 15 минут · 🚫 — отозвать доступ</i>")
     await ui.render(cb, "\n".join(lines), ui.kb(
         ("➕ Пригласить", adm.data("invite")),
-        ("🧯 Погасить ссылки", adm.data("revoke")) if pending else None,
+        ("🧯 Погасить все", adm.data("revoke")) if pending else None,
         [(f"🚫 @{a.username}" if a.username else f"🚫 {a.uid}", adm.data("rm", str(a.uid))) for a in invited],
         ui.back("botm")))
 
@@ -275,10 +275,10 @@ def _look_text(verdict: str = "") -> str:
 async def _look_screen(target: ui.Target, verdict: str = "") -> None:
     m = icons.mapping()
     await ui.render(target, _look_text(verdict), ui.kb(
-        ("📥 Набор по ссылке", look.data("pack")),
+        ("📥 Набор иконок", look.data("pack")),
         ("✍️ Свои иконки", look.data("own")),
-        ("▶️ Включить иконки", look.data("on")) if m and not icons.active() else None,
-        ("⏹ Выключить иконки", look.data("off")) if icons.active() else None,
+        ("▶️ Включить", look.data("on")) if m and not icons.active() else None,
+        ("⏹ Выключить", look.data("off")) if icons.active() else None,
         ui.back("botm")))
 
 
@@ -298,7 +298,11 @@ async def _try_icons(target: ui.Target, pack: str, mapping: dict[str, str]) -> N
     await ui.render(target, "🎨 Проверяю иконки… " + " ".join(sample),
                     ui.kb((f"{sample[0]} Проверка", look.data()) if sample else None))
     if icons.active():
-        verdict = f"✅ Иконки включены: {len(mapping)}."
+        have, miss = icons.coverage(mapping)
+        verdict = (f"✅ Иконки включены: {len(have)} из {len(icons.TEMPLATE)} значков бота.\n"
+                   f"С иконками: {' '.join(have)}"
+                   + (f"\nОбычные эмодзи: {' '.join(miss)}\n<i>Их можно дополнить: ✍️ Свои иконки.</i>"
+                      if miss else ""))
     else:
         verdict = ("❌ Telegram не показал иконки. Нужен Telegram Premium у владельца бота (аккаунт, "
                    "создавший его в @BotFather) или имя бота с Fragment. Набор сохранён — включить можно позже.")
@@ -309,7 +313,22 @@ async def _try_icons(target: ui.Target, pack: str, mapping: dict[str, str]) -> N
 async def _look_pack(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ask.ask(cb, state, "look_pack", "Ссылка на набор эмодзи: <code>t.me/addemoji/ИМЯ</code> или просто имя.\n"
                                           "<i>Иконки сопоставятся с эмодзи бота по эмодзи, привязанным к ним в "
-                                          "наборе; остальные останутся обычными.</i>", look.data())
+                                          "наборе (или похожим); остальные останутся обычными.</i>", look.data(),
+                  [(f"📱 {icons.DEFAULT_PACK}", look.data("pk", icons.DEFAULT_PACK))])
+
+
+async def _pack_icons(bot, name: str) -> tuple[str, dict[str, str]]:  # type: ignore[no-untyped-def]
+    """Имя и иконки набора или ("", {}) с причиной в имени при ошибке."""
+    try:
+        pack = await bot.get_sticker_set(name)
+    except TelegramBadRequest:
+        return f"Набор {name} не найден", {}
+    if pack.sticker_type != "custom_emoji":
+        return "Это набор стикеров, а нужен набор эмодзи (t.me/addemoji/…)", {}
+    mapping = icons.from_pack(pack.stickers)
+    if not any(e in mapping for e in icons.TEMPLATE):
+        return "В наборе нет иконок для эмодзи бота — пришли свои (✍️ Свои иконки)", {}
+    return pack.name, mapping
 
 
 @ask.on("look_pack")
@@ -318,19 +337,20 @@ async def _look_pack_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> No
     if not m:
         await ask.retry(msg, state, ctx, "Нужна ссылка вида t.me/addemoji/ИМЯ")
         return
-    try:
-        pack = await msg.bot.get_sticker_set(m.group(1))  # type: ignore[union-attr]
-    except TelegramBadRequest:
-        await ask.retry(msg, state, ctx, f"Набор {m.group(1)} не найден")
+    name, mapping = await _pack_icons(msg.bot, m.group(1))
+    if not mapping:
+        await ask.retry(msg, state, ctx, name)
         return
-    if pack.sticker_type != "custom_emoji":
-        await ask.retry(msg, state, ctx, "Это набор стикеров, а нужен набор эмодзи (t.me/addemoji/…)")
+    await _try_icons(msg, name, mapping)
+
+
+@look("pk")
+async def _look_pack_btn(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    name, mapping = await _pack_icons(cb.bot, arg)
+    if not mapping:
+        await ui.render(cb, f"❌ {esc(name)}", ui.kb(ui.back(look.data())))
         return
-    mapping = icons.from_pack(pack.stickers)
-    if not any(e in mapping for e in icons.TEMPLATE):
-        await ask.retry(msg, state, ctx, "В наборе нет иконок для эмодзи бота — пришли свои (✍️ Свои иконки)")
-        return
-    await _try_icons(msg, pack.name, mapping)
+    await _try_icons(cb, name, mapping)
 
 
 @look("own")
@@ -338,17 +358,19 @@ async def _look_own(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ask.ask(cb, state, "look_own",
                   "Пришли одним сообщением иконки (custom emoji) по порядку — для этих эмодзи бота:\n\n"
                   + " ".join(icons.TEMPLATE)
-                  + "\n\n<i>Не нужна иконка — поставь на её место обычное эмодзи. Можно прислать меньше: "
-                    "остальные останутся как есть.</i>", look.data())
+                  + "\n\n<i>Иконки дополняют набор: обычное эмодзи на месте иконки — оставить текущую. "
+                    "Можно прислать меньше — остальные останутся как есть.</i>", look.data())
 
 
 @ask.on("look_own")
 async def _look_own_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
-    mapping = icons.from_message(msg.text or "", msg.entities or [])
-    if not mapping:
+    own = icons.from_message(msg.text or "", msg.entities or [])
+    if not own:
         await ask.retry(msg, state, ctx, "В сообщении нет custom emoji — их отправляют с Telegram Premium")
         return
-    await _try_icons(msg, "свои", mapping)
+    pack = icons.pack()
+    await _try_icons(msg, f"{pack} + свои" if pack and not pack.endswith("свои") else pack or "свои",
+                     {**icons.mapping(), **own})
 
 
 @look("on")

@@ -33,7 +33,7 @@ from aiogram.types import (CallbackQuery, Chat, InlineKeyboardMarkup, Message, M
 # Как Telegram обходится с иконками (custom emoji) от бота: ok — показывает
 # (Premium у владельца), strip — молча срезает, reject — отклоняет запрос
 PREMIUM = {"mode": "strip"}
-PACK = {"🖥": "111", "👥": "222", "🌐": "333", "🗑": "444", "⭐": "555"}
+PACK = {"🖥": "111", "👥": "222", "🌐": "333", "🗑": "444", "⭐": "555", "💿": "666", "🟢": "777"}
 
 # ── Окружение бота ────────────────────────────────────────
 API = api_wrapper()
@@ -549,15 +549,16 @@ async def run():
     text, buttons = screen(await press("wo:install"))
     chk("установка обфускатора: DNS по умолчанию Cloudflare", "DNS клиентов: Cloudflare" in text, text)
     text, buttons = screen(await press("wo:iopt:dns"))
-    chk("кнопка DNS перебирает варианты", "DNS клиентов: Google" in text and ("🌐 DNS: Google", "wo:iopt:dns") in buttons,
+    chk("кнопка DNS перебирает варианты", "DNS клиентов: Google" in text and ("🌐 Google", "wo:iopt:dns") in buttons,
         [text, buttons])
 
     print("Цвета кнопок")
     await say("/start")
     styles = {b.text: b.style for row in keyboard(SESSION.sent) for b in row}
-    chk("главное меню: клиенты синие, удаление красное, «Поддержать» зелёная",
-        styles.get("👥 Клиенты") == "primary" and styles.get("🗑 Удаление") == "danger"
-        and styles.get("Поддержать 💚") == "success" and styles.get("🖥 Сервер") is None, styles)
+    chk("главное меню: обновление синее, удаление красное, «Поддержать» зелёная, остальные обычные",
+        styles.get("⬆️ Обновление") == "primary" and styles.get("🗑 Удаление") == "danger"
+        and styles.get("Поддержать 💚") == "success" and styles.get("👥 Клиенты") is None
+        and styles.get("🖥 Сервер") is None, styles)
     await press("cl")
     styles = {b.text: b.style for row in keyboard(SESSION.sent) for b in row}
     chk("клиенты: добавить — зелёная, удалить — красная, назад — обычная",
@@ -573,11 +574,14 @@ async def run():
     icons_mod = sys.modules["awgbot.icons"]
     text, buttons = screen(await press("look"))
     chk("экран оформления: иконки выключены, условие Premium названо",
-        "выключены" in text and "Telegram Premium" in text and ("📥 Набор по ссылке", "look:pack") in buttons, text)
-    await press("look:pack")
+        "выключены" in text and "Telegram Premium" in text and ("📥 Набор иконок", "look:pack") in buttons, text)
+    text, buttons = screen(await press("look:pack"))
+    chk("набор TgAndroidIcons — готовой кнопкой", ("📱 TgAndroidIcons", "look:pk:TgAndroidIcons") in buttons, buttons)
     text, _ = screen(await say("t.me/addemoji/SomeIcons"))
     chk("нет Premium — Telegram срезал иконки: выключены, набор сохранён",
         "не показал иконки" in text and not icons_mod.active() and icons_mod.mapping().get("🖥") == "111", text)
+    chk("похожие эмодзи: 💾 — иконкой 💿; цветные значки набора не берутся",
+        icons_mod.mapping().get("💾") == "666" and "🟢" not in icons_mod.mapping(), icons_mod.mapping())
     await say("/start")
     text, buttons = screen(SESSION.sent[-3:])
     rows = keyboard(SESSION.sent)
@@ -585,8 +589,10 @@ async def run():
         and rows[0][0].icon_custom_emoji_id is None, [text[:80], rows[0][0]])
 
     PREMIUM["mode"] = "ok"
-    text, _ = screen(await press("look:on"))
-    chk("с Premium — проверка прошла, иконки включены", "Иконки включены" in text and icons_mod.active(), text)
+    text, _ = screen(await press("look:pk:TgAndroidIcons"))
+    chk("с Premium — проверка прошла, иконки включены, показано что подобралось",
+        "Иконки включены: 5 из" in text and "Обычные эмодзи:" in text and icons_mod.active()
+        and icons_mod.pack() == "TgAndroidIcons", text)
     sent = await say("/start")
     text, _ = screen(sent)
     rows = keyboard(sent)
@@ -611,8 +617,10 @@ async def run():
     ents = [MessageEntity(type="custom_emoji", offset=0, length=2, custom_emoji_id="901"),
             MessageEntity(type="custom_emoji", offset=6, length=2, custom_emoji_id="903")]
     text, _ = screen(await say(own, entities=ents))
-    chk("свои иконки по порядку: обычное эмодзи на месте — пропуск",
-        "Иконки включены" in text and icons_mod.mapping() == {"🖥": "901", "🩺": "903"}, icons_mod.mapping())
+    m = icons_mod.mapping()
+    chk("свои иконки дополняют набор; обычное эмодзи на месте — оставить",
+        "Иконки включены" in text and m.get("🖥") == "901" and m.get("🩺") == "903" and m.get("👥") == "222"
+        and icons_mod.pack() == "TgAndroidIcons + свои", [icons_mod.pack(), m])
     await press("look:off")
     chk("выключение иконок", not icons_mod.active() and icons_mod.mapping(), icons_mod.mapping())
     PREMIUM["mode"] = "strip"

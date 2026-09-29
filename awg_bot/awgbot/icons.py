@@ -35,6 +35,24 @@ TEMPLATE = ["🖥", "👥", "🩺", "💾", "🌐", "🤖", "🗑", "⬆", "🛡
             "📋", "🔁", "📜", "🎯", "🔍", "📂", "📤", "📥", "🔑", "👮",
             "☁", "🛰", "🚪", "🔐", "▶", "⏹", "⚖", "🚨", "🎨", "👤"]
 
+# Набор TgAndroidIcons (значки Telegram для Android) — предлагается кнопкой
+DEFAULT_PACK = "TgAndroidIcons"
+
+# Похожие эмодзи: иконки в наборах привязаны к своим эмодзи, и точного
+# совпадения с эмодзи бота часто нет — тогда берётся первое похожее
+SIMILAR = {
+    "🖥": "💻🖱⌨📟", "👥": "👤🫂👪", "🩺": "🔬🧪💉🏥", "💾": "💿📀🗄🗃", "🌐": "🌍🌎🌏🗺",
+    "🤖": "👾🦾💬", "🗑": "🚮❌", "⬆": "🔼⏫🆙📲", "🛡": "🔒🔐🛂", "🔄": "🔃🔁♻",
+    "➕": "🆕✳", "📊": "📈📉🧮", "📦": "🗃🎁🗂", "📄": "📃📑📋🧾", "✏": "✍🖊🖋📝",
+    "⏳": "⌛⏰⏱📅🗓", "🎭": "🥸🕶", "📝": "🗒✏📃", "🔔": "📢📣🔕", "🔃": "🔄🔀",
+    "🧹": "🗑🧽", "◀": "⬅🔙↩", "🏠": "🏡🏘", "✖": "❎❌🚫", "⚠": "❗🚨",
+    "🔀": "🔃🔄", "🧩": "⚙🔧", "🛠": "🔧🔨⚙🪛", "♻": "🔄🔁", "🔎": "🔍",
+    "📋": "📄🗒📑", "🔁": "🔄♻", "📜": "📃📄🧾", "🎯": "📍", "🔍": "🔎",
+    "📂": "📁🗂", "📤": "⬆📩🔼", "📥": "⬇📩🔽", "🔑": "🗝🔐", "👮": "👤🛡",
+    "☁": "⛅🌥", "🛰": "📡🚀", "🚪": "🚶↪", "🔐": "🔒🔑", "▶": "⏯🔛",
+    "⏹": "⏸⛔🛑", "⚖": "🔀", "🚨": "⚠🆘❗", "🎨": "🖌🖍🌈", "👤": "👥🙂",
+}
+
 EMOJI_RE = re.compile(
     "(?:[\U0001F1E6-\U0001F1FF]{2}"
     "|[←-⇿⌀-⏿①-➿⬀-⯿\U0001F000-\U0001FAFF])"
@@ -111,13 +129,30 @@ def decorate(text: str) -> str:
 
 
 def from_pack(stickers: list) -> dict[str, str]:
-    """Набор custom emoji → {эмодзи: id} по эмодзи, привязанным к иконкам."""
+    """Набор custom emoji → {эмодзи: id} по эмодзи, привязанным к иконкам;
+    эмодзи бота без точного совпадения — по похожим (SIMILAR), не отдавая
+    одну иконку двум значкам."""
     out: dict[str, str] = {}
     for s in stickers:
         key = norm(getattr(s, "emoji", "") or "")
-        if key and getattr(s, "custom_emoji_id", None) and key not in out:
+        if key and key not in KEEP and getattr(s, "custom_emoji_id", None) and key not in out:
             out[key] = s.custom_emoji_id
+    used = {out[k] for k in TEMPLATE if k in out}
+    for key in TEMPLATE:
+        if key in out:
+            continue
+        for alt in EMOJI_RE.findall(SIMILAR.get(key, "")):
+            i = out.get(norm(alt))
+            if i and i not in used:
+                out[key] = i
+                used.add(i)
+                break
     return out
+
+
+def coverage(icons: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Эмодзи бота с иконками и без."""
+    return [e for e in TEMPLATE if e in icons], [e for e in TEMPLATE if e not in icons]
 
 
 def from_message(text: str, entities: list) -> dict[str, str]:

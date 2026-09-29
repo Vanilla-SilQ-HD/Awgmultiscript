@@ -132,7 +132,7 @@ async def list_screen(target: ui.Target, page: int = 0) -> None:
         ("📊 Трафик", act.data("activity")) if rows else None,
         ("📦 Экспорт zip", act.data("export")) if rows else None,
         ("🗑 Удалить…", act.data("dsel")) if rows else None,
-        ("🧹 Убрать истёкших", act.data("purge")) if blocked else None,
+        ("🧹 Истёкшие", act.data("purge")) if blocked else None,
         ui.back()))
 
 
@@ -258,7 +258,7 @@ async def card(target: ui.Target, name: str) -> None:
         ("🎭 Мимикрия", act.data("mim", name)),
         ("🌐 Маршрут", act.data("tun", name)) if route["kind"] in ("warp", "xray", "exits") else None,
         ("📝 Заметка", act.data("note", name)),
-        ("🔕 Без мониторинга" if mon else "🔔 Мониторинг", act.data("mon", name)),
+        ("🔕 Мониторинг" if mon else "🔔 Мониторинг", act.data("mon", name)),
         ("🗑 Удалить", act.data("del", name)),
         ui.back("cl", "◀️ К списку")))
 
@@ -667,8 +667,8 @@ COUNTS = (2, 3, 5, 10, 20, 50)
 @act("bulk")
 async def _bulk(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ui.render(cb, "<b>➕ Несколько клиентов</b>\nКак назвать?\n"
-                        "• Префикс + номер — user-001, user-002…\n• Имена списком — через запятую",
-                    ui.kb(("🔢 Префикс + номер", act.data("bpre")),
+                        "• Префикс+номер — user-001, user-002…\n• Имена списком — через запятую",
+                    ui.kb(("🔢 Префикс+номер", act.data("bpre")),
                           ("✍️ Имена списком", act.data("bnames")),
                           ui.back("cl")))
 

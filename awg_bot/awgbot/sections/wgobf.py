@@ -91,12 +91,11 @@ async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
     mask = "NONE" if d.get("masking") == "STUN" else "STUN"
     await ui.render(cb, "<b>🛡 WG + обфускатор</b>\n" + ui.pre(r.log, 1500, tail=False)
                     + f"\n<i>🎭 — маскировка клиентов: {esc(d.get('masking') or '?')} → {mask}\n"
-                      "🚪 — выдавать клиентам конфиги без обфускатора или с ним</i>", ui.kb(
+                      "Чистый WG — пускать и обычный WireGuard без обфускатора (iOS); его DPI видит</i>", ui.kb(
         ("➕ Добавить", act.data("add")),
         ("👥 Клиенты", act.data("list")),
         (f"🎭 → {mask}", act.data("mask", mask)),
-        ("🚪 С обфускатором" if d.get("clean") else "🚪 Без обфускатора",
-         act.data("clean", "0" if d.get("clean") else "1")),
+        (f"{'✅' if d.get('clean') else '⬜️'} Чистый WG", act.data("clean", "0" if d.get("clean") else "1")),
         ("🔄 Перезапустить", act.data("restart")),
         ("🔑 Сменить ключ", act.data("key")),
         ("📜 Журнал", "diag:log:wgobf"),
@@ -115,12 +114,12 @@ async def _install_screen(target: ui.Target, state: FSMContext) -> None:
                             f"DNS клиентов: {dns[0]} ({dns[1]})\n"
                             f"Первый клиент: {esc(o.get('client') or 'client1')}\n\n"
                             "<i>🎭 STUN — под видеозвонок (рекомендуется), NONE — только XOR\n"
-                            "🚪 Без обфускатора — пускать и обычный WireGuard (iOS), его DPI видит</i>",
+                            "Чистый WG — пускать и обычный WireGuard без обфускатора (iOS); его DPI видит</i>",
                     ui.kb(("✏️ Порт", act.data("iport")),
                           ("✏️ Первый клиент", act.data("iname")),
                           ("🎭 STUN ↔ NONE", act.data("iopt", "masking")),
-                          ("🚪 Без обфускатора", act.data("iopt", "clean")),
-                          (f"🌐 DNS: {dns[0]}", act.data("iopt", "dns")),
+                          (f"{'✅' if o.get('clean') == '1' else '⬜️'} Чистый WG", act.data("iopt", "clean")),
+                          (f"🌐 {dns[0]}", act.data("iopt", "dns")),
                           ui.Row(("✅ Установить", act.data("igo")), ui.back("wo", "✖️ Отмена"))))
 
 
