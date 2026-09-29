@@ -163,7 +163,7 @@ def screen(sent):
     for name, m in reversed(sent):
         if name in ("SendMessage", "EditMessageText"):
             rows = m.reply_markup.inline_keyboard if m.reply_markup else []
-            return m.text or "", [(b.text, b.callback_data) for row in rows for b in row]
+            return m.text or "", [(b.text, b.callback_data or b.url) for row in rows for b in row]
     return "", []
 
 
@@ -204,8 +204,11 @@ async def run():
     datas = [d for _, d in buttons]
     chk("девять пунктов меню в порядке awg2",
         datas[:9] == ["srv", "cl", "diag", "bk", "tun", "botm", "del", "upd", "wo"], buttons)
-    chk("главное меню — два столбца", [len(r) for r in keyboard(SESSION.sent)] == [2, 2, 2, 2, 2],
-        [[b.text for b in r] for r in keyboard(SESSION.sent)])
+    rows = keyboard(SESSION.sent)
+    chk("главное меню — два столбца", [len(r) for r in rows] == [2, 2, 2, 2, 2, 1], [[b.text for b in r] for r in rows])
+    chk("в самом низу — «Поддержать 💚» во всю ширину, ссылкой",
+        rows[-1][0].text == "Поддержать 💚" and rows[-1][0].url == "https://t.me/awgToolza/156/157"
+        and rows[-1][0].callback_data is None, rows[-1])
     menu_id = SESSION.screen_id()
     sent = await say("/start")
     chk("повторный /start — всегда новое меню внизу, старое не трогается",
@@ -436,7 +439,7 @@ async def run():
     # Имена клиентов, нод и тегов задаёт пользователь — их не считаем.
     wide = sorted({b.text for name, m in SESSION.sent if name in ("SendMessage", "EditMessageText")
                    and m.reply_markup for row in m.reply_markup.inline_keyboard for b in row
-                   if ui.width(b.text) > ui.WIDE and not b.callback_data.startswith(USER_NAMED)})
+                   if ui.width(b.text) > ui.WIDE and not (b.callback_data or "").startswith(USER_NAMED)})
     chk("все кнопки влезают в два столбца", not wide, wide)
     rows = [len(row) for name, m in SESSION.sent if name in ("SendMessage", "EditMessageText") and m.reply_markup
             for row in m.reply_markup.inline_keyboard]

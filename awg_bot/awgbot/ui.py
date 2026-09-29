@@ -66,6 +66,13 @@ def _page(text: str) -> bool:
     return text.startswith("◀️ Стр") or text.endswith("▶️")
 
 
+def _button(text: str, data: str) -> InlineKeyboardButton:
+    """Данные вида https://… или tg://… — кнопка-ссылка, иначе колбэк."""
+    if data.startswith(("https://", "http://", "tg://")):
+        return InlineKeyboardButton(text=text, url=data)
+    return InlineKeyboardButton(text=text, callback_data=data)
+
+
 def kb(*items: Button | Iterable[Button] | None) -> InlineKeyboardMarkup:
     """Клавиатура в два столбца. Элемент — (текст, данные), список таких пар,
     Row или None (пропуск: удобно для условных пунктов). Порядок кнопок
@@ -83,11 +90,11 @@ def kb(*items: Button | Iterable[Button] | None) -> InlineKeyboardMarkup:
             continue
         if isinstance(item, Row):
             flush()
-            rows.append([InlineKeyboardButton(text=t, callback_data=d) for t, d in item])
+            rows.append([_button(t, d) for t, d in item])
             continue
         pairs = [item] if isinstance(item, tuple) else [p for p in item if p]
         for text, data in pairs:
-            button = InlineKeyboardButton(text=text, callback_data=data)
+            button = _button(text, data)
             if width(text) > WIDE:
                 flush()
                 rows.append([button])

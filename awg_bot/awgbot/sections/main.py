@@ -14,6 +14,7 @@ router = Router()
 act = ui.Actions(router, "main")
 
 PROFILE = {"lite": "AmneziaVPN", "pro": "Мощный", "standard": "Standard"}
+SUPPORT_URL = "https://t.me/awgToolza/156/157"
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -84,7 +85,8 @@ def status_text(d: dict) -> str:
 
 
 def menu_kb(d: dict) -> ui.InlineKeyboardMarkup:
-    """Девять разделов awg2 в два столбца, в том же порядке."""
+    """Девять разделов awg2 в два столбца, в том же порядке; в самом низу —
+    «Поддержать» во всю ширину."""
     return ui.kb(
         ("🖥 Сервер", "srv"),
         ("👥 Клиенты", "cl"),
@@ -96,6 +98,7 @@ def menu_kb(d: dict) -> ui.InlineKeyboardMarkup:
         (f"⬆️ Есть {d['update']}" if d.get("update") else "⬆️ Обновление", "upd"),
         ("🛡 WG + обфускатор", "wo"),
         ("🔄 Обновить", "main"),
+        ui.Row(("Поддержать 💚", SUPPORT_URL)),
     )
 
 
