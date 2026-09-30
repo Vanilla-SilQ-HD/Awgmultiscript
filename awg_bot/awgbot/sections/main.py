@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from aiogram import Router
+from aiogram import Bot, Router
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -110,6 +110,17 @@ async def show_menu(target: ui.Target) -> None:
                         ui.kb(("🤖 Telegram-бот", "botm"), ("🔄 Повторить", "main")))
         return
     await ui.render(target, status_text(r.data), menu_kb(r.data))
+
+
+async def send_menu(bot: Bot, chat_id: int) -> None:
+    """Главное меню новым сообщением внизу чата — из панели («Меню бота в
+    чат»), когда оно утонуло под конфигами."""
+    r = await api.call("status")
+    if not r.ok or not isinstance(r.data, dict):
+        await ui.show_new(bot, chat_id, ui.fail(r, "awg2 недоступен"),
+                          ui.kb(("🤖 Telegram-бот", "botm"), ("🔄 Повторить", "main")))
+        return
+    await ui.show_new(bot, chat_id, status_text(r.data), menu_kb(r.data))
 
 
 @act()

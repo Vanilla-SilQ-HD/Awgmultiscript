@@ -10,7 +10,7 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     const noop = () => {};
     window.__log = [];
     window.Telegram = { WebApp: {
-      initData, colorScheme: theme, ready: noop, expand: noop, onEvent: noop,
+      initData, colorScheme: theme, ready: noop, expand: noop, onEvent: noop, close: () => window.__log.push("close"),
       BackButton: { show: () => window.__log.push("back:show"), hide: () => window.__log.push("back:hide"), onClick: (f) => { window.__back = f; } },
       HapticFeedback: { notificationOccurred: (t) => window.__log.push("haptic:" + t) },
       showConfirm: (t, cb) => { window.__log.push("confirm:" + t); cb(true); },
@@ -365,6 +365,11 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
 
   // ── Бот ──
   await step("бот", async () => { await nav("/bot", "[data-name=bot]"); await page.waitForSelector(".sgrid"); await shot("52-bot"); });
+  await step("меню бота в чат", async () => {
+    await page.click(".top button[aria-label='Разделы']");
+    await page.click(".sheet >> text=Меню бота в чат");
+    await page.waitForFunction(() => window.__log.includes("close"));
+  });
   await step("админы: отозвать", async () => {
     await nav("/bot/admins", "text=@helper");
     await shot("53-admins");

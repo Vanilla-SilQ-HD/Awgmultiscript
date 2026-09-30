@@ -24,6 +24,7 @@ from . import __version__, access, admins, api, icons, media, store
 from .sections import backup as bk
 from .sections import botself
 from .sections import clients as cls
+from .sections import main as main_menu
 from .sections import wgobf
 
 # Команды awg2 api, открытые панели; первое слово — раздел
@@ -337,6 +338,12 @@ def setup(app: web.Application, user_of: UserOf) -> None:
         await bot.send_message(uid, "🎨 Проверка иконок из панели: " + " ".join(sample))
         have, miss = icons.coverage(mapping)
         return web.json_response({"ok": True, "active": icons.active(), "pack": name, "have": have, "miss": miss})
+
+    @route("/api/bot/menu")
+    async def _menu(request: web.Request, user: dict, body: dict) -> web.Response:
+        """Главное меню бота новым сообщением в самый низ чата."""
+        await main_menu.send_menu(request.app["bot"], int(user["id"]))
+        return web.json_response({"ok": True})
 
     @route("/api/bot/webapp/restart")
     async def _webapp_restart(request: web.Request, user: dict, body: dict) -> web.Response:

@@ -693,6 +693,12 @@ async def run():
         st, body = await api_("/api/me", {})
         chk("панель: /api/me — время старта бота (панель по нему ждёт перезапуск)",
             isinstance(body.get("started"), int) and body["started"] > 0, body)
+        mark = len(SESSION.sent)
+        st, body = await api_("/api/bot/menu", {})
+        menu = [m for n, m in SESSION.sent[mark:] if n == "SendMessage" and getattr(m, "chat_id", None) == 111]
+        chk("панель: «Меню бота в чат» — главное меню новым сообщением",
+            st == 200 and menu and "srv" in [b.callback_data for row in menu[-1].reply_markup.inline_keyboard for b in row],
+            [st, [n for n, _ in SESSION.sent[mark:]]])
         st, body = await api_("/api/wgobf/bundle", {"name": "nobody"})
         chk("панель: комплект обфускатора без обфускатора — понятная ошибка",
             st == 200 and body["ok"] is False and body.get("error"), [st, body])

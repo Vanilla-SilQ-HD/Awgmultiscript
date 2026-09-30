@@ -99,7 +99,9 @@ sys.path.insert(0, os.path.join(HERE, "..", "awg_bot"))
 from aiogram import Bot  # noqa: E402
 from aiogram.client.session.base import BaseSession  # noqa: E402
 
-from aiogram.types import Sticker, StickerSet, User  # noqa: E402
+from datetime import datetime  # noqa: E402
+
+from aiogram.types import Chat, Message, MessageEntity, Sticker, StickerSet, User  # noqa: E402
 
 from awgbot import access, admins, icons, store, webapp  # noqa: E402
 from awgbot.config import load_config  # noqa: E402
@@ -116,6 +118,11 @@ class Session(BaseSession):
                 Sticker(file_id=f"f{i}", file_unique_id=f"u{i}", type="custom_emoji", width=100, height=100,
                         is_animated=False, is_video=False, emoji=e, custom_emoji_id=str(5000 + i))
                 for i, e in enumerate(icons.TEMPLATE)])
+        if name == "SendMessage":                    # как Telegram: сообщение; иконки в тексте — сущности
+            entities = ([MessageEntity(type="custom_emoji", offset=0, length=1, custom_emoji_id="5000")]
+                        if "<tg-emoji" in (method.text or "") else None)
+            return Message(message_id=int(time.time() * 1000) % 10**9, date=datetime.now(),
+                           chat=Chat(id=int(method.chat_id), type="private"), text="…", entities=entities)
         return True
 
     async def stream_content(self, *args, **kwargs):

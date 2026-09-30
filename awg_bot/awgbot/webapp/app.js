@@ -87,7 +87,7 @@ const EMOJI_ICON = {
   "📅": "calendar-clock", "♾": "infinity", "🚪": "door-open", "☁": "cloud", "🛰": "satellite", "🧦": "waypoints",
   "🔐": "lock-keyhole", "🧪": "flask-conical", "🖥": "server", "🛡": "shield", "📁": "folder", "🗜": "file-archive",
   "◀": "arrow-left", "✅": "circle-check", "❌": "circle-x", "✖": "x", "🔃": "arrow-down-up", "📂": "folder",
-  "👮": "user", "🎨": "palette", "📱": "smartphone", "🔗": "share-2", "🙋": "user-plus", "🧯": "eraser",
+  "👮": "user", "🎨": "palette", "💬": "message-square-text", "📱": "smartphone", "🔗": "share-2", "🙋": "user-plus", "🧯": "eraser",
 };
 const EMOJI_RE = /^(\p{Extended_Pictographic})\uFE0F?\s*/u;
 function withIcon(label) {
@@ -184,6 +184,14 @@ function lookSheet() {
 }
 
 const SUPPORT_URL = "https://t.me/awgToolza/156/157";
+// Меню бота утонуло под конфигами — бот присылает его вниз чата, панель закрывается
+function menuToChat() {
+  return busy(null, async () => {
+    await post("/api/bot/menu");
+    haptic();
+    if (tg && tg.close) tg.close(); else toast("Меню — внизу чата с ботом");
+  });
+}
 const topEl = document.getElementById("top");
 function drawTop() {
   const dark = document.documentElement.dataset.theme === "dark";
@@ -201,8 +209,10 @@ function drawTop() {
       if (tg && tg.openTelegramLink) tg.openTelegramLink(SUPPORT_URL); else window.open(SUPPORT_URL, "_blank");
     } }, icon("heart")),
     h("button", { "aria-label": "Разделы", title: "Разделы", onclick: async () => {
-      const path = await sheet("Разделы", SECTIONS.filter((x) => x[2]).map(([ic, t, p]) => ({ label: `${ic} ${t}`, value: p })));
-      if (path) go(path);
+      const path = await sheet("Разделы", [{ label: "💬 Меню бота в чат", value: "chat" },
+        ...SECTIONS.filter((x) => x[2]).map(([ic, t, p]) => ({ label: `${ic} ${t}`, value: p }))]);
+      if (path === "chat") menuToChat();
+      else if (path) go(path);
     } }, icon("menu")));
 }
 
@@ -1804,6 +1814,7 @@ route(/^\/bot$/, async (ctx) => {
       [d.proxy ? "прокси" : "напрямую", "До Telegram", d.proxy ? "через прокси" : "без прокси", () => go("/bot/proxy")],
     ]),
     h("div", { class: "card list" },
+      menuItem("💬 Меню бота в чат", "главное меню — новым сообщением внизу чата", menuToChat),
       menuItem("🌐 Прокси до Telegram", d.proxy || "нет — напрямую", () => go("/bot/proxy")),
       d.owner ? menuItem("👮 Админы", `владельцев ${d.owners}, приглашённых ${d.invited}`, () => go("/bot/admins")) : null,
       d.owner ? menuItem("🎨 Оформление", "иконки custom emoji в боте", () => go("/bot/look")) : null,
