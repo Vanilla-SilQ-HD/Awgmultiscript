@@ -77,7 +77,7 @@ function icon(name) {
 }
 // Эмодзи в начале подписи → линейная иконка того же смысла (icons.js)
 const EMOJI_ICON = {
-  "🔄": "refresh-cw", "🔀": "shuffle", "🌍": "globe", "📍": "crosshair", "🧩": "cpu", "📦": "package", "🛠": "wrench",
+  "🔄": "refresh-cw", "🔀": "shuffle", "🌍": "globe", "📍": "map-pin", "🧩": "cpu", "📦": "package", "🛠": "wrench",
   "♻": "rotate-ccw", "⚠": "triangle-alert", "✨": "sparkles", "🗑": "trash-2", "📜": "file-text", "▶": "play",
   "⏹": "square", "👥": "users", "🔑": "key", "📥": "download", "🔎": "search", "🔍": "search", "⚖": "scale",
   "🩺": "stethoscope", "➕": "plus", "➖": "minus", "🧹": "eraser", "💾": "save", "📤": "upload", "🤖": "bot",
@@ -101,7 +101,8 @@ const pill = (text, cls = "") => h("span", { class: "pill " + cls }, text);
 const tag = (text, cls = "", ic = null) => h("span", { class: "tag " + cls }, ic ? icon(ic) : null, text);
 // Сводка 2×2: [число, ПОДПИСЬ, пояснение, onclick]
 const statGrid = (cells) => h("div", { class: "sgrid" }, cells.filter(Boolean).map(([big, label, sub, onclick]) =>
-  h("div", { class: "cell" + (onclick ? " tap" : ""), onclick }, h("b", {}, big), h("div", { class: "lb" }, label),
+  h("div", { class: "cell" + (onclick ? " tap" : ""), onclick },
+    h("b", { class: String(big).length > 9 ? "long" : null }, big), h("div", { class: "lb" }, label),
     sub ? h("div", { class: "sb" }, sub) : null)));
 // Карточка объекта: рамка и точка по состоянию (on | bad | warn), чипы, строки, действия
 function ecard({ state = "", cls = "", name, right, meta, lines, note, acts, onopen, attrs = {} }) {
@@ -134,15 +135,65 @@ function applyTheme(t) {
 const autoTheme = () => (tg && tg.colorScheme === "dark" ? "dark" : "light");
 applyTheme(pref("theme", "") || autoTheme());
 
+// Размер и жирность — «Вид панели». Размер масштабирует панель целиком:
+// так кнопки и карточки сохраняют пропорции и подписи не переносятся
+const SCALE_MIN = 75, SCALE_MAX = 130;
+const scalePref = () => Math.min(SCALE_MAX, Math.max(SCALE_MIN, Number(pref("scale", "100")) || 100));
+function applyLook() {
+  const z = scalePref() / 100;
+  document.documentElement.style.zoom = z === 1 ? "" : String(z);
+  document.documentElement.dataset.weight = pref("weight", "normal");
+}
+applyLook();
+
+function lookSheet() {
+  const box = h("div", { class: "sheet" });
+  const bg = h("div", { class: "sheet-bg", onclick: (ev) => { if (ev.target === bg) bg.remove(); } }, box);
+  const segText = (items, cur, pick) => h("div", { class: "seg" }, items.map(([k, label]) =>
+    h("button", { class: k === cur ? "on" : null, onclick: () => pick(k) }, label)));
+  function draw() {
+    const scale = scalePref();
+    const size = h("label", {}, `Размер — ${scale}%`);
+    const range = h("input", { type: "range", min: SCALE_MIN, max: SCALE_MAX, step: 5, value: scale,
+      oninput: () => { size.textContent = `Размер — ${range.value}%`; },
+      onchange: () => { setPref("scale", range.value); applyLook(); drawTop(); } });
+    box.replaceChildren(
+      h("h3", {}, "Вид панели"),
+      h("label", {}, "Тема"),
+      segText([["", "Авто"], ["light", "Светлая"], ["dark", "Тёмная"]], pref("theme", ""), (v) => {
+        setPref("theme", v); applyTheme(v || autoTheme()); drawTop(); draw();
+      }),
+      size, range,
+      h("div", { class: "row small muted", style: "justify-content:space-between;margin:0 4px" },
+        h("span", {}, `${SCALE_MIN}%`), h("span", {}, "100%"), h("span", {}, `${SCALE_MAX}%`)),
+      h("label", {}, "Жирность шрифта"),
+      segText([["light", "Тоньше"], ["normal", "Обычная"], ["bold", "Жирнее"]], pref("weight", "normal"), (v) => {
+        setPref("weight", v); applyLook(); draw();
+      }),
+      hint("«Авто» — как тема Telegram. Всё запоминается на этом устройстве; если в телефоне крупный системный шрифт — уменьши размер здесь."),
+      h("div", { class: "pair", style: "margin-top:8px" },
+        h("button", { onclick: () => {
+          ["theme", "scale", "weight"].forEach((k) => setPref(k, ""));
+          applyTheme(autoTheme()); applyLook(); drawTop(); draw();
+        } }, "Сбросить"),
+        h("button", { class: "btn-primary", onclick: () => bg.remove() }, "Готово")));
+  }
+  draw();
+  document.body.append(bg);
+}
+
 const SUPPORT_URL = "https://t.me/awgToolza/156/157";
 const topEl = document.getElementById("top");
 function drawTop() {
   const dark = document.documentElement.dataset.theme === "dark";
   topEl.className = "top";
   topEl.replaceChildren(
-    h("div", { class: "logo", onclick: () => go("/") }, icon("shield-check"), h("span", { class: "name" }, "AWG Toolza")),
+    // Название — если с учётом масштаба панели в шапке хватает места
+    h("div", { class: "logo", onclick: () => go("/") }, icon("shield-check"),
+      innerWidth * 100 / scalePref() >= 380 ? h("span", { class: "name" }, "AWG Toolza") : null),
     S.version ? h("span", { class: "ver" }, S.version) : null,
     h("div", { class: "sp" }),
+    h("button", { "aria-label": "Вид", title: "Вид панели", onclick: lookSheet }, icon("a-large-small")),
     h("button", { "aria-label": "Тема", title: "Тема", onclick: () => {
       const t = dark ? "light" : "dark";
       setPref("theme", t); applyTheme(t); drawTop();
@@ -343,7 +394,7 @@ function switchRow(title, sub, on, onToggle) {
     await onToggle(next);
     sw.classList.toggle("on", next);
     haptic();
-  }) }, h("div", { class: "main" }, h("div", { class: "title" }, title), sub ? h("div", { class: "sub wrap" }, sub) : null), sw);
+  }) }, h("div", { class: "main" }, h("div", { class: "title wrap" }, title), sub ? h("div", { class: "sub wrap" }, sub) : null), sw);
 }
 // Файл с телефона в поле ввода (конфиги, профили)
 function fileField(ta) {
@@ -1611,6 +1662,7 @@ if (tg) {
   if (tg.onEvent) tg.onEvent("themeChanged", () => { if (!pref("theme", "")) { applyTheme(autoTheme()); drawTop(); } });
 }
 window.addEventListener("hashchange", render);
+window.addEventListener("resize", () => drawTop());
 drawTop();
 if (!tg || !tg.initData) {
   root.replaceChildren(h("div", { class: "empty" }, "Открой панель кнопкой в боте"));

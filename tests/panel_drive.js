@@ -243,6 +243,25 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.click(".top button[aria-label='Тема']");
   });
 
+  await step("вид панели: размер и жирность", async () => {
+    await page.click(".top button[aria-label='Вид']");
+    await page.waitForSelector(".sheet >> text=Вид панели");
+    await page.click(".sheet .seg button:has-text('Жирнее')");
+    await page.$eval(".sheet input[type=range]", (r) => { r.value = "90"; r.dispatchEvent(new Event("input")); r.dispatchEvent(new Event("change")); });
+    await page.waitForSelector(".sheet >> text=Размер — 90%");
+    await shot("25-look");
+    const look = await page.evaluate(() => [document.documentElement.dataset.weight, document.documentElement.style.zoom]);
+    if (look[0] !== "bold" || look[1] !== "0.9") throw new Error("жирность/размер не применились: " + look);
+    await page.reload({ waitUntil: "domcontentloaded" }); await page.waitForSelector("h1");
+    const kept = await page.evaluate(() => [document.documentElement.dataset.weight, document.documentElement.style.zoom]);
+    if (kept.join() !== look.join()) throw new Error("не запомнилось: " + kept);
+    await page.click(".top button[aria-label='Вид']");
+    await page.click(".sheet button:has-text('Сбросить')");
+    await page.click(".sheet button:has-text('Готово')");
+    const reset = await page.evaluate(() => [document.documentElement.dataset.weight, document.documentElement.style.zoom]);
+    if (reset[0] !== "normal" || reset[1] !== "") throw new Error("сброс не сработал: " + reset);
+  });
+
   // ── Диагностика ──
   await step("диагностика", async () => { await nav("/diag", "text=Система"); await shot("40-diag"); });
   await step("домены мимикрии", async () => {
