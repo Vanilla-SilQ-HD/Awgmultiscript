@@ -5,7 +5,8 @@
 
 const tg = window.Telegram && window.Telegram.WebApp;
 const root = document.getElementById("app");
-const S = { me: null, version: "", channel: "", clients: null, sort: null, view: null, filter: "all", q: "", select: null };
+const S = { me: null, version: "", channel: "", clients: null, sort: null, view: null, filter: "all", q: "", select: null,
+  homeDraw: null };
 
 // ── Связь с ботом ─────────────────────────────────────────
 async function post(path, body = {}) {
@@ -171,11 +172,13 @@ function lookSheet() {
       segText([["light", "Тоньше"], ["normal", "Обычная"], ["bold", "Жирнее"]], pref("weight", "normal"), (v) => {
         setPref("weight", v); applyLook(); draw();
       }),
+      h("label", {}, "Главная"),
+      segText(HOMES.map(([k, , label]) => [k, label]), homePref(), (v) => { setHome(v); draw(); }),
       hint("«Авто» — как тема Telegram. Всё запоминается на этом устройстве; если в телефоне крупный системный шрифт — уменьши размер здесь."),
       h("div", { class: "pair", style: "margin-top:8px" },
         h("button", { onclick: () => {
           ["theme", "scale", "weight"].forEach((k) => setPref(k, ""));
-          applyTheme(autoTheme()); applyLook(); drawTop(); draw();
+          applyTheme(autoTheme()); applyLook(); drawTop(); setHome(""); draw();
         } }, "Сбросить"),
         h("button", { class: "btn-primary", onclick: () => bg.remove() }, "Готово")));
   }
@@ -455,16 +458,14 @@ const SECTIONS = [
   ["🤖", "Бот", "/bot", "прокси, админы"],
 ];
 
-route(/^\/$/, async (ctx) => {
-  const [me, d, cl] = await Promise.all([post("/api/me"), post("/api/status"), post("/api/clients").catch(() => null)]);
-  S.me = me;
-  S.version = d.version;
-  S.channel = d.channel;
-  drawTop();
-  if (cl) {
-    S.clients = cl;
-    if (!S.sort) S.sort = cl.sort || "activity";
-  }
+// Вид главной: переключатель у «Разделы» и в «Вид панели»; данные одни, раскладка разная
+const HOMES = [["cards", "layout-grid", "Карточки"], ["compact", "list", "Компакт"], ["icons", "grid-3x3", "Иконки"]];
+const homePref = () => (HOMES.some(([k]) => k === pref("home", "")) ? pref("home", "") : "cards");
+const setHome = (v) => { setPref("home", v); if (S.homeDraw) S.homeDraw(); };
+const secIcon = (ico) => icon(EMOJI_ICON[ico.replace("️", "")] || "info");
+const openSection = (path) => (path ? go(path) : toast("Раздел появится в панели следующим обновлением — пока он в боте"));
+
+function homeModel(d, cl) {
   const s = d.server || {}, t = d.tunnels || {}, c = d.components || {};
   const rows = (cl && cl.rows) || [];
   const rx = rows.reduce((a, x) => a + (x.rx || 0), 0), tx = rows.reduce((a, x) => a + (x.tx || 0), 0);
@@ -476,31 +477,68 @@ route(/^\/$/, async (ctx) => {
     c.installed && c.reboot ? [c.reboot, "/server/module"] : null,
     d.update ? [`Доступна ${d.update} — обновить`, "/update"] : null,
   ].filter(Boolean);
-  const state = !s.exists ? "" : s.up ? "on" : "bad";
-  ctx.put(
-    alerts.length ? h("div", { class: "card warn" }, alerts.map(([a, path]) =>
-      h("div", { class: "row", style: "cursor:pointer;padding:3px 0", onclick: () => go(path) }, icon("triangle-alert"), a))) : null,
-    ecard({ state, name: d.host || "сервер", onopen: () => go("/server"),
-      right: pill(!s.exists ? "не создан" : s.up ? "работает" : "не поднят", s.exists ? (s.up ? "ok" : "bad") : ""),
-      meta: s.exists ? [tag("AWG " + (s.proto || "?"), "accent"), tag(s.profile_label || s.profile || ""),
-        tag("MTU " + (s.mtu || "?")), s.mimicry && s.mimicry !== "none" ? tag(s.mimicry) : null] : [tag(d.os || "")],
-      lines: [s.exists ? s.endpoint : d.ip, s.exists ? d.os : null],
-      acts: [act("server", "Сервер", () => go("/server")), act("users", "Клиенты", () => go("/clients")),
-        act("stethoscope", "Проверка", () => go("/diag"))] }),
-    statGrid([
-      [`${s.online || 0}/${s.clients || 0}`, "Клиенты онлайн", `всего ${s.clients || 0} · истёкших ${rows.filter((x) => x.blocked).length}`,
-        () => go("/clients")],
-      [fmtBytes(rx + tx), "Суммарный обмен", `↓ ${fmtBytes(rx)} · ↑ ${fmtBytes(tx)}`],
-      [up.length ? up.join(", ") : "напрямую", "Выход клиентов", t.dns === "up" ? "DNS шифруется" : "через сервер", () => go("/tunnels")],
-      [leader && leader.rx + leader.tx ? leader.name : "—", "Лидер по трафику", leader && leader.rx + leader.tx ? fmtBytes(leader.rx + leader.tx) : "—"],
-    ]),
-    h("h2", {}, "Разделы"),
+  return { d, s, t, rx, tx, alerts, leader: leader && leader.rx + leader.tx ? leader : null,
+    state: !s.exists ? "" : s.up ? "on" : "bad",
+    exit: up.length ? up.join(", ") : "напрямую",
+    expired: rows.filter((x) => x.blocked).length };
+}
+
+const homeAlerts = (m) => (m.alerts.length ? h("div", { class: "card warn" }, m.alerts.map(([a, path]) =>
+  h("div", { class: "row", style: "cursor:pointer;padding:3px 0", onclick: () => go(path) }, icon("triangle-alert"), a))) : null);
+const serverCard = (m, acts = true) => ecard({ state: m.state, name: m.d.host || "сервер", onopen: () => go("/server"),
+  right: pill(!m.s.exists ? "не создан" : m.s.up ? "работает" : "не поднят", m.s.exists ? (m.s.up ? "ok" : "bad") : ""),
+  meta: m.s.exists ? [tag("AWG " + (m.s.proto || "?"), "accent"), tag(m.s.profile_label || m.s.profile || ""),
+    tag("MTU " + (m.s.mtu || "?")), m.s.mimicry && m.s.mimicry !== "none" ? tag(m.s.mimicry) : null] : [tag(m.d.os || "")],
+  lines: [m.s.exists ? m.s.endpoint : m.d.ip, m.s.exists && acts ? m.d.os : null],
+  acts: acts ? [act("server", "Сервер", () => go("/server")), act("users", "Клиенты", () => go("/clients")),
+    act("stethoscope", "Проверка", () => go("/diag"))] : null });
+const toLeader = (m) => (m.leader ? () => go("/client/" + encodeURIComponent(m.leader.name)) : null);
+const homeStats = (m) => statGrid([
+  [`${m.s.online || 0}/${m.s.clients || 0}`, "Клиенты онлайн", `всего ${m.s.clients || 0} · истёкших ${m.expired}`, () => go("/clients")],
+  [fmtBytes(m.rx + m.tx), "Суммарный обмен", `↓ ${fmtBytes(m.rx)} · ↑ ${fmtBytes(m.tx)}`],
+  [m.exit, "Выход клиентов", m.t.dns === "up" ? "DNS шифруется" : "через сервер", () => go("/tunnels")],
+  [m.leader ? m.leader.name : "—", "Лидер по трафику", m.leader ? fmtBytes(m.leader.rx + m.leader.tx) : "—", toLeader(m)],
+]);
+// Та же сводка в одну строку: число и короткая подпись
+const homeStrip = (m) => h("div", { class: "sstrip" }, [
+  [`${m.s.online || 0}/${m.s.clients || 0}`, "онлайн", () => go("/clients")],
+  [fmtBytes(m.rx + m.tx).replace(/^(\d{3,})\.\d/, "$1"), "обмен", null],     // 691 МБ, а не «691.0…»
+  [m.exit, "выход", () => go("/tunnels")],
+  [m.leader ? m.leader.name : "—", "лидер", toLeader(m)],
+].map(([big, label, onclick]) => h("div", { class: "cell" + (onclick ? " tap" : ""), onclick }, h("b", {}, big), h("span", {}, label))));
+const sectionsHead = () => h("div", { class: "h2row" }, h("h2", {}, "Разделы"),
+  segBar(HOMES, homePref(), setHome));
+const HOME_VIEWS = {
+  cards: (m) => [homeAlerts(m), serverCard(m), homeStats(m), sectionsHead(),
     h("div", { class: "grid" }, SECTIONS.map(([ico, name, path, sub]) =>
-      h("div", { class: "tile" + (path ? "" : " soon"),
-        onclick: () => (path ? go(path) : toast("Раздел появится в панели следующим обновлением — пока он в боте")) },
-        h("div", { class: "ibox" }, icon(EMOJI_ICON[ico.replace("️", "")] || "info")), h("div", { class: "t" }, name),
-        h("div", { class: "s" }, path ? sub : "скоро · пока в боте")))),
-    h("div", { class: "foot" }, `${me.name} · ${me.owner ? "владелец" : "админ"} · бот ${me.bot}`));
+      h("div", { class: "tile" + (path ? "" : " soon"), onclick: () => openSection(path) },
+        h("div", { class: "ibox" }, secIcon(ico)), h("div", { class: "t" }, name),
+        h("div", { class: "s" }, path ? sub : "скоро · пока в боте"))))],
+  compact: (m) => [homeAlerts(m), serverCard(m, false), homeStrip(m), sectionsHead(),
+    h("div", { class: "card list" }, SECTIONS.map(([ico, name, path, sub]) =>
+      menuItem(`${ico} ${name}`, path ? sub : "скоро · пока в боте", () => openSection(path))))],
+  icons: (m) => [homeAlerts(m), serverCard(m), homeStrip(m), sectionsHead(),
+    h("div", { class: "igwrap" }, h("div", { class: "igrid" }, SECTIONS.map(([ico, name, path]) =>
+      h("div", { class: "ic" + (path ? "" : " soon"), onclick: () => openSection(path) },
+        h("div", { class: "ibox" }, secIcon(ico)), h("span", {}, name)))))],
+};
+
+route(/^\/$/, async (ctx) => {
+  const [me, d, cl] = await Promise.all([post("/api/me"), post("/api/status"), post("/api/clients").catch(() => null)]);
+  S.me = me;
+  S.version = d.version;
+  S.channel = d.channel;
+  drawTop();
+  if (cl) {
+    S.clients = cl;
+    if (!S.sort) S.sort = cl.sort || "activity";
+  }
+  const m = homeModel(d, cl);
+  // Смена вида перерисовывает без новой загрузки; ушли с главной — put молчит
+  const draw = () => ctx.put(HOME_VIEWS[homePref()](m), h("div", { class: "foot" },
+    `${me.name} · ${me.owner ? "владелец" : "админ"} · бот ${me.bot}`));
+  S.homeDraw = draw;
+  draw();
 });
 
 // ── Клиенты ───────────────────────────────────────────────

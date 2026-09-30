@@ -269,6 +269,26 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     if (reset[0] !== "normal" || reset[1] !== "") throw new Error("сброс не сработал: " + reset);
   });
 
+  await step("вид главной", async () => {
+    await nav("/", ".grid .tile");
+    for (const [label, sel] of [["Компакт", ".card.list .item"], ["Иконки", ".igrid .ic"], ["Карточки", ".grid .tile"],
+      ["Иконки", ".igrid .ic"]]) {
+      await page.click(`.h2row .seg button[aria-label='${label}']`);
+      await page.waitForSelector(`#app ${sel}`);
+      await page.waitForSelector(`.h2row .seg button.on[aria-label='${label}']`);
+    }
+    await page.reload({ waitUntil: "domcontentloaded" }); await page.waitForSelector("#app .igrid .ic");
+    await shot("26-home-icons");
+    await page.click(".top button[aria-label='Вид']");
+    await page.waitForSelector(".sheet .seg button.on:has-text('Иконки')");
+    await page.click(".sheet .seg button:has-text('Компакт')");
+    await page.waitForSelector("#app .card.list .item");
+    await shot("27-home-compact");
+    await page.click(".sheet button:has-text('Сбросить')");
+    await page.waitForSelector("#app .grid .tile");
+    await page.click(".sheet button:has-text('Готово')");
+  });
+
   // ── Диагностика ──
   await step("диагностика", async () => { await nav("/diag", "text=Система"); await shot("40-diag"); });
   await step("домены мимикрии", async () => {

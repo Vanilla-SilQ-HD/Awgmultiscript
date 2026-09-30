@@ -138,6 +138,9 @@
                         justify-content: center; gap: 6px; border-radius: 10px; }
   .ecard .acts button:active { background: var(--soft); }
   .ecard .acts button.bad { color: var(--danger); }
+  /* Узкая карточка (крупный масштаб) — действия без значков, подписи целиком */
+  .ecard { container-type: inline-size; }
+  @container (max-width: 290px) { .ecard .acts svg.i { display: none; } }
   .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--hint); opacity: .55; }
   .dot.on { background: var(--ok); opacity: 1; box-shadow: 0 0 0 3px var(--ok-soft); }
   .dot.bad { background: var(--danger); opacity: 1; box-shadow: 0 0 0 3px var(--danger-soft); }
@@ -180,6 +183,34 @@
   .tile .t { font-weight: var(--w-bold); }
   .tile .s { color: var(--hint); font-size: 11.5px; margin-top: 1px; }
   .tile.soon { opacity: .5; }
+  /* «Разделы» с переключателем вида главной справа */
+  .h2row { display: flex; align-items: center; justify-content: space-between; margin: 12px 0 7px; }
+  .h2row h2 { margin: 0 4px; }
+  .h2row .seg { padding: 2px; gap: 2px; border-radius: 10px; }
+  .h2row .seg button { min-height: 28px; padding: 3px 10px; border-radius: 8px; }
+  .h2row .seg svg.i { width: 16px; height: 16px; }
+  /* Вид «Иконки»: разделы значками 4 в ряд */
+  .igrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; background: var(--card); border: 1px solid var(--border);
+           border-radius: 14px; padding: 10px 4px 6px; box-shadow: var(--shadow); }
+  .igrid .ic { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 4px 2px 6px; border-radius: 10px;
+               cursor: pointer; text-align: center; min-width: 0; }
+  .igrid .ic:active { background: var(--soft); }
+  .igrid .ic .ibox { width: 44px; height: 44px; border-radius: 13px; }
+  .igrid .ic .ibox svg.i { width: 21px; height: 21px; }
+  .igrid .ic span { font-size: 11.5px; font-weight: var(--w-semi); line-height: 1.2; overflow-wrap: anywhere; }
+  .igrid .ic.soon { opacity: .5; }
+  /* Узко (телефон и крупный масштаб) — три в ряд, чтобы слова не рвались */
+  .igwrap { container-type: inline-size; }
+  @container (max-width: 300px) { .igwrap .igrid { grid-template-columns: repeat(3, 1fr); } }
+  /* Сводка в одну строку — «Компакт», «Иконки» */
+  .sstrip { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 1px; background: var(--border);
+            border: 1px solid var(--border); border-radius: 14px; overflow: hidden; margin-bottom: 10px; }
+  .sstrip .cell { background: var(--soft); padding: 8px 6px; text-align: center; min-width: 0; }
+  .sstrip .cell.tap { cursor: pointer; }
+  .sstrip b { display: block; font-size: 14px; font-weight: var(--w-heavy); color: var(--accent); overflow: hidden;
+              text-overflow: ellipsis; white-space: nowrap; }
+  .sstrip span { display: block; font-size: 10px; font-weight: var(--w-bold); text-transform: uppercase; letter-spacing: .04em;
+                 color: var(--hint); }
 
   /* Вкладки со счётчиками и переключатель вида */
   .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 2px 0 10px; overflow-x: auto; scrollbar-width: none; }
