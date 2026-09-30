@@ -156,7 +156,7 @@ function lookSheet() {
     const size = h("label", {}, `Размер — ${scale}%`);
     const range = h("input", { type: "range", min: SCALE_MIN, max: SCALE_MAX, step: 5, value: scale,
       oninput: () => { size.textContent = `Размер — ${range.value}%`; },
-      onchange: () => { setPref("scale", range.value); applyLook(); drawTop(); } });
+      onchange: () => { setPref("scale", range.value); applyLook(); } });
     box.replaceChildren(
       h("h3", {}, "Вид панели"),
       h("label", {}, "Тема"),
@@ -188,10 +188,8 @@ function drawTop() {
   const dark = document.documentElement.dataset.theme === "dark";
   topEl.className = "top";
   topEl.replaceChildren(
-    // Название — если с учётом масштаба панели в шапке хватает места
-    h("div", { class: "logo", onclick: () => go("/") }, icon("shield-check"),
-      innerWidth * 100 / scalePref() >= 380 ? h("span", { class: "name" }, "AWG Toolza") : null),
-    S.version ? h("span", { class: "ver" }, S.version) : null,
+    h("div", { class: "logo", onclick: () => go("/") }, icon("shield-check")),
+    h("div", { class: "ver", onclick: () => go("/") }, h("b", {}, "AwgToolza"), S.version ? h("span", {}, S.version) : null),
     h("div", { class: "sp" }),
     h("button", { "aria-label": "Вид", title: "Вид панели", onclick: lookSheet }, icon("a-large-small")),
     h("button", { "aria-label": "Тема", title: "Тема", onclick: () => {
@@ -1662,7 +1660,6 @@ if (tg) {
   if (tg.onEvent) tg.onEvent("themeChanged", () => { if (!pref("theme", "")) { applyTheme(autoTheme()); drawTop(); } });
 }
 window.addEventListener("hashchange", render);
-window.addEventListener("resize", () => drawTop());
 drawTop();
 if (!tg || !tg.initData) {
   root.replaceChildren(h("div", { class: "empty" }, "Открой панель кнопкой в боте"));

@@ -68,14 +68,19 @@
   .ok { color: var(--ok); } .bad { color: var(--danger); } .warn { color: var(--warn); }
 
   /* Шапка */
-  .top { position: sticky; top: 0; z-index: 8; display: flex; align-items: center; gap: 8px; height: 52px;
-         padding: 0 8px 0 12px; background: var(--card); border-bottom: 1px solid var(--border); }
-  .top .logo { display: flex; align-items: center; gap: 7px; cursor: pointer; color: var(--accent); font-weight: var(--w-heavy);
-               font-size: 15px; }
-  .top .logo svg.i { width: 26px; height: 26px; stroke-width: 2.2; }
-  .top .ver { font: var(--w-semi) 11.5px var(--mono); color: var(--ok); background: var(--ok-soft); border-radius: 999px; padding: 2px 8px; }
-  .top .sp { flex: 1; }
-  .top button { background: none; border: 0; padding: 7px; min-height: 0; color: var(--text); cursor: pointer; border-radius: 10px; }
+  .top { position: sticky; top: 0; z-index: 8; display: flex; align-items: center; gap: 4px; height: 52px;
+         padding: 0 6px 0 10px; background: var(--card); border-bottom: 1px solid var(--border); }
+  .top .logo { display: flex; align-items: center; cursor: pointer; color: var(--accent); flex: none; }
+  .top .logo svg.i { width: 26px; height: 26px; stroke-width: 2.2; margin-right: 4px; }
+  /* Название и версия — одной пометкой в две строки: узкая, иконкам справа не мешает */
+  .top .ver { display: flex; flex-direction: column; justify-content: center; line-height: 1.15; color: var(--ok);
+              background: var(--ok-soft); border-radius: 10px; padding: 4px 8px; cursor: pointer; flex: 0 1 auto; min-width: 0;
+              font: var(--w-semi) 10.5px var(--mono); }
+  .top .ver b, .top .ver span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .top .ver b { font: var(--w-heavy) 12.5px -apple-system, "Segoe UI", Inter, Roboto, sans-serif; letter-spacing: -.01em; }
+  .top .sp { flex: 1 0 0; margin-left: -4px; }
+  .top button { background: none; border: 0; padding: 5px; min-height: 0; color: var(--text); cursor: pointer; border-radius: 10px;
+                flex: none; }
   .top button:active { background: var(--soft); }
   .top button svg.i { width: 21px; height: 21px; }
 
