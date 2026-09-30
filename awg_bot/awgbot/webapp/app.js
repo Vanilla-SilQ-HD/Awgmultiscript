@@ -119,7 +119,9 @@ async function render() {
   const path = location.hash.slice(1) || "/";
   const my = ++token;
   // Экран отрисовывает то, что успел загрузить; ушли с него — молчит
-  const ctx = { put: (...nodes) => { if (my === token) root.replaceChildren(...nodes.flat()); }, live: () => my === token };
+  // Условные части экрана приходят как null — их просто нет (иначе «null» текстом)
+  const ctx = { put: (...nodes) => { if (my === token) root.replaceChildren(...nodes.flat(Infinity).filter((n) => n != null && n !== false)); },
+    live: () => my === token };
   if (tg && tg.BackButton) tg.BackButton[path === "/" ? "hide" : "show"]();
   for (const [re, fn] of routes) {
     const m = path.match(re);
@@ -166,7 +168,7 @@ async function runJob(ctx, title, args, done) {
     if (!ok) time.textContent = st.state === "lost" ? "Задача прервана: awg2 остановлен или сервер перезагружен" : (st.error || "ошибка");
     haptic(ok ? "success" : "error");
     foot.replaceChildren(...[].concat(ok && done ? done(st.data) : [],
-      h("button", { class: "btn-block", onclick: back }, "◀️ Назад")));
+      h("button", { class: "btn-block", onclick: back }, "◀️ Назад")).filter((n) => n != null && n !== false));
     return;
   }
 }

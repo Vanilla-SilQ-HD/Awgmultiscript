@@ -313,6 +313,7 @@ sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/pumbaX/awg-multi-scri
 python3 tests/test_toolza.py      # awg2: параметры, конфиги, helper, служебные скрипты, API
 python3 tests/test_cps.py         # генератор I1-I5
 python3 tests/test_bot.py         # бот на живом диспетчере против awg2 api (нужен aiogram)
+python3 tests/test_panel.py       # панель Mini App в Chromium (нужны aiogram и Playwright для node)
 python3 tests/test_admins.py && python3 tests/test_net.py
 ```
 
