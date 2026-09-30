@@ -101,6 +101,8 @@ class FakeSession(BaseSession):
             self.deleted.add(method.message_id)
             self.chat.pop(method.message_id, None)
             return True
+        if name == "SetChatMenuButton" and WEBAPP_REJECT[0] and method.menu_button.type == "web_app":
+            raise TelegramBadRequest(method=method, message="Bad Request: BUTTON_URL_INVALID")
         if name == "GetStickerSet":
             return StickerSet(name=method.name, title="Icons", sticker_type="custom_emoji", stickers=[
                 Sticker(file_id=f"f{i}", file_unique_id=f"u{i}", type="custom_emoji", width=100, height=100,
@@ -584,6 +586,19 @@ async def run():
     url = f"https://203.0.113.10:{ports[0]}/"
     chk("после выпуска сервер Mini App поднялся по адресу сертификата",
         webapp.SERVER.running and webapp.SERVER.url == url, [webapp.SERVER.url, webapp.SERVER.error])
+
+    def menus():
+        return [(m.chat_id, m.menu_button.type, getattr(getattr(m.menu_button, "web_app", None), "url", None))
+                for n, m in SESSION.sent if n == "SetChatMenuButton"]
+
+    chk("кнопка «Меню» у владельца открывает панель", (111, "web_app", url) in menus(), menus())
+    mark = len(SESSION.sent)
+    await say("/start")
+    chk("/start освежает кнопку «Меню» (приглашённым тоже)",
+        any(n == "SetChatMenuButton" and m.chat_id == 111 for n, m in SESSION.sent[mark:]))
+    mark = len(SESSION.sent)
+    await say("/start", STRANGER)
+    chk("чужому кнопку «Меню» не трогаем", not any(n == "SetChatMenuButton" for n, _ in SESSION.sent[mark:]))
     text, buttons = screen(await press("app"))
     chk("кнопка «Открыть панель» — Mini App по этому адресу",
         ("📱 Открыть панель", "webapp:" + url) in buttons and "Сертификат: <code>203.0.113.10</code> (IP)" in text,
@@ -645,9 +660,12 @@ async def run():
         and not any((d or "").startswith("webapp:") for _, d in buttons), [text[-300:], buttons])
     WEBAPP_REJECT[0] = False
 
+    mark = len(SESSION.sent)
     await press("app:rmok")
-    chk("удаление сертификата останавливает Mini App",
-        not webapp.SERVER.running and not os.path.exists(os.path.join(ROOT, "etc/awg2/cert/fullchain.pem")))
+    chk("удаление сертификата останавливает Mini App и возвращает обычное «Меню»",
+        not webapp.SERVER.running and not os.path.exists(os.path.join(ROOT, "etc/awg2/cert/fullchain.pem"))
+        and any(n == "SetChatMenuButton" and m.chat_id == 111 and m.menu_button.type == "default"
+                for n, m in SESSION.sent[mark:]), menus()[-2:])
 
     print("Цвета кнопок")
     await say("/start")

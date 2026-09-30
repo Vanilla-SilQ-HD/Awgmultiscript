@@ -7,7 +7,7 @@ from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from .. import access, admins, api, ui
+from .. import access, admins, api, ui, webapp
 from ..ui import esc
 
 router = Router()
@@ -96,7 +96,7 @@ def menu_kb(d: dict) -> ui.InlineKeyboardMarkup:
         ("🤖 Telegram-бот", "botm"),
         ("🗑 Удаление", "del"),
         (f"⬆️ Есть {d['update']}" if d.get("update") else "⬆️ Обновление", "upd", "primary"),
-        ("🛡 WG+обфускатор", "wo"),
+        ("🛡 Обфускатор", "wo"),
         ("🔄 Обновить", "main"),
         ui.Row(("Поддержать 💚", SUPPORT_URL)),
     )
@@ -143,4 +143,7 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandObject) -> 
                          "Владелец сервера может добавить его в ADMIN_ID или прислать приглашение.")
         return
     await state.clear()
+    if webapp.SERVER.running and msg.bot:
+        # Приглашённый недавно админ тоже получает панель в «Меню»
+        await webapp.SERVER.menu_for(msg.bot, user.id)
     await show_menu(msg)

@@ -47,7 +47,7 @@ async def _all_screen(target: ui.Target, state: FSMContext) -> None:
     await ui.render(target, "<b>💣 Удалить всё</b>\n\nСервер AWG, клиенты, туннели, модуль ядра и утилиты. "
                             "Отметь, что удалить вместе с ними:",
                     ui.kb((f"{mark('bot')} Telegram-бот", rm.data("opt", "bot")),
-                          (f"{mark('wgobf')} WG+обфускатор", rm.data("opt", "wgobf")),
+                          (f"{mark('wgobf')} Обфускатор", rm.data("opt", "wgobf")),
                           (f"{mark('self')} Скрипт awg2", rm.data("opt", "self")),
                           ui.Row(("💣 Удалить", rm.data("allgo")), ui.back("del", "✖️ Отмена"))))
 

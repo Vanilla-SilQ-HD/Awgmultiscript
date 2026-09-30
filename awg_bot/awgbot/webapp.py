@@ -9,6 +9,9 @@ Telegram (просто браузером) API не ответит ничего,
 Сертификат выпускает awg2 (Let's Encrypt на IP или домен) в /etc/awg2/cert;
 после продления сервер подхватывает новые файлы сам, без перезапуска.
 Порт — WEBAPP_PORT в конфиге бота (off — выключено).
+
+Пока сервер работает, кнопка «Меню» слева от поля ввода у владельцев и
+приглашённых админов открывает панель; у остальных она прежняя (/start).
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import MenuButtonDefault, MenuButtonWebApp, WebAppInfo
 from aiohttp import web
 
 from . import __version__, access, api
@@ -38,6 +43,7 @@ STATIC = Path(__file__).with_name("webapp")
 DEFAULT_PORT = 8443
 MAX_AGE = 24 * 3600         # initData старше суток не принимаем
 WATCH_EVERY = 60            # проверка обновлённого сертификата
+MENU_TEXT = "Панель"        # кнопка «Меню» у админов
 
 
 # ── Подпись Telegram ──────────────────────────────────────
@@ -90,13 +96,23 @@ class MiniApp:
         self.error = ""
         self._mtime = 0.0
         self._watch: asyncio.Task | None = None
+        self.bot: Bot | None = None
+        self.menu_error = ""
 
     @property
     def running(self) -> bool:
         return self.runner is not None
 
     async def start(self, bot: Bot) -> None:
-        """Поднять сервер, если есть сертификат и порт; иначе — причина в error."""
+        """Поднять сервер, если есть сертификат и порт; иначе — причина в
+        error. Кнопка «Меню» админов — вслед за сервером."""
+        self.bot = bot
+        was = self.url
+        await self._serve(bot)
+        if self.url != was or self.running:
+            await self.menu_all(bot)
+
+    async def _serve(self, bot: Bot) -> None:
         await self.stop()
         port = configured_port()
         if port is None:
@@ -128,6 +144,28 @@ class MiniApp:
         self.error = ""
         self._watch = asyncio.create_task(self._watch_cert(), name="webapp-cert")
         log.info("Mini App: %s", self.url)
+
+    async def shutdown(self) -> None:
+        """Выключить совсем: сервер и кнопку «Меню» у админов."""
+        await self.stop()
+        if self.bot:
+            await self.menu_all(self.bot)
+
+    async def menu_all(self, bot: Bot) -> None:
+        for uid in access.all_ids():
+            await self.menu_for(bot, uid)
+
+    async def menu_for(self, bot: Bot, chat_id: int) -> None:
+        """Кнопка «Меню» в чате админа: панель, пока сервер работает, иначе
+        обычный список команд. Отказ Telegram — в menu_error, не ошибка."""
+        button = (MenuButtonWebApp(text=MENU_TEXT, web_app=WebAppInfo(url=self.url)) if self.running
+                  else MenuButtonDefault())
+        try:
+            await bot.set_chat_menu_button(chat_id=chat_id, menu_button=button)
+            self.menu_error = ""
+        except TelegramAPIError as e:
+            self.menu_error = str(e)
+            log.warning("Кнопка «Меню» для %s не выставлена: %s", chat_id, e)
 
     async def stop(self) -> None:
         if self._watch:

@@ -98,7 +98,10 @@ cert_issue() {
   info "Let's Encrypt: сертификат на $name…"
   mkdir -p "$ACME_HOME"
   out=$(acme --issue --server letsencrypt -d "$name" --standalone --httpport 80 --keylength ec-256 "${args[@]}" 2>&1) || rc=$?
-  printf '%s\n' "$out" | sed 's/^\[[^]]*\] //' | grep -vE '^$' | tail -n 12
+  # Без самого сертификата и путей к файлам acme.sh — только ход выпуска
+  printf '%s\n' "$out" | sed -e 's/^\[[^]]*\] //' -e '/-----BEGIN/,/-----END/d' \
+    | grep -vE '^$|^(Your cert|The intermediate|And the full-chain|ARI suggestedWindow|It is later than|[0-9]{4}-[0-9]{2}-[0-9]{2}T)' \
+    | tail -n 8
   # 2 — сертификат уже выпущен и продлевать его рано
   if (( rc != 0 && rc != 2 )); then
     err "Let's Encrypt не выдал сертификат — проверь, что порт 80 открыт снаружи (и в файрволе хостера)"

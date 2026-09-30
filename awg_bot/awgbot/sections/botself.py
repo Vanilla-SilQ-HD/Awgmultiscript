@@ -414,8 +414,8 @@ async def app_screen(target: ui.Target, verdict: str = "") -> None:
                      + (" · продлевается сам" if c.get("renew") else " · ⚠️ таймер продления не работает"))
     else:
         lines.append("🔐 Сертификата нет")
-    lines.append(f"🟢 Mini App: <code>{esc(srv.url)}</code>" if srv.running
-                 else f"⚪️ Mini App не запущена: {esc(srv.error or 'нет сертификата')}")
+    lines.append(f"🟢 Mini App: <code>{esc(srv.url)}</code> — и кнопка «Меню» слева от поля ввода"
+                 if srv.running else f"⚪️ Mini App не запущена: {esc(srv.error or 'нет сертификата')}")
     if c.get("port80"):
         lines.append(f"⚠️ Порт 80 занят ({esc(c['port80'])}) — Let's Encrypt не сможет проверить адрес")
     lines += ["", f"<i>🔐 На IP — сертификат Let's Encrypt на {esc(c.get('ip') or 'IP сервера')}: живёт ~6 дней "
@@ -516,6 +516,6 @@ async def _app_rm_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     if not await _owner(cb):
         return
     r = await api.call("cert", "remove")
-    await webapp.SERVER.stop()
+    await webapp.SERVER.shutdown()
     webapp.SERVER.error = "нет сертификата"
     await app_screen(cb, "✅ Сертификат удалён" if r.ok else ui.fail(r, "Удаление сертификата"))
