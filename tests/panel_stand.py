@@ -2,8 +2,9 @@
 
 Запускает test_panel.py: печатает «READY порт initData» и работает, пока его
 не остановят. PROFILE=lite|pro — профиль сервера (от него зависят экраны),
-AWG2_SH — сборка awg2 (по умолчанию dist/awg2.sh). Telegram здесь нет:
-сессия бота только печатает вызовы.
+none — сервера ещё нет (мастер создания); AWG2_SH — сборка awg2 (по
+умолчанию dist/awg2.sh). Telegram здесь нет: сессия бота только печатает
+вызовы.
 """
 import asyncio
 import hashlib
@@ -25,21 +26,39 @@ TOKEN = "123456:" + "A" * 35
 API = api_wrapper()
 fake_acme()
 
-# Сервер AWG с двумя клиентами: alice онлайн, bob был два часа назад
+# Модуль ядра «собран» — иначе awg2 не создаст сервер
+for tool in ("modinfo", "modprobe"):
+    with open(os.path.join(BIN, tool), "w") as f:
+        f.write(f'#!/bin/bash\necho "{tool} $*" >> "$CALLS"; exit 0\n')
+    os.chmod(os.path.join(BIN, tool), 0o755)
+
+PROFILE = os.environ.get("PROFILE", "pro")
 STATE = os.path.join(TMP, "botstate")
 os.makedirs(STATE)
-os.makedirs(os.path.join(ROOT, "etc/amnezia/amneziawg"), exist_ok=True)
+AWG_DIR = os.path.join(ROOT, "etc/amnezia/amneziawg")
+os.makedirs(AWG_DIR, exist_ok=True)
 os.makedirs(os.path.join(ROOT, "root"), exist_ok=True)
-with open(os.path.join(ROOT, "etc/amnezia/amneziawg/awg0.conf"), "w") as f:
-    f.write(OLD20.replace("AWG_PROFILE=pro", "AWG_PROFILE=" + os.environ.get("PROFILE", "pro")))
-for n in ("alice", "bob"):
-    with open(os.path.join(ROOT, "root", n + "_awg2.conf"), "w") as f:
-        f.write("[Interface]\nPrivateKey = X\nAddress = 10.23.45.2/32\n")
-now = int(time.time())
-with open(AWG_DUMP, "w") as f:
-    f.write(f"PRIV\tPUB\t51820\toff\n"
-            f"PUBALICE=\t(none)\t5.6.7.8:4242\t10.23.45.2/32\t{now - 20}\t12345678\t987654\toff\n"
-            f"PUBBOB=\t(none)\t(none)\t10.23.45.3/32\t{now - 7200}\t1024\t2048\toff\n")
+if PROFILE != "none":
+    # Сервер AWG с двумя клиентами: alice онлайн, bob был два часа назад
+    with open(os.path.join(AWG_DIR, "awg0.conf"), "w") as f:
+        f.write(OLD20.replace("AWG_PROFILE=pro", "AWG_PROFILE=" + PROFILE))
+    for n in ("alice", "bob"):
+        with open(os.path.join(ROOT, "root", n + "_awg2.conf"), "w") as f:
+            f.write("[Interface]\nPrivateKey = X\nAddress = 10.23.45.2/32\n")
+    now = int(time.time())
+    with open(AWG_DUMP, "w") as f:
+        f.write(f"PRIV\tPUB\t51820\toff\n"
+                f"PUBALICE=\t(none)\t5.6.7.8:4242\t10.23.45.2/32\t{now - 20}\t12345678\t987654\toff\n"
+                f"PUBBOB=\t(none)\t(none)\t10.23.45.3/32\t{now - 7200}\t1024\t2048\toff\n")
+    # Работают exit-ноды: нода n1 поднята, маршруты — «все клиенты»
+    with open(os.path.join(AWG_DIR, "awg-exit-n1.conf"), "w") as f:
+        f.write("[Interface]\nPrivateKey = X\nTable = off\n\n[Peer]\nEndpoint = 1.2.3.4:51820\n")
+    with open(os.path.join(AWG_DIR, "exits_state"), "w") as f:
+        f.write("active\nmode=all\nbalancer=single\nsingle_exit=n1\n")
+    with open(LINKS, "w") as f:
+        f.write("awg-exit-n1\n")
+    with open(ACTIVE, "w") as f:
+        f.write("awg-exits-routing.service\n")
 
 with socket.socket() as s:
     s.bind(("127.0.0.1", 0))
@@ -85,7 +104,8 @@ def init_data(uid):
 async def main():
     access.setup(load_config())
     subprocess.run([API, "api", "cert", "issue", "ip"], capture_output=True)
-    store.set_note("alice", "телефон Анны")
+    if PROFILE != "none":
+        store.set_note("alice", "телефон Анны")
     await webapp.SERVER.start(Bot(TOKEN, session=Session()))
     print("READY", PORT, init_data(111), webapp.SERVER.error or "-", flush=True)
     while True:

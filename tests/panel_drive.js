@@ -1,7 +1,7 @@
 const { chromium } = require("playwright");
 const fs = require("fs");
 const say = (...a) => fs.appendFileSync(process.argv[4] + "/run.log", a.join(" ") + "\n");
-const [port, initData, out, theme] = process.argv.slice(2);
+const [port, initData, out, theme, profile] = process.argv.slice(2);
 (async () => {
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
@@ -38,10 +38,64 @@ const [port, initData, out, theme] = process.argv.slice(2);
     if (bad) throw new Error("на экране текст null/undefined");
   };
   const nav = async (hash, sel = "h1") => { await page.goto(base + "#" + hash, { waitUntil: "domcontentloaded" }); await page.waitForSelector(sel); await page.waitForTimeout(300); await noNull(); };
-  const step = async (name, fn) => { try { await fn(); await noNull(); say("OK  ", name); } catch (e) { say("FAIL", name, String(e).split("\n")[0]); errors.push(name + ": " + e); } };
+  // Подсказка прошлого шага не должна сойти за итог этого
+  const step = async (name, fn) => {
+    await page.evaluate(() => document.querySelectorAll(".toast").forEach((t) => t.remove()));
+    try { await fn(); await noNull(); say("OK  ", name); } catch (e) { say("FAIL", name, String(e).split("\n")[0]); errors.push(name + ": " + e); }
+  };
+
+  const alerts = async () => (await page.evaluate(() => window.__log)).filter((l) => l.startsWith("alert:"));
+  const expectAlert = async (text, fn) => {
+    const before = (await alerts()).length;
+    await fn();
+    await page.waitForTimeout(300);
+    const got = (await alerts()).slice(before);
+    if (!got.some((a) => a.includes(text))) throw new Error(`ждали окно «${text}», было: ${JSON.stringify(got)}`);
+    // Ожидаемые окна — не ошибки: из итогового списка их убираем
+    await page.evaluate(() => { window.__log = window.__log.filter((l) => !l.startsWith("alert:")); });
+  };
 
   await step("главная", async () => { await nav("/", ".tile"); await shot("01-home"); });
   if (theme === "light") { await browser.close(); console.log("ERRORS", JSON.stringify(errors)); return; }
+
+  if (profile === "none") {
+    // Сервера ещё нет: мастер создания целиком, первый клиент — сразу QR
+    await step("главная без сервера", async () => {
+      await page.waitForSelector("text=не создан");
+      await page.click(".tile >> text=Сервер"); await page.waitForSelector("text=Создать сервер"); await shot("11-server-none");
+    });
+    await step("мастер создания", async () => {
+      await page.click("button:has-text('Создать сервер')");
+      await page.waitForSelector("h1 >> text=Создание сервера");
+      await page.click(".chip >> text=Мощный"); await page.waitForSelector(".chip >> text=Цепочка I1-I5");
+      await page.waitForSelector("select >> nth=0");
+      await shot("12-create-pro");
+      await page.click(".chip >> text=AmneziaVPN");
+      await page.click(".chip >> text=Пакет I1 (DNS)");
+      await page.fill("input[placeholder^='случайная']", "10.66.1.7/25");
+    });
+    await step("мастер: неверная подсеть", async () => {
+      await expectAlert("сеть /24", () => page.click("button.btn-primary:has-text('Создать сервер')"));
+    });
+    await step("мастер: сервер создан", async () => {
+      await page.fill("input[placeholder^='случайная']", "10.66.1.7/24");
+      await page.fill("input[placeholder='случайное']", "first");
+      await page.click("button.btn-primary:has-text('Создать сервер')");
+      await page.waitForSelector("text=Первый клиент", { timeout: 90000 });
+      await shot("13-created");
+      await page.click("text=Конфиг и QR");
+      await page.waitForSelector("img.qr, .card.muted");
+    });
+    await step("сервер после создания", async () => {
+      await nav("/server", "text=Endpoint");
+      await page.waitForSelector("text=10.66.1.0/24");
+    });
+    const log = await page.evaluate(() => window.__log);
+    say("ALERTS", JSON.stringify(log.filter((l) => l.startsWith("alert:"))));
+    say("ERRORS", JSON.stringify(errors));
+    await browser.close();
+    return;
+  }
   await step("список", async () => { await nav("/clients", ".item"); await shot("02-clients"); });
   await step("поиск", async () => {
     await page.fill("input[type=search]", "анн");
@@ -93,6 +147,85 @@ const [port, initData, out, theme] = process.argv.slice(2);
     await page.click("text=Удалить клиента");
     await page.waitForURL(/#\/clients$/);
   });
+
+  // ── Сервер ──
+  await step("сервер", async () => { await nav("/server", "text=Endpoint"); await page.waitForSelector("text=Модуль ядра"); await shot("20-server"); });
+  await step("рестарт awg0", async () => { await page.click("text=Рестарт awg0"); await page.waitForSelector(".toast"); });
+  await step("протокол", async () => { await nav("/server/proto", "text=Перейти на 3.1"); await shot("21-proto"); });
+  await step("endpoint", async () => {
+    await nav("/server/endpoint", "input");
+    await expectAlert("vpn.example.com", async () => { await page.fill("input", "bad"); await page.click("text=Сохранить домен"); });
+    await page.fill("input", "vpn.example.com");
+    await page.click("text=Переписать в выданных конфигах");
+    await shot("22-endpoint");
+    await page.click("text=Сохранить домен");
+    await page.waitForSelector(".toast >> text=vpn.example.com");
+    await nav("/server", "text=Endpoint");
+    await page.waitForSelector("text=vpn.example.com");
+  });
+  await step("модуль ядра", async () => {
+    await nav("/server/module", "text=Ядро");
+    await page.click("summary"); await page.waitForSelector("details[open] pre");
+    await shot("23-module");
+  });
+  await step("журнал", async () => { await nav("/log/manager", "pre"); });
+
+  // ── Туннели и DNS ──
+  await step("туннели", async () => {
+    await nav("/tunnels", ".item");
+    const n = await page.locator(".item").count();
+    if (n !== 6) throw new Error("ждали 6 строк (4 туннеля, каскад, DNS), есть " + n);
+    await page.waitForSelector("text=Сейчас:");
+    await shot("30-tunnels");
+  });
+  await step("WARP", async () => { await page.click(".item >> text=WARP"); await page.waitForSelector("text=Бэкенд"); await shot("31-warp"); });
+  await step("клиенты в WARP", async () => {
+    await nav("/tunnels/warp/clients", ".item");
+    await page.click(".item >> text=alice");
+    await page.waitForSelector(".item:has-text('alice') >> text=напрямую");
+    await shot("32-warp-clients");
+  });
+  await step("Xray", async () => { await nav("/tunnels/xray", "text=Установить"); await shot("33-xray"); });
+  await step("tun2socks", async () => {
+    await nav("/tunnels/tun2socks", "input");
+    await expectAlert("IP:ПОРТ", async () => { await page.fill("input", "нет"); await page.click("text=Включить"); });
+    await shot("34-t2s");
+  });
+  await step("exit-ноды", async () => {
+    await nav("/tunnels/exits", "text=Маршруты");
+    await page.waitForSelector(".item >> text=n1");
+    await shot("35-exits");
+  });
+  await step("выход клиента", async () => {
+    await nav("/tunnels/exits/clients", ".item");
+    await page.click(".item >> text=alice");
+    await page.click(".sheet >> text=Нода n1");
+    await page.waitForSelector(".item:has-text('alice') >> text=нода n1");
+    await shot("36-exit-pick");
+  });
+  await step("каскад: добавить", async () => {
+    await nav("/tunnels/cascade/add", "input");
+    await page.fill("input[placeholder='51820']", "5555");
+    await page.fill("input[placeholder='5.6.7.8']", "5.6.7.8");
+    await page.fill("input[placeholder^='например']", "de-server");
+    await shot("37-cascade-add");
+    await page.click("button:has-text('Добавить')");
+    await page.waitForSelector(".toast >> text=UDP 5555 → 5.6.7.8:5555");
+    await nav("/tunnels/cascade", ".item");
+    await page.waitForSelector("text=UDP 5555 → 5.6.7.8:5555");
+    await shot("38-cascade");
+  });
+  await step("каскад: удалить", async () => {
+    await page.click(".item >> text=UDP 5555");
+    await page.waitForSelector("text=Правил нет");
+  });
+  await step("DNS", async () => { await nav("/tunnels/dns", "text=Включить"); await shot("39-dns"); });
+  await step("всё напрямую", async () => {
+    await nav("/tunnels", ".item");
+    await page.click("text=Всё напрямую");
+    await page.waitForSelector(".toast >> text=клиенты идут напрямую");
+  });
+
   const log = await page.evaluate(() => window.__log);
   say("ALERTS", JSON.stringify(log.filter((l) => l.startsWith("alert:"))));
   say("ERRORS", JSON.stringify(errors));

@@ -2,8 +2,8 @@
 """test_panel.py — панель Mini App в настоящем браузере (Chromium через Playwright).
 
 Поднимает panel_stand.py (сервер панели на песочнице awg2) с профилями
-сервера lite и pro и гоняет panel_drive.js: экраны, создание, удаление,
-ошибки в консоли, текст «null» на экранах. Нет node, Playwright или
+сервера lite и pro и без сервера и гоняет panel_drive.js: клиенты, сервер,
+туннели, мастер создания сервера, ошибки в консоли, текст «null» на экранах. Нет node, Playwright или
 Chromium — тест пропускается.
 
 Запуск:  python3 tests/test_panel.py [путь/к/dist/awg2.sh]
@@ -48,7 +48,7 @@ if len(sys.argv) > 1:
     env["AWG2_SH"] = os.path.abspath(sys.argv[1])
 
 keep = os.environ.get("AWG_PANEL_SHOTS")
-for profile in ("lite", "pro"):
+for profile in ("lite", "pro", "none"):
     print(f"Профиль сервера: {profile}")
     out = os.path.join(keep, profile) if keep else tempfile.mkdtemp(prefix="panel-shots.")
     os.makedirs(out, exist_ok=True)
@@ -66,7 +66,7 @@ for profile in ("lite", "pro"):
         _, port, init, err = ready[:4]
         chk("стенд панели поднялся", err == "-", err)
         try:
-            run = subprocess.run([node, os.path.join(HERE, "panel_drive.js"), port, init, out, "dark"],
+            run = subprocess.run([node, os.path.join(HERE, "panel_drive.js"), port, init, out, "dark", profile],
                                  env=env, capture_output=True, text=True, timeout=400)
             output = run.stdout + run.stderr
         except subprocess.TimeoutExpired:
@@ -78,6 +78,8 @@ for profile in ("lite", "pro"):
             if line.startswith(("OK", "FAIL")):
                 status, _, rest = line.partition(" ")
                 chk(rest.strip(), status == "OK", rest)
+            elif line.startswith("ALERTS"):
+                chk("без неожиданных окон с ошибкой", line.strip() == "ALERTS []", line[:600])
             elif line.startswith("ERRORS"):
                 chk("без ошибок в консоли страницы", line.strip() == "ERRORS []", line[:600])
     finally:
