@@ -32,7 +32,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import MenuButtonDefault, MenuButtonWebApp, WebAppInfo
 from aiohttp import web
 
-from . import __version__, access, api
+from . import __version__, access, api, panel
 from .config import CONF_PATH, _read_file
 
 log = logging.getLogger("awgbot.webapp")
@@ -130,8 +130,10 @@ class MiniApp:
             app = web.Application(client_max_size=64 * 1024)
             app["bot"] = bot
             app.router.add_get("/", self._index)
+            app.router.add_get("/app.js", self._static)
             app.router.add_post("/api/me", self._me)
             app.router.add_post("/api/status", self._status)
+            panel.setup(app, self._user)
             self.runner = web.AppRunner(app, access_log=None)
             await self.runner.setup()
             await web.TCPSite(self.runner, "0.0.0.0", port, ssl_context=self.ctx).start()
@@ -207,6 +209,12 @@ class MiniApp:
     @staticmethod
     async def _index(request: web.Request) -> web.StreamResponse:
         resp = web.FileResponse(STATIC / "index.html")
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @staticmethod
+    async def _static(request: web.Request) -> web.StreamResponse:
+        resp = web.FileResponse(STATIC / request.path.lstrip("/"))
         resp.headers["Cache-Control"] = "no-store"
         return resp
 

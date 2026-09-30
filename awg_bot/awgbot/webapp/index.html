@@ -6,103 +6,114 @@
 <title>AWG Toolza</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
+  /* Цвета — из темы Telegram (telegram-web-app.js выставляет --tg-theme-*),
+     запасные — тёмная тема Telegram */
   :root {
     --bg: var(--tg-theme-bg-color, #17212b);
     --card: var(--tg-theme-secondary-bg-color, #232e3c);
+    --sep: color-mix(in srgb, var(--hint) 22%, transparent);
     --text: var(--tg-theme-text-color, #f5f5f5);
     --hint: var(--tg-theme-hint-color, #8b9aa7);
+    --link: var(--tg-theme-link-color, #62bcf9);
     --accent: var(--tg-theme-button-color, #5288c1);
     --accent-text: var(--tg-theme-button-text-color, #ffffff);
-    --ok: #4caf50;
-    --bad: #e05252;
+    --ok: #3fb950;
+    --danger: #e5534b;
+    --warn: #d4a72c;
   }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
-    font: 15px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
-  }
-  h1 { font-size: 20px; margin: 4px 0 16px; }
-  .card { background: var(--card); border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; }
-  .row { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; }
-  .row span:first-child { color: var(--hint); }
-  .row span:last-child { text-align: right; overflow-wrap: anywhere; }
-  .big { font-size: 17px; font-weight: 600; margin-bottom: 6px; }
-  .hint { color: var(--hint); font-size: 13px; }
-  .ok { color: var(--ok); } .bad { color: var(--bad); }
-  button {
-    width: 100%; border: 0; border-radius: 12px; padding: 13px; margin-top: 4px;
-    background: var(--accent); color: var(--accent-text); font-size: 15px; font-weight: 600;
-  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body { font: 15px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; padding: 12px 12px calc(88px + env(safe-area-inset-bottom)); }
+  h1 { font-size: 21px; margin: 6px 4px 14px; }
+  h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+       color: var(--hint); margin: 18px 4px 8px; }
+  .muted { color: var(--hint); }
+  .small { font-size: 13px; }
+  .ok { color: var(--ok); } .bad { color: var(--danger); } .warn { color: var(--warn); }
+
+  .card { background: var(--card); border-radius: 14px; padding: 12px 14px; margin-bottom: 10px; }
+  .card.list { padding: 0; overflow: hidden; }
+  .kv { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; }
+  .kv > :first-child { color: var(--hint); flex: none; }
+  .kv > :last-child { text-align: right; overflow-wrap: anywhere; }
+
+  /* Строки списка */
+  .item { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-top: 1px solid var(--sep); cursor: pointer; }
+  .item:first-child { border-top: 0; }
+  .item:active { background: color-mix(in srgb, var(--text) 6%, transparent); }
+  .item .main { flex: 1; min-width: 0; }
+  .item .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .sub { color: var(--hint); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .side { color: var(--hint); font-size: 13px; text-align: right; flex: none; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--hint); opacity: .5; }
+  .dot.on { background: var(--ok); opacity: 1; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
+  .dot.blocked { background: var(--danger); opacity: 1; }
+  .check { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--hint); flex: none; }
+  .check.on { background: var(--danger); border-color: var(--danger); }
+
+  /* Плитки главной */
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .tile { background: var(--card); border-radius: 14px; padding: 14px; cursor: pointer; min-height: 74px; }
+  .tile:active { opacity: .8; }
+  .tile .ico { font-size: 22px; }
+  .tile .t { font-weight: 600; margin-top: 4px; }
+  .tile .s { color: var(--hint); font-size: 12px; margin-top: 2px; }
+  .tile.soon { opacity: .45; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 10px; }
+  .stat { background: var(--card); border-radius: 14px; padding: 10px 12px; }
+  .stat b { display: block; font-size: 20px; }
+  .stat span { color: var(--hint); font-size: 12px; }
+
+  /* Кнопки */
+  button, .btn { font: inherit; border: 0; border-radius: 12px; padding: 12px 14px; cursor: pointer;
+                 background: var(--card); color: var(--text); font-weight: 600; }
+  button:disabled { opacity: .5; }
+  .btn-primary { background: var(--accent); color: var(--accent-text); }
+  .btn-danger { background: var(--danger); color: #fff; }
+  .btn-ok { background: var(--ok); color: #fff; }
+  .btn-block { width: 100%; margin-top: 8px; }
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .actions button { text-align: left; }
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 8px;
+         padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); background: var(--bg);
+         border-top: 1px solid var(--sep); z-index: 5; }
+  .bar button { flex: 1; white-space: nowrap; padding: 12px 6px; }
+
+  /* Поиск, фильтры, формы */
+  input, textarea, select { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--sep);
+                            border-radius: 12px; padding: 11px 12px; width: 100%; outline: none; }
+  textarea { min-height: 90px; resize: vertical; }
+  input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+  label { display: block; color: var(--hint); font-size: 13px; margin: 12px 4px 6px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .chips { display: flex; gap: 6px; overflow-x: auto; padding: 8px 0 4px; scrollbar-width: none; }
+  .chip { flex: none; padding: 6px 12px; border-radius: 16px; background: var(--card); color: var(--hint);
+          font-size: 13px; font-weight: 600; cursor: pointer; border: 0; }
+  .chip.on { background: var(--accent); color: var(--accent-text); }
+  .switch { width: 46px; height: 28px; border-radius: 14px; background: var(--sep); position: relative; flex: none; }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%;
+                   background: #fff; transition: left .15s; }
+  .switch.on { background: var(--ok); }
+  .switch.on::after { left: 21px; }
+
+  /* QR, журнал задачи, всплывающее, выбор снизу */
+  .qr { display: block; width: 100%; max-width: 320px; margin: 4px auto; border-radius: 12px; background: #fff; image-rendering: pixelated; }
+  pre { background: var(--card); border-radius: 12px; padding: 10px 12px; font: 12px/1.45 ui-monospace, Menlo, monospace;
+        white-space: pre-wrap; overflow-wrap: anywhere; max-height: 55vh; overflow: auto; margin: 0 0 10px; }
+  .toast { position: fixed; left: 50%; bottom: calc(96px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+           background: color-mix(in srgb, var(--text) 88%, transparent); color: var(--bg); padding: 10px 16px;
+           border-radius: 12px; font-weight: 600; z-index: 20; max-width: 90vw; text-align: center; }
+  .sheet-bg { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); z-index: 10; display: flex; align-items: flex-end; }
+  .sheet { background: var(--bg); width: 100%; border-radius: 18px 18px 0 0; padding: 14px 12px calc(14px + env(safe-area-inset-bottom));
+           max-height: 80vh; overflow: auto; }
+  .sheet h3 { margin: 4px 6px 12px; font-size: 16px; }
+  .sheet button { width: 100%; text-align: left; margin-bottom: 6px; }
+  .empty { text-align: center; color: var(--hint); padding: 30px 10px; }
+  .spin { text-align: center; color: var(--hint); padding: 40px 0; }
 </style>
 </head>
 <body>
-<h1>AWG Toolza</h1>
-<div class="card"><div id="check" class="big">Проверяю вход…</div><div id="who" class="hint"></div></div>
-<div class="card" id="server" hidden></div>
-<div class="card hint">Это проверочная страница Mini App: HTTPS и вход через Telegram работают.
-  Полная панель управления — следующим шагом.</div>
-<button id="close" type="button">Закрыть</button>
-<script>
-"use strict";
-const tg = window.Telegram && window.Telegram.WebApp;
-const $ = (id) => document.getElementById(id);
-
-function row(label, value) {
-  const r = document.createElement("div");
-  r.className = "row";
-  const a = document.createElement("span"), b = document.createElement("span");
-  a.textContent = label; b.textContent = value;
-  r.append(a, b);
-  return r;
-}
-
-async function call(path) {
-  const r = await fetch(path, { method: "POST", headers: { Authorization: "tma " + (tg ? tg.initData : "") } });
-  const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.error || ("HTTP " + r.status));
-  return body;
-}
-
-async function main() {
-  if (tg) { tg.ready(); tg.expand(); }
-  $("close").onclick = () => (tg ? tg.close() : window.close());
-  if (!tg || !tg.initData) {
-    $("check").textContent = "Открой панель кнопкой в боте";
-    $("check").className = "big bad";
-    return;
-  }
-  try {
-    const me = await call("/api/me");
-    $("check").textContent = "✅ Mini App работает";
-    $("check").className = "big ok";
-    $("who").textContent = `${me.name} · ${me.owner ? "владелец" : "админ"} · бот ${me.bot}`;
-  } catch (e) {
-    $("check").textContent = "❌ " + e.message;
-    $("check").className = "big bad";
-    return;
-  }
-  try {
-    const d = await call("/api/status");
-    const s = d.server || {}, t = d.tunnels || {};
-    const box = $("server");
-    const title = document.createElement("div");
-    title.className = "big";
-    title.textContent = `${d.host || "сервер"} · ${d.ip || ""}`;
-    box.append(title, row("AWG Toolza", `${d.version || "?"} · ${d.channel === "beta" ? "бета" : "стабильный"}`));
-    if (s.exists) {
-      box.append(row("Сервер", `AWG ${s.proto || "?"} · порт ${s.port || "?"} · ${s.up ? "работает" : "не поднят"}`),
-                 row("Клиенты", `${s.clients || 0} · онлайн ${s.online || 0}`));
-    } else {
-      box.append(row("Сервер", "не создан"));
-    }
-    const up = Object.entries(t).filter(([k, v]) => v === "up").map(([k]) => k);
-    box.append(row("Туннели", up.length ? up.join(", ") : "нет"));
-    box.hidden = false;
-  } catch (e) {
-    $("who").textContent += " · сводка недоступна: " + e.message;
-  }
-}
-main();
-</script>
+<div id="app"><div class="spin">Загрузка…</div></div>
+<script src="app.js"></script>
 </body>
 </html>

@@ -56,7 +56,7 @@ os.environ.update(AWG2_BIN=API, AWG_BOT_STATE=STATE, AWG_ADMINS_FILE=os.path.joi
                   AWG_CERT_KEY=os.path.join(ROOT, "etc/awg2/cert/key.pem"))
 sys.path.insert(0, os.path.join(HERE, "..", "awg_bot"))
 
-from awgbot import bot as botmod, jobs, store, ui, webapp  # noqa: E402
+from awgbot import admins, bot as botmod, jobs, store, ui, webapp  # noqa: E402
 
 USER_NAMED = ("cl:v:", "tc:t:", "ex:pick:", "xr:delok:", "wo:v:", "adm:rm:", "diag:sn:", "mod:tag:")
 
@@ -648,6 +648,64 @@ async def run():
         chk("подделанные данные — 401", st == 401, [st, body])
         st, body = await post("/api/status", init_data(111))
         chk("сводка сервера через Mini App", st == 200 and body.get("version") and "server" in body, [st, str(body)[:200]])
+
+        # ── API панели ──
+        async def api_(path, data, uid=111):
+            async with http.post(base + path, json=data, headers={"Authorization": "tma " + init_data(uid)}) as r:
+                return r.status, await r.json(content_type=None)
+
+        async with http.get(base + "/app.js") as r:
+            chk("скрипт панели отдаётся", r.status == 200 and "runJob" in await r.text(), r.status)
+        st, body = await api_("/api/call", {"args": ["status"]})
+        chk("панель: общий вызов awg2 api", st == 200 and body["ok"] and body["data"].get("version"), [st, str(body)[:200]])
+        st, body = await api_("/api/call", {"args": ["job", "list"]})
+        chk("панель: команды вне белого списка — 403", st == 403, [st, body])
+        st, body = await api_("/api/call", {"args": "status"})
+        chk("панель: кривые аргументы — 400", st == 400, [st, body])
+        admins.add(333, 111)
+        st, body = await api_("/api/call", {"args": ["uninstall"]}, uid=333)
+        chk("приглашённому админу владельческое закрыто", st == 403 and "владелец" in body.get("error", ""), [st, body])
+        st, body = await api_("/api/call", {"args": ["cert", "remove"]}, uid=333)
+        chk("…и сертификат тоже", st == 403, [st, body])
+        admins.remove(333, 111)
+
+        st, body = await api_("/api/clients", {})
+        alice = next((c for c in body.get("rows") or [] if c["name"] == "alice"), {})
+        chk("панель: клиенты с заметками, мониторингом и маршрутом",
+            st == 200 and {"note", "mon", "route"} <= set(alice) and body.get("sort"), [st, alice])
+        await api_("/api/client/note", {"name": "alice", "text": "ноутбук"})
+        await api_("/api/client/mon", {"name": "alice", "on": True})
+        chk("панель: заметка и мониторинг — в хранилище бота",
+            store.note("alice") == "ноутбук #ping" and store.monitored("alice"), store.note("alice"))
+        await api_("/api/client/mon", {"name": "alice", "on": False})
+        st, body = await api_("/api/client/qr", {"name": "alice"})
+        chk("панель: QR картинкой и текст конфига",
+            st == 200 and len(body.get("png") or "") > 100 and "[Interface]" in body.get("text", ""), [st, str(body)[:120]])
+        st, body = await api_("/api/client/add", {"name": "panel1", "expire": "+1d"})
+        chk("панель: новый клиент", st == 200 and body["ok"], [st, body])
+        st, body = await api_("/api/client/rename", {"old": "panel1", "new": "panel2"})
+        chk("панель: переименование", st == 200 and body["ok"] and os.path.exists(os.path.join(ROOT, "root", "panel2_awg2.conf")),
+            [st, body])
+        st, body = await api_("/api/client/add", {"name": "bad name"})
+        chk("панель: имя проверяется до awg2", st == 400, [st, body])
+        mark = len(SESSION.sent)
+        st, body = await api_("/api/send", {"what": "conf", "name": "panel2"})
+        chk("панель: «отправить в чат» — файл и QR владельцу",
+            st == 200 and [n for n, m in SESSION.sent[mark:] if getattr(m, "chat_id", None) == 111]
+            == ["SendDocument", "SendPhoto"], [n for n, _ in SESSION.sent[mark:]])
+        st, body = await api_("/api/job", {"args": ["clients", "bulk", "pj:2", "mimicry=none"]})
+        jid = (body.get("data") or {}).get("id")
+        for _ in range(100):
+            st, body = await api_("/api/job/status", {"id": jid, "offset": 0})
+            if (body.get("data") or {}).get("state") != "running":
+                break
+            await asyncio.sleep(0.3)
+        chk("панель: задача с журналом — массовое создание",
+            body["data"].get("ok") and body["data"].get("data") == ["pj-001", "pj-002"] and "pj-001" in body["data"].get("log", ""),
+            body.get("data"))
+        st, body = await api_("/api/client/del", {"names": ["panel2", "pj-001", "pj-002"]})
+        chk("панель: удаление нескольких", st == 200 and body["ok"]
+            and not os.path.exists(os.path.join(ROOT, "root", "pj-001_awg2.conf")), [st, body])
 
     text, _ = screen(await press(f"app:pset:{ports[1]}"))
     chk("смена порта перезапускает сервер", webapp.SERVER.running and webapp.SERVER.url.endswith(f":{ports[1]}/")
