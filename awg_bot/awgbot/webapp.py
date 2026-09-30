@@ -131,6 +131,7 @@ class MiniApp:
             app["bot"] = bot
             app.router.add_get("/", self._index)
             app.router.add_get("/app.js", self._static)
+            app.router.add_get("/icons.js", self._static)
             app.router.add_post("/api/me", self._me)
             app.router.add_post("/api/status", self._status)
             panel.setup(app, self._user)

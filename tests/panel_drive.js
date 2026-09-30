@@ -10,20 +10,12 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     const noop = () => {};
     window.__log = [];
     window.Telegram = { WebApp: {
-      initData, ready: noop, expand: noop,
+      initData, colorScheme: theme, ready: noop, expand: noop, onEvent: noop,
       BackButton: { show: () => window.__log.push("back:show"), hide: () => window.__log.push("back:hide"), onClick: (f) => { window.__back = f; } },
       HapticFeedback: { notificationOccurred: (t) => window.__log.push("haptic:" + t) },
       showConfirm: (t, cb) => { window.__log.push("confirm:" + t); cb(true); },
       showAlert: (t) => { window.__log.push("alert:" + t); },
     } };
-    if (theme === "light") {
-      document.addEventListener("DOMContentLoaded", () => {
-        const s = document.documentElement.style;
-        s.setProperty("--tg-theme-bg-color", "#ffffff"); s.setProperty("--tg-theme-secondary-bg-color", "#f1f1f4");
-        s.setProperty("--tg-theme-text-color", "#000000"); s.setProperty("--tg-theme-hint-color", "#8e8e93");
-        s.setProperty("--tg-theme-button-color", "#2481cc"); s.setProperty("--tg-theme-button-text-color", "#ffffff");
-      });
-    }
   }, { initData, theme });
   const page = await ctx.newPage();
   page.setDefaultTimeout(15000);
@@ -60,8 +52,13 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.evaluate(() => { window.__log = window.__log.filter((l) => !l.startsWith("alert:")); });
   };
 
-  await step("главная", async () => { await nav("/", ".tile"); await shot("01-home"); });
-  if (theme === "light") { await browser.close(); console.log("ERRORS", JSON.stringify(errors)); return; }
+  await step("главная", async () => {
+    await nav("/", ".tile");
+    const t = await page.evaluate(() => document.documentElement.dataset.theme);
+    if (t !== theme) throw new Error(`тема ${t}, а Telegram — ${theme}`);
+    await page.waitForSelector(".top .ver");
+    await shot("01-home");
+  });
 
   if (profile === "none") {
     // Сервера ещё нет: мастер создания целиком, первый клиент — сразу QR
@@ -101,14 +98,20 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await browser.close();
     return;
   }
-  await step("список", async () => { await nav("/clients", ".item"); await shot("02-clients"); });
+  await step("список", async () => { await nav("/clients", "[data-name]"); await page.waitForSelector(".sgrid"); await shot("02-clients"); });
   await step("поиск", async () => {
     await page.fill("input[type=search]", "анн");
-    const n = await page.locator(".item").count();
+    const n = await page.locator("[data-name]").count();
     if (n !== 1) throw new Error("ожидался 1 клиент по заметке, найдено " + n);
     await page.fill("input[type=search]", "");
   });
-  await step("карточка", async () => { await page.click(".item >> text=alice"); await page.waitForSelector("text=Мониторинг активности"); await shot("03-card"); });
+  await step("вид списком", async () => {
+    await page.click(".seg button >> nth=1");
+    await page.waitForSelector(".card.list [data-name=alice]");
+    await page.click(".seg button >> nth=0");
+    await page.waitForSelector(".ecard[data-name=alice]");
+  });
+  await step("карточка", async () => { await page.click("[data-name=alice] .name"); await page.waitForSelector("text=Мониторинг активности"); await shot("03-card"); });
   await step("мониторинг", async () => {
     await page.click("text=Мониторинг активности");
     await page.waitForSelector(".switch.on");
@@ -117,8 +120,8 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
   await step("в чат", async () => { await page.click("text=Отправить файл в чат"); await page.waitForSelector(".toast"); });
   await step("срок", async () => {
     await nav("/client/alice", "text=Срок");
-    await page.click("button:has-text('⏳ Срок')"); await page.waitForSelector(".sheet"); await shot("05-expire-sheet");
-    await page.click(".sheet >> text=7 дней"); await page.waitForSelector("text=через 6д");
+    await page.click(".actions button:has-text('Срок')"); await page.waitForSelector(".sheet"); await shot("05-expire-sheet");
+    await page.click(".sheet >> text=7 дней"); await page.waitForSelector(".sgrid >> text=/^6д/");
   });
   await step("новый клиент", async () => {
     await nav("/add", "input");
@@ -137,14 +140,14 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await shot("07-bulk-done");
   });
   await step("выбрать и удалить", async () => {
-    await nav("/clients", ".item");
-    await page.click(".bar >> text=Выбрать");
-    await page.click(".item >> text=t-001"); await page.click(".item >> text=t-002");
+    await nav("/clients", "[data-name]");
+    await page.click(".toolbar button:has-text('Выбрать')");
+    await page.click("[data-name=t-001] .name"); await page.click("[data-name=t-002] .name");
     await shot("08-select");
     await page.click(".bar >> text=Удалить");
     await page.waitForSelector(".toast >> text=Удалено: 2");
-    await page.waitForSelector(".item");
-    if (await page.locator(".item >> text=t-001").count()) throw new Error("t-001 остался");
+    await page.waitForSelector("[data-name]");
+    if (await page.locator("[data-name=t-001]").count()) throw new Error("t-001 остался");
   });
   await step("мимикрия", async () => { await nav("/client/alice/mimicry", ".item"); await shot("09-mimicry"); });
   await step("удалить клиента", async () => {
@@ -155,7 +158,7 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
 
   // ── Сервер ──
   await step("сервер", async () => { await nav("/server", "text=Endpoint"); await page.waitForSelector("text=Модуль ядра"); await shot("20-server"); });
-  await step("рестарт awg0", async () => { await page.click("text=Рестарт awg0"); await page.waitForSelector(".toast"); });
+  await step("рестарт awg0", async () => { await page.click(".ecard button:has-text('Рестарт')"); await page.waitForSelector(".toast"); });
   await step("протокол", async () => { await nav("/server/proto", "text=Перейти на 3.1"); await shot("21-proto"); });
   await step("endpoint", async () => {
     await nav("/server/endpoint", "input");
@@ -177,13 +180,13 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
 
   // ── Туннели и DNS ──
   await step("туннели", async () => {
-    await nav("/tunnels", ".item");
-    const n = await page.locator(".item").count();
-    if (n !== 6) throw new Error("ждали 6 строк (4 туннеля, каскад, DNS), есть " + n);
-    await page.waitForSelector("text=Сейчас:");
+    await nav("/tunnels", ".ecard");
+    const n = await page.locator(".ecard").count();
+    if (n !== 6) throw new Error("ждали 6 карточек (4 туннеля, каскад, DNS), есть " + n);
+    await page.waitForSelector(".sgrid >> text=Exit-ноды");
     await shot("30-tunnels");
   });
-  await step("WARP", async () => { await page.click(".item >> text=WARP"); await page.waitForSelector("text=Бэкенд"); await shot("31-warp"); });
+  await step("WARP", async () => { await page.click("[data-name=WARP] .name"); await page.waitForSelector("text=Бэкенд"); await shot("31-warp"); });
   await step("клиенты в WARP", async () => {
     await nav("/tunnels/warp/clients", ".item");
     await page.click(".item >> text=alice");
@@ -226,9 +229,18 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
   });
   await step("DNS", async () => { await nav("/tunnels/dns", "text=Включить"); await shot("39-dns"); });
   await step("всё напрямую", async () => {
-    await nav("/tunnels", ".item");
+    await nav("/tunnels", ".ecard");
     await page.click("text=Всё напрямую");
     await page.waitForSelector(".toast >> text=клиенты идут напрямую");
+  });
+
+  await step("тема вручную", async () => {
+    const before = await page.evaluate(() => document.documentElement.dataset.theme);
+    await page.click(".top button[aria-label='Тема']");
+    await page.reload({ waitUntil: "domcontentloaded" }); await page.waitForSelector("h1");
+    const after = await page.evaluate(() => document.documentElement.dataset.theme);
+    if (after === before) throw new Error("тема не сменилась или не запомнилась");
+    await page.click(".top button[aria-label='Тема']");
   });
 
   // ── Диагностика ──
@@ -275,8 +287,8 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await shot("45-restore");
   });
   await step("восстановление", async () => {
-    await page.click("button:has-text('♻️ Восстановить')");
-    await page.waitForSelector("h1 >> text=✅ Восстановление из бэкапа", { timeout: 90000 });
+    await page.click("button:has-text('Восстановить')");
+    await page.waitForSelector("h1:has-text('Восстановление из бэкапа') .pill.ok", { timeout: 90000 });
     await shot("46-restored");
   });
   await step("не бэкап — понятная ошибка", async () => {

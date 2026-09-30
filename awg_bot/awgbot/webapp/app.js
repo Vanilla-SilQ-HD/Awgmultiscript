@@ -5,7 +5,7 @@
 
 const tg = window.Telegram && window.Telegram.WebApp;
 const root = document.getElementById("app");
-const S = { me: null, clients: null, sort: null, filter: "all", q: "", select: null };
+const S = { me: null, version: "", clients: null, sort: null, view: null, filter: "all", q: "", select: null };
 
 // ── Связь с ботом ─────────────────────────────────────────
 async function post(path, body = {}) {
@@ -26,6 +26,8 @@ const call = async (...args) => (await post("/api/call", { args })).data;
 
 // ── Мелочи ────────────────────────────────────────────────
 function h(tag, props, ...kids) {
+  // Кнопка «📦 Установить» получает линейную иконку вместо эмодзи
+  if (tag === "button" && typeof kids[0] === "string") kids[0] = withIcon(kids[0]);
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
     if (v == null || v === false) continue;
@@ -66,6 +68,93 @@ function fmtExpire(ts) {
 }
 const haptic = (t = "success") => tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(t);
 const kv = (k, v) => h("div", { class: "kv" }, h("span", {}, k), h("span", {}, v));
+
+// ── Вид: иконки, тема, шапка, общие детали ────────────────
+function icon(name) {
+  const t = document.createElement("template");
+  t.innerHTML = `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
+  return t.content.firstChild;
+}
+// Эмодзи в начале подписи → линейная иконка того же смысла (icons.js)
+const EMOJI_ICON = {
+  "🔄": "refresh-cw", "🔀": "shuffle", "🌍": "globe", "📍": "crosshair", "🧩": "cpu", "📦": "package", "🛠": "wrench",
+  "♻": "rotate-ccw", "⚠": "triangle-alert", "✨": "sparkles", "🗑": "trash-2", "📜": "file-text", "▶": "play",
+  "⏹": "square", "👥": "users", "🔑": "key", "📥": "download", "🔎": "search", "🔍": "search", "⚖": "scale",
+  "🩺": "stethoscope", "➕": "plus", "➖": "minus", "🧹": "eraser", "💾": "save", "📤": "upload", "🤖": "bot",
+  "⬆": "circle-arrow-up", "⬇": "arrow-down", "📋": "list", "🔁": "repeat", "🧱": "layers", "⏪": "undo-2",
+  "✏": "pencil", "📄": "file-text", "✉": "send", "🎲": "dices", "🎭": "drama", "⏳": "hourglass", "📝": "notebook-pen",
+  "🔢": "hash", "🌐": "network", "🚨": "siren", "🎯": "crosshair", "📎": "paperclip", "🔔": "bell", "🔕": "bell-off",
+  "📅": "calendar-clock", "♾": "infinity", "🚪": "door-open", "☁": "cloud", "🛰": "satellite", "🧦": "waypoints",
+  "🔐": "lock-keyhole", "🧪": "flask-conical", "🖥": "server", "🛡": "shield", "📁": "folder", "🗜": "file-archive",
+  "◀": "arrow-left", "✅": "circle-check", "❌": "circle-x", "✖": "x", "🔃": "arrow-down-up", "📂": "folder",
+};
+const EMOJI_RE = /^(\p{Extended_Pictographic})\uFE0F?\s*/u;
+function withIcon(label) {
+  const m = EMOJI_RE.exec(label);
+  const name = m && EMOJI_ICON[m[1]];
+  return name ? [icon(name), label.slice(m[0].length)] : label;
+}
+const plainTitle = (text) => (typeof text === "string" ? text.replace(EMOJI_RE, "") : text);
+// Заголовок экрана — без эмодзи, как в AWG Manager; extra — пометки справа
+const title = (text, ...extra) => h("h1", {}, plainTitle(text), extra);
+const pill = (text, cls = "") => h("span", { class: "pill " + cls }, text);
+const tag = (text, cls = "", ic = null) => h("span", { class: "tag " + cls }, ic ? icon(ic) : null, text);
+// Сводка 2×2: [число, ПОДПИСЬ, пояснение, onclick]
+const statGrid = (cells) => h("div", { class: "sgrid" }, cells.filter(Boolean).map(([big, label, sub, onclick]) =>
+  h("div", { class: "cell" + (onclick ? " tap" : ""), onclick }, h("b", {}, big), h("div", { class: "lb" }, label),
+    sub ? h("div", { class: "sb" }, sub) : null)));
+// Карточка объекта: рамка и точка по состоянию (on | bad | warn), чипы, строки, действия
+function ecard({ state = "", cls = "", name, right, meta, lines, note, acts, onopen, attrs = {} }) {
+  return h("div", { class: `ecard ${state} ${cls}`, ...attrs },
+    h("div", { class: "head", onclick: onopen }, h("div", { class: "dot " + state }), h("div", { class: "name" }, name), right),
+    meta && meta.length ? h("div", { class: "meta", onclick: onopen }, meta) : null,
+    (lines || []).filter(Boolean).map((l) => h("div", { class: "line", onclick: onopen }, l)),
+    note ? h("div", { class: "note" }, note) : null,
+    acts && acts.length ? h("div", { class: "acts" }, acts) : null);
+}
+const act = (ic, label, onclick, cls) => h("button", { class: cls || null,
+  onclick: (ev) => { ev.stopPropagation(); onclick(ev.currentTarget); } }, icon(ic), label);
+const tabsBar = (items, cur, pick) => h("div", { class: "tabs" }, items.map(([k, label, n]) =>
+  h("button", { class: k === cur ? "on" : null, onclick: () => pick(k) }, label, n != null ? h("span", { class: "n" }, n) : null)));
+const segBar = (items, cur, pick) => h("div", { class: "seg" }, items.map(([k, ic, label]) =>
+  h("button", { class: k === cur ? "on" : null, "aria-label": label, title: label, onclick: () => pick(k) }, icon(ic))));
+// Мелкие настройки вида — только в этом браузере
+const pref = (k, def) => { try { return localStorage.getItem("awg-" + k) || def; } catch { return def; } };
+const setPref = (k, v) => { try { localStorage.setItem("awg-" + k, v); } catch { /* приватный режим */ } };
+
+// Тема: по Telegram, луна в шапке — вручную (запоминается)
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  const css = getComputedStyle(document.documentElement);
+  try {
+    if (tg && tg.setHeaderColor) tg.setHeaderColor(css.getPropertyValue("--card").trim());
+    if (tg && tg.setBackgroundColor) tg.setBackgroundColor(css.getPropertyValue("--bg").trim());
+  } catch { /* старый Telegram: цвета шапки не меняются */ }
+}
+const autoTheme = () => (tg && tg.colorScheme === "dark" ? "dark" : "light");
+applyTheme(pref("theme", "") || autoTheme());
+
+const SUPPORT_URL = "https://t.me/awgToolza/156/157";
+const topEl = document.getElementById("top");
+function drawTop() {
+  const dark = document.documentElement.dataset.theme === "dark";
+  topEl.className = "top";
+  topEl.replaceChildren(
+    h("div", { class: "logo", onclick: () => go("/") }, icon("shield-check"), h("span", { class: "name" }, "AWG Toolza")),
+    S.version ? h("span", { class: "ver" }, S.version) : null,
+    h("div", { class: "sp" }),
+    h("button", { "aria-label": "Тема", title: "Тема", onclick: () => {
+      const t = dark ? "light" : "dark";
+      setPref("theme", t); applyTheme(t); drawTop();
+    } }, icon(dark ? "sun" : "moon")),
+    h("button", { "aria-label": "Поддержать", title: "Поддержать", onclick: () => {
+      if (tg && tg.openTelegramLink) tg.openTelegramLink(SUPPORT_URL); else window.open(SUPPORT_URL, "_blank");
+    } }, icon("heart")),
+    h("button", { "aria-label": "Разделы", title: "Разделы", onclick: async () => {
+      const path = await sheet("Разделы", SECTIONS.filter((x) => x[2]).map(([ic, t, p]) => ({ label: `${ic} ${t}`, value: p })));
+      if (path) go(path);
+    } }, icon("menu")));
+}
 
 // Одна подсказка за раз: новая сменяет прежнюю, а не ложится поверх
 let toastEl = null;
@@ -153,7 +242,9 @@ const tidy = (l) => {
 // с которого задачу запустили, уже с новым состоянием).
 async function runJob(ctx, title, args, done, opts = {}) {
   const started = Date.now();
-  const head = h("h1", {}, "⏳ " + title), time = h("div", { class: "muted small" }), log = h("pre", {}, "запускаю…");
+  const state = pill("идёт", "accent");
+  const head = h("h1", {}, plainTitle(title), state), time = h("div", { class: "muted small mono" }), log = h("pre", {}, "запускаю…");
+  const finish = (ok, text) => { state.className = "pill " + (ok ? "ok" : "bad"); state.textContent = text; };
   const foot = h("div");
   const backBtn = () => h("button", { class: "btn-block", onclick: () => (opts.onBack || render)() }, "◀️ Назад");
   ctx.put(head, time, log, foot);
@@ -161,7 +252,7 @@ async function runJob(ctx, title, args, done, opts = {}) {
   try {
     id = (await post("/api/job", { args, stdin: opts.stdin })).data.id;
   } catch (e) {
-    head.textContent = "❌ " + title; time.textContent = e.message;
+    finish(false, "ошибка"); time.textContent = e.message;
     log.textContent = (e.log || "").trim() || "задача не запустилась";
     haptic("error"); foot.replaceChildren(backBtn());
     return;
@@ -188,7 +279,7 @@ async function runJob(ctx, title, args, done, opts = {}) {
     time.textContent = fmtDur((Date.now() - started) / 1000);
     if (st.state === "running") continue;
     const ok = st.state === "done" && st.ok;
-    head.textContent = (ok ? "✅ " : "❌ ") + title;
+    finish(ok, ok ? "готово" : "ошибка");
     if (!ok) time.textContent = st.state === "lost" ? "Задача прервана: awg2 остановлен или сервер перезагружен" : (st.error || "ошибка");
     haptic(ok ? "success" : "error");
     foot.replaceChildren(...[].concat(ok && done ? done(st.data) : [], backBtn()).flat(Infinity)
@@ -247,7 +338,7 @@ function logSheet(title, text) {
 // Переключатель строкой: onToggle(новое) — промис; ошибка оставляет как было
 function switchRow(title, sub, on, onToggle) {
   const sw = h("div", { class: "switch" + (on ? " on" : "") });
-  return h("div", { class: "card item", style: "border:0", onclick: () => busy(null, async () => {
+  return h("div", { class: "card item", onclick: () => busy(null, async () => {
     const next = !sw.classList.contains("on");
     await onToggle(next);
     sw.classList.toggle("on", next);
@@ -272,6 +363,16 @@ const IP_RE = /^(\d{1,3}\.){3}\d{1,3}$/;
 const DOMAIN_RE = /^(?=.{4,253}$)([A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,63}$/;
 const validPort = (v, min = 1) => /^\d{1,5}$/.test(v) && +v >= min && +v <= 65535;
 
+// Строка меню раздела: иконка (из эмодзи в подписи), заголовок, пояснение, «›»
+function menuItem(label, sub, onclick) {
+  const m = EMOJI_RE.exec(label);
+  const name = m && EMOJI_ICON[m[1]];
+  return h("div", { class: "item", onclick }, name ? h("div", { class: "ibox" }, icon(name)) : null,
+    h("div", { class: "main" }, h("div", { class: "title" }, name ? label.slice(m[0].length) : label),
+      sub ? h("div", { class: "sub wrap" }, sub) : null),
+    h("div", { class: "side" }, icon("chevron-right")));
+}
+
 // ── Главная ───────────────────────────────────────────────
 const SECTIONS = [
   ["👥", "Клиенты", "/clients", "конфиги, сроки, QR"],
@@ -285,41 +386,55 @@ const SECTIONS = [
 ];
 
 route(/^\/$/, async (ctx) => {
-  const [me, d] = await Promise.all([post("/api/me"), post("/api/status")]);
+  const [me, d, cl] = await Promise.all([post("/api/me"), post("/api/status"), post("/api/clients").catch(() => null)]);
   S.me = me;
+  S.version = d.version;
+  drawTop();
+  if (cl) {
+    S.clients = cl;
+    if (!S.sort) S.sort = cl.sort || "activity";
+  }
   const s = d.server || {}, t = d.tunnels || {}, c = d.components || {};
-  const up = Object.entries(t).filter(([, v]) => v === "up").map(([k]) => ({ warp: "WARP", xray: "Xray",
-    tun2socks: "tun2socks", exits: "Exit-ноды", dns: "DNS" }[k] || k));
-  if (d.wgobf === "up") up.push("WG+обф.");
+  const rows = (cl && cl.rows) || [];
+  const rx = rows.reduce((a, x) => a + (x.rx || 0), 0), tx = rows.reduce((a, x) => a + (x.tx || 0), 0);
+  const leader = rows.reduce((a, x) => (!a || x.rx + x.tx > a.rx + a.tx ? x : a), null);
+  const up = Object.entries(t).filter(([k, v]) => v === "up" && k !== "dns").map(([k]) => ({ warp: "WARP", xray: "Xray",
+    tun2socks: "tun2socks", exits: "Exit-ноды" }[k] || k));
   const alerts = [
-    s.exists && !s.up ? ["⚠️ awg0 не поднят — Сервер → Починить", "/server"] : null,
-    c.installed && c.reboot ? ["▲ " + c.reboot, "/server/module"] : null,
-    d.update ? [`⬆️ Доступна ${d.update} — обновить`, "/update"] : null,
+    s.exists && !s.up ? ["awg0 не поднят — Сервер → Починить", "/server"] : null,
+    c.installed && c.reboot ? [c.reboot, "/server/module"] : null,
+    d.update ? [`Доступна ${d.update} — обновить`, "/update"] : null,
   ].filter(Boolean);
+  const state = !s.exists ? "" : s.up ? "on" : "bad";
   ctx.put(
-    h("h1", {}, "AWG Toolza ", h("span", { class: "muted small" }, `${d.version || ""} · ${d.channel === "beta" ? "бета" : "стабильный"}`)),
+    title("Обзор", pill(d.channel === "beta" ? "бета-канал" : "стабильный", d.channel === "beta" ? "warn" : "")),
     alerts.length ? h("div", { class: "card warn" }, alerts.map(([a, path]) =>
-      h("div", { style: "cursor:pointer;padding:2px 0", onclick: () => go(path) }, a))) : null,
-    h("div", { class: "card" },
-      h("div", { style: "font-weight:600" }, `🖥 ${d.host || ""} · ${d.ip || ""}`),
-      h("div", { class: "muted small" }, d.os || ""),
-      s.exists ? kv("Сервер", `${s.up ? "🟢" : "🔴"} AWG ${s.proto || "?"} · порт ${s.port || "?"}`) : kv("Сервер", "не создан"),
-      kv("Модуль", `${c.module || "—"}${c.module_update ? " · есть " + c.module_update : ""}`)),
-    h("div", { class: "stats" },
-      h("div", { class: "stat" }, h("b", {}, s.clients || 0), h("span", {}, plural(s.clients || 0, "клиент", "клиента", "клиентов"))),
-      h("div", { class: "stat" }, h("b", { class: s.online ? "ok" : "" }, s.online || 0), h("span", {}, "онлайн")),
-      h("div", { class: "stat" }, h("b", {}, up.length), h("span", {}, up.length ? up.join(", ") : "туннелей"))),
+      h("div", { class: "row", style: "cursor:pointer;padding:3px 0", onclick: () => go(path) }, icon("triangle-alert"), a))) : null,
+    ecard({ state, name: d.host || "сервер", onopen: () => go("/server"),
+      right: pill(!s.exists ? "не создан" : s.up ? "работает" : "не поднят", s.exists ? (s.up ? "ok" : "bad") : ""),
+      meta: s.exists ? [tag("AWG " + (s.proto || "?"), "accent"), tag(s.profile_label || s.profile || ""),
+        tag("MTU " + (s.mtu || "?")), s.mimicry && s.mimicry !== "none" ? tag(s.mimicry) : null] : [tag(d.os || "")],
+      lines: [s.exists ? s.endpoint : d.ip, s.exists ? d.os : null],
+      acts: [act("server", "Сервер", () => go("/server")), act("users", "Клиенты", () => go("/clients")),
+        act("stethoscope", "Проверка", () => go("/diag"))] }),
+    statGrid([
+      [`${s.online || 0}/${s.clients || 0}`, "Клиенты онлайн", `всего ${s.clients || 0} · истёкших ${rows.filter((x) => x.blocked).length}`,
+        () => go("/clients")],
+      [fmtBytes(rx + tx), "Суммарный обмен", `↓ ${fmtBytes(rx)} · ↑ ${fmtBytes(tx)}`],
+      [up.length ? up.join(", ") : "напрямую", "Выход клиентов", t.dns === "up" ? "DNS шифруется" : "через сервер", () => go("/tunnels")],
+      [leader && leader.rx + leader.tx ? leader.name : "—", "Лидер по трафику", leader && leader.rx + leader.tx ? fmtBytes(leader.rx + leader.tx) : "—"],
+    ]),
     h("h2", {}, "Разделы"),
-    h("div", { class: "grid" }, SECTIONS.map(([ico, title, path, sub]) =>
+    h("div", { class: "grid" }, SECTIONS.map(([ico, name, path, sub]) =>
       h("div", { class: "tile" + (path ? "" : " soon"),
         onclick: () => (path ? go(path) : toast("Раздел появится в панели следующим обновлением — пока он в боте")) },
-        h("div", { class: "ico" }, ico), h("div", { class: "t" }, title), h("div", { class: "s" }, path ? sub : "скоро · пока в боте")))),
-    h("div", { class: "muted small", style: "text-align:center;margin-top:16px" },
-      `${me.name} · ${me.owner ? "владелец" : "админ"} · бот ${me.bot}`));
+        h("div", { class: "ibox" }, icon(EMOJI_ICON[ico.replace("️", "")] || "info")), h("div", { class: "t" }, name),
+        h("div", { class: "s" }, path ? sub : "скоро · пока в боте")))),
+    h("div", { class: "foot" }, `${me.name} · ${me.owner ? "владелец" : "админ"} · бот ${me.bot}`));
 });
 
 // ── Клиенты ───────────────────────────────────────────────
-const FILTERS = [["all", "Все"], ["online", "🟢 Онлайн"], ["blocked", "🚫 Истёкшие"], ["mon", "🔔 Мониторинг"]];
+const FILTERS = [["all", "Все"], ["online", "Онлайн"], ["blocked", "Истёкшие"], ["mon", "Мониторинг"]];
 const EXPIRES = [["", "♾ Бессрочно"], ["+1h", "1 час"], ["+1d", "1 день"], ["+7d", "7 дней"], ["+30d", "30 дней"]];
 
 function seen(c) {
@@ -344,74 +459,124 @@ async function loadClients() {
 }
 const byName = (name) => (S.clients && S.clients.rows || []).find((c) => c.name === name);
 
+// Состояние клиента: рамка и точка карточки, пометка справа, чипы
+const clientState = (c) => (c.blocked ? "bad" : c.online ? "on" : "");
+function statusPill(c) {
+  if (c.blocked) return pill("срок истёк", "bad");
+  if (c.online) return pill("онлайн · " + fmtDur(c.ago), "ok");
+  if (c.handshake) return pill(fmtDur(c.ago) + " назад");
+  return pill("не подключался");
+}
+function routeTag(c, r) {
+  const t = { warp: "WARP", xray: "Xray" }[r.kind];
+  if (t) return c[r.kind] !== false ? tag(t, "ok", "network") : tag("мимо " + t, "", "network");
+  if (r.kind === "tun2socks") return tag("tun2socks", "ok", "network");
+  if (r.kind !== "exits") return null;
+  const v = c.exit_choice || "shared";
+  return v === "off" ? tag("мимо нод", "", "door-open") : tag(v === "shared" ? "общий выход" : "нода " + v, "ok", "door-open");
+}
+function clientTags(c) {
+  const left = c.expires ? c.expires - Date.now() / 1000 : 0;
+  return [
+    c.mimicry && c.mimicry !== "none" ? tag(c.mimicry, "accent", "drama") : tag("без I1-I5"),
+    c.expires && !c.blocked ? tag(expShort(c.expires), left < 3 * 86400 ? "warn" : "", "hourglass") : null,
+    routeTag(c, (S.clients && S.clients.route) || {}),
+    c.mon ? tag("мониторинг", "", "bell") : null,
+  ];
+}
+async function removeClients(btn, names, after) {
+  const list = names.slice(0, 20).join(", ") + (names.length > 20 ? "…" : "");
+  if (!await confirmTg(names.length === 1 ? `Удалить клиента ${names[0]}? Его конфиг перестанет работать.`
+    : `Удалить клиентов: ${names.length}?\n${list}\n\nИх конфиги перестанут работать.`)) return;
+  await busy(btn, async () => {
+    await post("/api/client/del", { names });
+    haptic(); toast(names.length === 1 ? `Удалён: ${names[0]}` : `Удалено: ${names.length}`);
+    after();
+  });
+}
+
 route(/^\/clients$/, async (ctx) => {
   const d = await loadClients();
-  const list = h("div", { class: "card list" }), count = h("span", { class: "muted small" });
-  const sortBtn = h("button", { class: "chip", onclick: () => {
-    S.sort = S.sort === "name" ? "activity" : "name";
-    post("/api/settings", { sort: S.sort }).catch(() => {});
-    draw();
-  } });
-  const chips = h("div", { class: "chips" }), bar = h("div", { class: "bar" });
+  if (!S.view) S.view = pref("view", "cards");
+  const now = Date.now() / 1000;
+  const tabs = h("div"), toolbar = h("div", { class: "toolbar" }), list = h("div"), bar = h("div", { class: "bar" });
   const search = h("input", { type: "search", placeholder: "Поиск по имени, IP, заметке", value: S.q,
     oninput: () => { S.q = search.value.trim().toLowerCase(); draw(); } });
+  const count = (k) => d.rows.filter((c) => k === "all" || (k === "online" && c.online) || (k === "blocked" && c.blocked)
+    || (k === "mon" && c.mon)).length;
+  const rx = d.rows.reduce((a, c) => a + (c.rx || 0), 0), tx = d.rows.reduce((a, c) => a + (c.tx || 0), 0);
+  const leader = d.rows.reduce((a, c) => (!a || c.rx + c.tx > a.rx + a.tx ? c : a), null);
+  const soon = d.rows.filter((c) => c.expires > now && c.expires - now < 3 * 86400).sort((a, b) => a.expires - b.expires);
 
   function visible() {
     return sortRows(d.rows, S.sort).filter((c) =>
       (S.filter === "all" || (S.filter === "online" && c.online) || (S.filter === "blocked" && c.blocked) || (S.filter === "mon" && c.mon))
       && (!S.q || `${c.name} ${c.ip} ${c.note || ""}`.toLowerCase().includes(S.q)));
   }
+  const toggle = (c) => { S.select.has(c.name) ? S.select.delete(c.name) : S.select.add(c.name); draw(); };
+  const open = (c) => (S.select ? toggle(c) : go("/client/" + encodeURIComponent(c.name)));
+  const mark = (c) => h("div", { class: "check" + (S.select.has(c.name) ? " on" : "") }, S.select.has(c.name) ? icon("check") : null);
+  function card(c) {
+    const enc = encodeURIComponent(c.name);
+    return ecard({ state: clientState(c), cls: S.select && S.select.has(c.name) ? "sel" : "", name: c.name,
+      attrs: { "data-name": c.name }, onopen: () => open(c), right: S.select ? mark(c) : statusPill(c),
+      meta: clientTags(c), lines: [`${c.ip} · ↓ ${fmtBytes(c.rx)} · ↑ ${fmtBytes(c.tx)}`], note: c.note,
+      acts: S.select ? null : [act("qr-code", "QR", () => go(`/client/${enc}/qr`)),
+        act("square-pen", "Изменить", () => go(`/client/${enc}`)),
+        act("trash-2", "Удалить", (b) => removeClients(b, [c.name], render), "bad")] });
+  }
   function row(c) {
-    const sel = S.select && S.select.has(c.name);
-    const mark = S.select ? h("div", { class: "check" + (sel ? " on" : "") })
-      : h("div", { class: "dot" + (c.blocked ? " blocked" : c.online ? " on" : "") });
-    return h("div", { class: "item", onclick: () => {
-      if (!S.select) return go("/client/" + encodeURIComponent(c.name));
-      S.select.has(c.name) ? S.select.delete(c.name) : S.select.add(c.name);
-      draw();
-    } }, mark,
+    return h("div", { class: "item", "data-name": c.name, onclick: () => open(c) },
+      S.select ? mark(c) : h("div", { class: "dot " + clientState(c) }),
       h("div", { class: "main" }, h("div", { class: "title" }, c.name + (c.mon ? " 🔔" : "")),
         h("div", { class: "sub" }, [c.ip, seen(c), c.expires && !c.blocked ? "⏳ " + expShort(c.expires) : null, c.note].filter(Boolean).join(" · "))),
       h("div", { class: "side" }, "↓" + fmtBytes(c.rx), h("br"), "↑" + fmtBytes(c.tx)));
   }
   function draw() {
     const rows = visible();
-    list.replaceChildren(...(rows.length ? rows.map(row) : [h("div", { class: "empty" }, d.rows.length ? "Никого не нашлось" : "Клиентов пока нет")]));
-    chips.replaceChildren(...FILTERS.map(([k, label]) =>
-      h("button", { class: "chip" + (S.filter === k ? " on" : ""), onclick: () => { S.filter = k; draw(); } }, label)));
-    sortBtn.textContent = S.sort === "name" ? "🔃 По имени" : "🔃 По активности";
-    const online = d.rows.filter((c) => c.online).length;
-    count.textContent = `${d.rows.length} ${plural(d.rows.length, "клиент", "клиента", "клиентов")} · ${online} онлайн`
-      + (S.select ? ` · отмечено ${S.select.size}` : "");
+    tabs.replaceChildren(tabsBar(FILTERS.map(([k, label]) => [k, label, count(k)]), S.filter, (k) => { S.filter = k; draw(); }));
+    toolbar.replaceChildren(
+      segBar([["cards", "layout-list", "Карточки"], ["list", "list", "Список"]], S.view, (v) => { S.view = v; setPref("view", v); draw(); }),
+      h("button", { title: "Сортировка", onclick: () => {
+        S.sort = S.sort === "name" ? "activity" : "name";
+        post("/api/settings", { sort: S.sort }).catch(() => {});
+        toast(S.sort === "name" ? "По имени" : "По активности");
+        draw();
+      } }, icon(S.sort === "name" ? "arrow-down-a-z" : "activity")),
+      h("button", { class: S.select ? "btn-primary" : null, onclick: () => { S.select = S.select ? null : new Set(); draw(); } },
+        icon("list-checks"), "Выбрать"));
+    const empty = h("div", { class: "card empty" }, d.rows.length ? "Никого не нашлось" : "Клиентов пока нет");
+    list.replaceChildren(...(!rows.length ? [empty] : S.view === "list"
+      ? [h("div", { class: "card list" }, rows.map(row))] : rows.map(card)));
     if (S.select) {
+      bar.style.display = "";
       bar.replaceChildren(
         h("button", { onclick: () => { const all = rows.every((c) => S.select.has(c.name));
           rows.forEach((c) => (all ? S.select.delete(c.name) : S.select.add(c.name))); draw(); } }, "Все"),
-        h("button", { class: "btn-danger", disabled: !S.select.size || null, onclick: (ev) => deleteMany(ev.target) },
-          `🗑 Удалить ${S.select.size || ""}`),
+        h("button", { class: "btn-danger", disabled: !S.select.size || null,
+          onclick: (ev) => removeClients(ev.currentTarget, [...S.select], () => { S.select = null; render(); }) },
+        icon("trash-2"), `Удалить ${S.select.size || ""}`),
         h("button", { onclick: () => { S.select = null; draw(); } }, "Отмена"));
     } else {
-      bar.replaceChildren(
-        h("button", { class: "btn-primary", onclick: () => go("/add") }, "➕ Добавить"),
-        h("button", { onclick: () => go("/bulk") }, "Несколько"),
-        h("button", { onclick: () => { S.select = new Set(); draw(); } }, "Выбрать"));
+      bar.style.display = "none";
     }
   }
-  async function deleteMany(btn) {
-    const names = [...S.select];
-    if (!await confirmTg(`Удалить клиентов: ${names.length}?\n${names.slice(0, 20).join(", ")}${names.length > 20 ? "…" : ""}\n\nИх конфиги перестанут работать.`)) return;
-    await busy(btn, async () => {
-      await post("/api/client/del", { names });
-      haptic(); toast(`Удалено: ${names.length}`);
-      S.select = null;
-      render();
-    });
-  }
-  ctx.put(h("h1", {}, "👥 Клиенты"), search, chips,
-    h("div", { class: "row", style: "justify-content:space-between;margin:2px 2px 8px" }, count, sortBtn), list,
-    d.rows.length ? h("button", { class: "btn-block", onclick: (ev) => busy(ev.target, async () => {
-      await post("/api/send", { what: "export" }); haptic(); toast("Архив всех конфигов — в чате с ботом");
-    }) }, "📦 Все конфиги архивом в чат") : null, bar);
+  ctx.put(title("Клиенты"), tabs, toolbar,
+    h("div", { class: "pair" },
+      h("button", { disabled: !d.rows.length || null, onclick: (ev) => busy(ev.currentTarget, async () => {
+        await post("/api/send", { what: "export" }); haptic(); toast("Архив всех конфигов — в чате с ботом");
+      }) }, icon("download"), "Экспорт"),
+      h("button", { class: "btn-primary", onclick: async () => {
+        const v = await sheet("Новые клиенты", [{ label: "➕ Один клиент", value: "/add" }, { label: "👥 Несколько сразу", value: "/bulk" }]);
+        if (v) go(v);
+      } }, icon("plus"), "Создать")),
+    statGrid([
+      [`${count("online")}/${d.rows.length}`, "Онлайн", `истёкших ${count("blocked")} · мониторинг ${count("mon")}`],
+      [fmtBytes(rx + tx), "Суммарный обмен", `↓ ${fmtBytes(rx)} · ↑ ${fmtBytes(tx)}`],
+      [leader && leader.rx + leader.tx ? leader.name : "—", "Лидер по трафику", leader && leader.rx + leader.tx ? fmtBytes(leader.rx + leader.tx) : "—"],
+      [String(soon.length), "Истекают за 3 дня", soon.length ? `ближайший: ${soon[0].name}` : "никто"],
+    ]),
+    h("div", { class: "search" }, icon("search"), search), list, bar);
   draw();
 });
 
@@ -422,12 +587,9 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
   if (!c) return ctx.put(h("div", { class: "empty" }, `Клиента ${name} нет`), h("button", { class: "btn-block", onclick: () => replace("/clients") }, "К списку"));
   const r = S.clients.route || {};
   const enc = encodeURIComponent(name);
-  const monSwitch = h("div", { class: "switch" + (c.mon ? " on" : "") });
-  const status = c.blocked ? h("span", { class: "bad" }, "🚫 срок истёк") : c.online
-    ? h("span", { class: "ok" }, `🟢 онлайн (${fmtDur(c.ago)} назад)`) : h("span", {}, "⚪️ " + seen(c));
 
   async function setExpire(btn) {
-    const v = await sheet("⏳ Срок действия", [
+    const v = await sheet("Срок действия", [
       { label: c.expires ? "♾ Снять срок" + (c.blocked ? " и разблокировать" : "") : "♾ Бессрочно", value: "none" },
       ...EXPIRES.slice(1).map(([val, label]) => ({ label: "⏳ " + label, value: val })),
       { label: "📅 До даты…", value: "date" }]);
@@ -449,53 +611,48 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
       const on = c[kind] !== false, t = kind === "warp" ? "WARP" : "Xray";
       opts = [{ label: (on ? "🔘 " : "⚪️ ") + "Через " + t, value: "on" }, { label: (on ? "⚪️ " : "🔘 ") + "Напрямую", value: "off" }];
     }
-    const v = await sheet("🌐 Маршрут " + name, opts);
+    const v = await sheet("Маршрут " + name, opts);
     if (!v) return;
     await busy(btn, async () => {
       await (kind === "exits" ? call("exits", "client", name, v) : call("tunnels", "client", kind, name, v));
       haptic(); toast("Маршрут изменён"); render();
     });
   }
-  async function remove(btn) {
-    if (!await confirmTg(`Удалить клиента ${name}? Его конфиг перестанет работать.`)) return;
-    await busy(btn, async () => {
-      await post("/api/client/del", { names: [name] });
-      haptic(); toast(`Удалён: ${name}`); replace("/clients");
-    });
-  }
 
   ctx.put(
-    h("h1", {}, "👤 " + name),
+    title(name, statusPill(c)),
+    h("div", { class: "row", style: "flex-wrap:wrap;gap:6px;margin:-4px 2px 12px" }, clientTags(c)),
+    statGrid([
+      [fmtBytes(c.rx), "Принято ↓", "от клиента"],
+      [fmtBytes(c.tx), "Отдано ↑", "клиенту"],
+      [c.handshake ? fmtDur(c.ago) : "—", "Рукопожатие", c.handshake ? (c.online ? "назад · онлайн" : "назад") : "не было"],
+      [c.expires ? expShort(c.expires) : "∞", "Срок", c.expires ? fmtTime(c.expires) : "бессрочно"],
+    ]),
     h("div", { class: "card" },
-      kv("Статус", status),
-      kv("IP", c.ip),
-      kv("Трафик", `↓${fmtBytes(c.rx)} ↑${fmtBytes(c.tx)}`),
-      c.endpoint ? kv("Адрес клиента", c.endpoint.replace(/:\d+$/, "")) : null,
-      kv("Срок", fmtExpire(c.expires)),
-      kv("Мимикрия", c.mimicry || "none"),
+      kv("IP", h("span", { class: "mono" }, c.ip)),
+      c.endpoint ? kv("Адрес клиента", h("span", { class: "mono" }, c.endpoint.replace(/:\d+$/, ""))) : null,
+      kv("Мимикрия", h("span", { class: "mono" }, !c.mimicry || c.mimicry === "none" ? "без I1-I5" : c.mimicry)),
       kv("Маршрут", c.route || "напрямую"),
       c.note ? kv("Заметка", c.note) : null),
-    h("div", { class: "card item", style: "border:0", onclick: () => busy(null, async () => {
-      const on = !monSwitch.classList.contains("on");
+    switchRow("Мониторинг активности", "уведомления в чат, когда клиент пропал и вернулся", c.mon, async (on) => {
       await post("/api/client/mon", { name, on });
-      monSwitch.classList.toggle("on", on);
-      haptic(); toast(on ? "🔔 Бот сообщит, когда клиент пропадёт и вернётся" : "🔕 Мониторинг выключен", 3000);
-    }) }, h("div", { class: "main" }, h("div", { class: "title" }, "🔔 Мониторинг активности"),
-      h("div", { class: "sub" }, "уведомления в чат, когда клиент пропал и вернулся")), monSwitch),
+      toast(on ? "🔔 Бот сообщит, когда клиент пропадёт и вернётся" : "🔕 Мониторинг выключен", 3000);
+    }),
     h("div", { class: "actions" },
-      h("button", { class: "btn-primary", onclick: () => go(`/client/${enc}/qr`) }, "📄 Конфиг и QR"),
+      h("button", { class: "btn-primary", onclick: () => go(`/client/${enc}/qr`) }, icon("qr-code"), "Конфиг и QR"),
       h("button", { onclick: () => go(`/client/${enc}/rename`) }, "✏️ Имя"),
-      h("button", { onclick: (ev) => setExpire(ev.target) }, "⏳ Срок"),
+      h("button", { onclick: (ev) => setExpire(ev.currentTarget) }, "⏳ Срок"),
       h("button", { onclick: () => go(`/client/${enc}/mimicry`) }, "🎭 Мимикрия"),
-      ["warp", "xray", "exits"].includes(r.kind) ? h("button", { onclick: (ev) => setRoute(ev.target) }, "🌐 Маршрут") : null,
+      ["warp", "xray", "exits"].includes(r.kind) ? h("button", { onclick: (ev) => setRoute(ev.currentTarget) }, "🌐 Маршрут") : null,
       h("button", { onclick: () => go(`/client/${enc}/note`) }, "📝 Заметка")),
-    h("button", { class: "btn-danger btn-block", onclick: (ev) => remove(ev.target) }, "🗑 Удалить клиента"));
+    h("button", { class: "btn-danger btn-block", onclick: (ev) => removeClients(ev.currentTarget, [name], () => replace("/clients")) },
+      "🗑 Удалить клиента"));
 });
 
 route(/^\/client\/([^/]+)\/qr$/, async (ctx, name) => {
   const d = await post("/api/client/qr", { name });
   ctx.put(
-    h("h1", {}, "📄 " + name),
+    title("📄 " + name),
     d.png ? h("img", { class: "qr", src: "data:image/png;base64," + d.png, alt: "QR" })
       : h("div", { class: "card muted" }, "Конфиг длинный — в читаемый QR не влезает. Импортируй файлом."),
     h("div", { class: "muted small", style: "text-align:center;margin:6px 0 10px" }, "AmneziaVPN / AmneziaWG → добавить → QR или файл"),
@@ -508,7 +665,7 @@ route(/^\/client\/([^/]+)\/qr$/, async (ctx, name) => {
 
 route(/^\/client\/([^/]+)\/rename$/, async (ctx, name) => {
   const input = h("input", { value: name, maxlength: 32, autocapitalize: "off", autocomplete: "off" });
-  ctx.put(h("h1", {}, "✏️ Новое имя"), h("label", {}, "Латиница, цифры, _ и -, до 32"), input,
+  ctx.put(title("✏️ Новое имя"), h("label", {}, "Латиница, цифры, _ и -, до 32"), input,
     h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.target, async () => {
       const v = input.value.trim();
       if (!/^[A-Za-z0-9_-]{1,32}$/.test(v)) throw new Error("Имя: латиница, цифры, _ и -, до 32 символов");
@@ -522,7 +679,7 @@ route(/^\/client\/([^/]+)\/note$/, async (ctx, name) => {
   await loadClients();
   const c = byName(name) || {};
   const ta = h("textarea", { maxlength: 190 }, c.note || "");
-  ctx.put(h("h1", {}, "📝 Заметка · " + name), h("label", {}, "До 190 символов; пусто — удалить"), ta,
+  ctx.put(title("📝 Заметка · " + name), h("label", {}, "До 190 символов; пусто — удалить"), ta,
     h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.target, async () => {
       await post("/api/client/note", { name, text: ta.value.trim() }); haptic(); back();
     }) }, "Сохранить"));
@@ -532,7 +689,7 @@ route(/^\/client\/([^/]+)\/date$/, async (ctx, name) => {
   const def = new Date(Date.now() + 30 * 86400e3);
   def.setMinutes(def.getMinutes() - def.getTimezoneOffset());
   const input = h("input", { type: "datetime-local", value: def.toISOString().slice(0, 16) });
-  ctx.put(h("h1", {}, "📅 Срок · " + name), h("label", {}, "Клиент заблокируется в это время (время телефона)"), input,
+  ctx.put(title("📅 Срок · " + name), h("label", {}, "Клиент заблокируется в это время (время телефона)"), input,
     h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.target, async () => {
       const ts = Math.floor(new Date(input.value).getTime() / 1000);
       if (!ts || ts < Date.now() / 1000 + 60) throw new Error("Нужна дата в будущем");
@@ -560,7 +717,7 @@ async function mimicryPicker(onPick) {
 }
 
 route(/^\/client\/([^/]+)\/mimicry$/, async (ctx, name) => {
-  ctx.put(h("h1", {}, "🎭 Мимикрия · " + name), ...await mimicryPicker((spec) => busy(null, async () => {
+  ctx.put(title("🎭 Мимикрия · " + name), ...await mimicryPicker((spec) => busy(null, async () => {
     toast("Генерирую мимикрию…", 4000);
     await call("client", "mimicry", name, spec);
     haptic(); toast("Мимикрия обновлена — старый конфиг больше не подключится", 3500);
@@ -591,7 +748,7 @@ route(/^\/add$/, async (ctx) => {
   let spec = "server";
   const mimLabel = h("div", { class: "muted small" }, "Мимикрия: как у сервера");
   const pro = d.profile === "pro";
-  ctx.put(h("h1", {}, "➕ Новый клиент"),
+  ctx.put(title("➕ Новый клиент"),
     h("label", {}, "Имя — латиница, цифры, _ и -, до 32"),
     h("div", { class: "row" }, name, h("button", { onclick: () => { name.value = free(); } }, "🎲")),
     exp.nodes,
@@ -627,7 +784,7 @@ route(/^\/bulk$/, async (ctx) => {
       : [h("label", {}, "Имена через запятую"), names]));
   };
   draw();
-  ctx.put(h("h1", {}, "➕ Несколько клиентов"), tabs, box, exp.nodes,
+  ctx.put(title("➕ Несколько клиентов"), tabs, box, exp.nodes,
     h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.target, async () => {
       let spec;
       if (mode === "prefix") {
@@ -662,34 +819,37 @@ const DNS = [["Cloudflare", "1.1.1.1, 1.0.0.1"], ["Google", "8.8.8.8, 8.8.4.4"],
 route(/^\/server$/, async (ctx) => {
   const r = await callR(["server", "info"]);
   const d = r.data || {}, tip = (r.log || "").trim();
-  const warnings = [d.reboot ? "▲ " + d.reboot : null, tip ? "→ " + tip : null].filter(Boolean);
-  ctx.put(h("h1", {}, "🖥 Сервер"),
-    warnings.length ? h("div", { class: "card warn small" }, warnings.map((w) => h("div", {}, w))) : null,
-    h("div", { class: "card" },
-      kv("Компоненты", d.installed ? "✅ установлены" : "❌ не установлены"),
-      d.exists ? [
-        kv("awg0", d.up ? h("span", { class: "ok" }, "● поднят") : h("span", { class: "bad" }, "● не поднят")),
-        kv("Протокол", `AWG ${d.proto || "?"} · ${d.profile_label || PROFILES[d.profile] || d.profile || ""}`),
-        kv("Endpoint", h("span", { onclick: () => copy(d.endpoint), style: "cursor:pointer" }, d.endpoint || "", " 📋")),
-        kv("Порт · MTU", `${d.port} · ${d.mtu}`),
-        kv("Подсеть", d.net || ""),
-        kv("Регион", d.region === "ru" ? "Россия" : "мир"),
-        kv("Мимикрия", (d.mimicry || "none") + (d.mimicry_domain ? ` (${d.mimicry_domain})` : "")),
-        kv("Клиентов", d.clients || 0),
-      ] : kv("Сервер", "не создан")),
-    h("div", { class: "actions" },
-      !d.exists ? btn("✨ Создать сервер", () => go("/server/create"), d.installed ? "btn-primary" : null) : null,
-      d.exists ? btn("🔄 Рестарт awg0", (b) => quick(b, "awg0 перезапущен", ["server", "restart"])) : null,
-      d.exists ? btn("🔀 Протокол", () => go("/server/proto")) : null,
-      d.exists ? btn("🌍 Endpoint", () => go("/server/endpoint")) : null,
-      btn("🧩 Модуль ядра", () => go("/server/module")),
-      btn(d.installed ? "📦 Компоненты" : "📦 Установить", () => jobAsk(ctx, "Пакеты, заголовки ядра, сборка модуля AmneziaWG "
-        + "и amneziawg-tools из исходников. Обычно 5-15 минут. Если ядру нет заголовков, поставится свежее ядро — "
-        + "тогда понадобится перезагрузка.", "Установка компонентов", ["server", "install"]), d.installed ? null : "btn-primary"),
-      btn("🛠 Починить", () => runJob(ctx, "Проверка и ремонт", ["server", "repair"], (res) => res
-        ? h("div", { class: "card" }, kv("Найдено проблем", res.issues || 0), kv("Исправлено", res.fixed || 0)) : null)),
-      btn("♻️ Перезагрузка", (b) => quickAsk(b, "Перезагрузить сервер? Панель и бот вернутся сами через минуту-две.",
-        "Сервер перезагружается", ["server", "reboot"], () => {}))),
+  const warnings = [d.reboot, tip].filter(Boolean);
+  const state = !d.exists ? "" : d.up ? "on" : "bad";
+  ctx.put(title("Сервер"),
+    warnings.length ? h("div", { class: "card warn small" }, warnings.map((w) => h("div", { class: "row", style: "padding:2px 0" },
+      icon("triangle-alert"), w))) : null,
+    d.exists ? ecard({ state, name: "awg0", attrs: { "data-name": "awg0" },
+      right: pill(d.up ? "поднят" : "не поднят", d.up ? "ok" : "bad"),
+      meta: [tag("AWG " + (d.proto || "?"), "accent"), tag(d.profile_label || PROFILES[d.profile] || d.profile || ""),
+        tag("MTU " + d.mtu), tag(d.region === "ru" ? "Россия" : "мир", "", "globe")],
+      lines: [h("span", { onclick: (ev) => { ev.stopPropagation(); copy(d.endpoint); }, style: "cursor:pointer" }, d.endpoint || "", " ", icon("copy"))],
+      acts: [act("refresh-cw", "Рестарт", (b) => quick(b, "awg0 перезапущен", ["server", "restart"])),
+        act("shuffle", "Протокол", () => go("/server/proto")), act("globe", "Endpoint", () => go("/server/endpoint"))] })
+      : ecard({ name: "Сервер не создан", right: pill(d.installed ? "компоненты есть" : "нет компонентов", d.installed ? "ok" : "warn"),
+        lines: ["Создай сервер — те же вопросы, что в меню awg2"] }),
+    d.exists ? statGrid([
+      [String(d.clients || 0), "Клиентов", "конфигов на сервере", () => go("/clients")],
+      [String(d.port), "UDP-порт", d.domain ? "домен " + d.domain : "IP в конфигах"],
+      [d.net || "—", "Подсеть", "адреса клиентов"],
+      [(d.mimicry || "none"), "Мимикрия", d.mimicry_domain || (d.mimicry && d.mimicry !== "none" ? "пакеты I1-I5" : "без I1-I5")],
+    ]) : null,
+    !d.exists ? btn("✨ Создать сервер", () => go("/server/create"), "btn-block" + (d.installed ? " btn-primary" : "")) : null,
+    h("h2", {}, "Обслуживание"),
+    h("div", { class: "card list" },
+      menuItem("🧩 Модуль ядра", "версии, обновление, откат", () => go("/server/module")),
+      menuItem(d.installed ? "📦 Компоненты" : "📦 Установить компоненты", "пакеты, модуль, amneziawg-tools",
+        () => jobAsk(ctx, "Пакеты, заголовки ядра, сборка модуля AmneziaWG и amneziawg-tools из исходников. Обычно 5-15 минут. "
+          + "Если ядру нет заголовков, поставится свежее ядро — тогда понадобится перезагрузка.", "Установка компонентов", ["server", "install"])),
+      menuItem("🛠 Починить", "конфиги, правила, службы", () => runJob(ctx, "Проверка и ремонт", ["server", "repair"],
+        (res) => (res ? h("div", { class: "card" }, kv("Найдено проблем", res.issues || 0), kv("Исправлено", res.fixed || 0)) : null))),
+      menuItem("♻️ Перезагрузка", "панель и бот вернутся сами", () => quickAsk(null,
+        "Перезагрузить сервер? Панель и бот вернутся сами через минуту-две.", "Сервер перезагружается", ["server", "reboot"], () => {}))),
     d.exists ? h("button", { class: "btn-danger btn-block", onclick: (ev) => quickAsk(ev.currentTarget,
       "Сброс сервера: awg0 и все клиенты будут удалены, туннели выключены. Перед сбросом делается авто-бэкап, "
       + "компоненты остаются. Сбросить?", "Сервер сброшен", ["server", "reset"]) }, "⚠️ Сбросить сервер") : null);
@@ -784,7 +944,7 @@ route(/^\/server\/create$/, async (ctx) => {
     }
     return a;
   }
-  ctx.put(h("h1", {}, "✨ Создание сервера"), box,
+  ctx.put(title("✨ Создание сервера"), box,
     h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.currentTarget, async () => {
       const a = args();
       await runJob(ctx, "Создание сервера", ["server", "create", ...a], (res) => {
@@ -812,7 +972,7 @@ route(/^\/server\/proto$/, async (ctx) => {
       h("button", { class: "btn-block", onclick: () => go("/clients") }, "👥 Клиенты"),
     ], { onBack: () => replace("/server") });
   };
-  ctx.put(h("h1", {}, "🔀 Протокол"),
+  ctx.put(title("🔀 Протокол"),
     h("div", { class: "card" }, kv("Сейчас", `AWG ${cur}`), kv("Клиентов", n)),
     h("div", { class: "card small" },
       h("div", {}, "• 3.1 — быстрее, заголовки под шифром; 2.0 — для старых клиентов"),
@@ -829,7 +989,7 @@ route(/^\/server\/endpoint$/, async (ctx) => {
   let all = true;
   const dom = h("input", { value: d.domain || "", placeholder: "vpn.example.com", autocapitalize: "off", autocomplete: "off" });
   const save = (b, value) => quick(b, "Endpoint изменён", ["server", "endpoint", value, ...(all ? [] : ["keep"])], () => back());
-  ctx.put(h("h1", {}, "🌍 Endpoint"),
+  ctx.put(title("🌍 Endpoint"),
     h("div", { class: "card" }, kv("В конфигах", d.endpoint || ""),
       h("div", { class: "muted small" }, d.domain ? "Домен задан — сервер можно переносить без перевыдачи конфигов."
         : "Сейчас IP. С доменом переезд сервера не требует новых конфигов.")),
@@ -859,7 +1019,7 @@ route(/^\/server\/module$/, async (ctx) => {
     const path = await sheet("⏪ Копии исходников — сверху новые", rows.map((x) => ({ label: `${fmtTime(x.time)} · ${x.name}`, value: x.path })));
     if (path) await jobAsk(ctx, `Вернуть модуль из ${path.split("/").pop()}?`, "Откат модуля", ["module", "rollback", path]);
   }
-  ctx.put(h("h1", {}, "🧩 Модуль ядра"),
+  ctx.put(title("🧩 Модуль ядра"),
     d.reboot || d.secure_boot ? h("div", { class: "card warn small" }, d.reboot ? h("div", {}, "▲ " + d.reboot) : null,
       d.secure_boot ? h("div", {}, "▲ Secure Boot включён — неподписанный модуль ядро не загрузит") : null) : null,
     h("div", { class: "card" },
@@ -879,32 +1039,34 @@ route(/^\/server\/module$/, async (ctx) => {
       d.backups ? btn("⏪ Откат", rollback) : null,
       btn("🔎 Проверить", (b) => quick(b, "Версии проверены", ["module", "check"])),
       btn("📜 Журнал сборки", () => go("/log/module"))),
-    hint("⬆️ — до последней версии · 🔁 — перезагрузить модуль без ребута · 🧱 — собрать под все установленные ядра"),
-    h("details", { class: "card" }, h("summary", {}, "📄 Полный отчёт"), h("pre", {}, plainLog(r.log))));
+    hint("«Модуль» и «Tools» — до последней версии · «Перезагрузить» — модуль без ребута · «Под все ядра» — собрать под все установленные"),
+    h("details", { class: "card" }, h("summary", {}, "Полный отчёт"), h("pre", {}, plainLog(r.log))));
 });
 
 // ── Туннели и DNS ─────────────────────────────────────────
 const STATE_WORD = { up: "включён", off: "выключен", none: "не настроен" };
 const TUNNELS = [["warp", "☁️", "WARP", "Cloudflare"], ["xray", "🛰", "Xray", "VLESS, VMess, Trojan, SS"],
   ["tun2socks", "🧦", "tun2socks", "внешний SOCKS5"], ["exits", "🚪", "Exit-ноды", "другие AWG/WG-серверы"]];
-const navItem = (path, title, sub, on) => h("div", { class: "item", onclick: () => go(path) },
-  h("div", { class: "dot" + (on ? " on" : "") }),
-  h("div", { class: "main" }, h("div", { class: "title" }, title), h("div", { class: "sub" }, sub)),
-  h("div", { class: "side" }, "›"));
-
+const TUNNEL_ICON = { warp: "cloud", xray: "satellite", tun2socks: "waypoints", exits: "door-open" };
 route(/^\/tunnels$/, async (ctx) => {
   const d = (await call("tunnels", "status")) || {};
   const n = d.cascade || 0;
-  ctx.put(h("h1", {}, "🌐 Туннели и DNS"),
-    h("div", { class: "card small" }, "Клиенты выходят в интернет через один туннель за раз.",
-      d.active ? h("div", { style: "margin-top:4px" }, "Сейчас: ", h("b", { class: "ok" }, d.active)) : null),
+  const card = (path, name, st, meta, line) => ecard({ state: st === "up" ? "on" : st === "off" ? "warn" : "", name,
+    onopen: () => go(path), attrs: { "data-name": name },
+    right: pill(STATE_WORD[st] || st || "—", st === "up" ? "ok" : st === "off" ? "warn" : ""), meta, lines: [line] });
+  const configured = TUNNELS.filter(([k]) => d[k] && d[k] !== "none").length;
+  const active = TUNNELS.filter(([k]) => d[k] === "up").map(([, , name]) => name).join(", ");
+  ctx.put(title("Туннели и DNS"),
+    statGrid([
+      [active || "напрямую", "Выход клиентов", "один туннель за раз"],
+      [`${configured}/${TUNNELS.length}`, "Настроено", `каскад ${n} · DNS ${STATE_WORD[d.dns] || "—"}`],
+    ]),
     h("h2", {}, "Выход клиентов"),
-    h("div", { class: "card list" }, TUNNELS.map(([k, ico, title, sub]) =>
-      navItem("/tunnels/" + k, `${ico} ${title}`, `${STATE_WORD[d[k]] || d[k] || "—"} · ${sub}`, d[k] === "up"))),
+    TUNNELS.map(([k, , name, sub]) => card("/tunnels/" + k, name, d[k], [tag(sub, "", TUNNEL_ICON[k])], null)),
     h("h2", {}, "Ещё"),
-    h("div", { class: "card list" },
-      navItem("/tunnels/cascade", "🔀 Каскад портов", n ? `правил: ${n}` : "правил нет", n > 0),
-      navItem("/tunnels/dns", "🔐 Шифрованный DNS", `${STATE_WORD[d.dns] || d.dns || "—"} · DoH для клиентов`, d.dns === "up")),
+    card("/tunnels/cascade", "Каскад портов", n ? "up" : "none", [tag(n ? `правил: ${n}` : "правил нет", n ? "accent" : "", "shuffle")],
+      "порт этого сервера → другой сервер"),
+    card("/tunnels/dns", "Шифрованный DNS", d.dns, [tag("DoH", "", "lock-keyhole"), tag("dnscrypt-proxy")], "DNS клиентов — через DoH, DoT закрыт"),
     h("button", { class: "btn-danger btn-block", onclick: (ev) => quickAsk(ev.currentTarget, "Выключить все туннели (WARP, Xray, "
       + "tun2socks, exit-ноды)? Клиенты пойдут напрямую через сервер, настройки сохранятся.", "Туннели выключены",
     ["tunnels", "panic"]) }, "🚨 Всё напрямую"),
@@ -922,7 +1084,7 @@ route(/^\/tunnels\/(warp|xray)\/clients$/, async (ctx, kind) => {
   }) }, h("div", { class: "main" }, h("div", { class: "title" }, c.name), h("div", { class: "sub" }, `${c.ip} · ${c.on ? "через " + t : "напрямую"}`)),
   h("div", { class: "switch" + (c.on ? " on" : "") }))) : [h("div", { class: "empty" }, "Клиентов нет")]));
   draw();
-  ctx.put(h("h1", {}, `👥 Клиенты в ${t}`), hint(`Включено — клиент выходит через ${t}, выключено — напрямую через сервер.`), list,
+  ctx.put(title(`👥 Клиенты в ${t}`), hint(`Включено — клиент выходит через ${t}, выключено — напрямую через сервер.`), list,
     rows.length ? h("div", { class: "bar" },
       btn("✅ Все через " + t, (b) => quick(b, "Все через " + t, ["tunnels", "client", kind, "all"])),
       btn("➖ Все напрямую", (b) => quick(b, "Все напрямую", ["tunnels", "client", kind, "none"]))) : null);
@@ -939,7 +1101,7 @@ route(/^\/tunnels\/warp$/, async (ctx) => {
     const v = await sheet(`🔀 Бэкенд WARP — сейчас ${d.backend || "?"}`, opts);
     if (v) await runJob(ctx, `WARP: бэкенд ${v}`, ["warp", "backend", v]);
   }
-  ctx.put(h("h1", {}, "☁️ WARP"), logCard(r.log),
+  ctx.put(title("☁️ WARP"), logCard(r.log),
     conf ? switchRow("🩺 Health-check", "сам перезапускает WARP, если тот перестал отвечать", d.health,
       (on) => call("warp", "health", on ? "on" : "off")) : null,
     h("div", { class: "actions" },
@@ -954,13 +1116,13 @@ route(/^\/tunnels\/warp$/, async (ctx) => {
       btn("🔀 Бэкенд", backend),
       btn("📜 Журнал", () => go(d.backend === "usque" ? "/log/usque" : "/log/warp")),
       conf ? btn("🗑 Удалить", (b) => quickAsk(b, "Удалить WARP: аккаунт, профиль, службы?", "WARP удалён", ["warp", "remove"]), "btn-danger") : null),
-    hint(`📦 — ${conf ? "переустановить" : "установить"} и зарегистрироваться в Cloudflare (бэкенд ${d.backend || "?"})`
-      + (wg ? " · 📥 — свой wgcf-profile.conf, если регистрация отсюда не проходит" : "")));
+    hint(`«${conf ? "Переустановить" : "Установить"}» — зарегистрироваться в Cloudflare заново (бэкенд ${d.backend || "?"})`
+      + (wg ? " · «Импорт» — свой wgcf-profile.conf, если регистрация отсюда не проходит" : "")));
 });
 
 route(/^\/tunnels\/warp\/key$/, async (ctx) => {
   const key = h("input", { placeholder: "xxxxxxxx-xxxxxxxx-xxxxxxxx", autocapitalize: "off", autocomplete: "off" });
-  ctx.put(h("h1", {}, "🔑 Ключ Warp+"), h("label", {}, "В приложении 1.1.1.1: Аккаунт → Ключ"), key,
+  ctx.put(title("🔑 Ключ Warp+"), h("label", {}, "В приложении 1.1.1.1: Аккаунт → Ключ"), key,
     btn("Сохранить", (b) => {
       const v = key.value.trim();
       if (!/^[A-Za-z0-9]+-[A-Za-z0-9]+-[A-Za-z0-9]+$/.test(v)) return fail(new Error("Неверный формат ключа"));
@@ -970,7 +1132,7 @@ route(/^\/tunnels\/warp\/key$/, async (ctx) => {
 
 route(/^\/tunnels\/warp\/import$/, async (ctx) => {
   const ta = h("textarea", { placeholder: "[Interface]\nPrivateKey = …\n\n[Peer]\n…", style: "min-height:160px" });
-  ctx.put(h("h1", {}, "📥 Профиль WARP"),
+  ctx.put(title("📥 Профиль WARP"),
     h("div", { class: "card small" }, "Зарегистрируй профиль там, где Cloudflare доступен (например, shell.cloud.google.com):",
       h("pre", { style: "margin:8px 0 0" }, "./wgcf register --accept-tos && ./wgcf generate")),
     h("label", {}, "wgcf-profile.conf"), fileField(ta), ta,
@@ -988,7 +1150,7 @@ route(/^\/tunnels\/warp\/endpoint$/, async (ctx) => {
   const cc = h("input", { placeholder: "DE", maxlength: 2, autocapitalize: "characters", autocomplete: "off" });
   const find = (code) => runJob(ctx, `Поиск endpoint WARP${code ? ` (${code})` : ""}`, ["warp", "endpoint", ...(code ? [code] : [])],
     null, { onBack: back });
-  ctx.put(h("h1", {}, "🔎 Endpoint WARP"), hint("Перебирает адреса Cloudflare и ставит тот, что отвечает быстрее всех."),
+  ctx.put(title("🔎 Endpoint WARP"), hint("Перебирает адреса Cloudflare и ставит тот, что отвечает быстрее всех."),
     btn("🌍 Любая страна", () => find(""), "btn-primary btn-block"),
     h("label", {}, "Или страна выхода — две буквы (DE, NL, FI…)"), cc,
     btn("🔎 Искать в этой стране", () => {
@@ -1010,13 +1172,13 @@ route(/^\/tunnels\/xray$/, async (ctx) => {
       ({ label: `${d.balancer === k ? "🔘" : "⚪️"} ${k} — ${l}`, value: k })));
     if (v) await quick(b, "Балансировщик: " + v, ["xray", "balancer", v]);
   }
-  ctx.put(h("h1", {}, "🛰 Xray"), logCard(r.log),
+  ctx.put(title("🛰 Xray"), logCard(r.log),
     inst ? switchRow("🇷🇺 РФ напрямую", "российские сайты мимо Xray", d.ru,
       (on) => runJob(ctx, `РФ-сайты напрямую: ${on ? "вкл" : "выкл"}`, ["xray", "ru", on ? "on" : "off"])) : null,
     inst ? [h("h2", {}, "Выходы"),
       h("div", { class: "card list" }, tags.length ? tags.map((t) => h("div", { class: "item", onclick: () =>
         quickAsk(null, `Удалить выход ${t}?`, "Выход удалён", ["xray", "del", t]) },
-      h("div", { class: "main" }, h("div", { class: "title" }, t)), h("div", { class: "side" }, "🗑")))
+      h("div", { class: "main" }, h("div", { class: "title" }, t)), h("div", { class: "side bad" }, icon("trash-2"))))
         : h("div", { class: "empty" }, "Выходов нет — добавь ссылкой")),
       btn("➕ Добавить выход", () => go("/tunnels/xray/add"), "btn-block" + (tags.length ? "" : " btn-primary")),
       tags.length > 1 ? btn(`⚖️ Балансировщик: ${d.balancer || "off"}`, balancer, "btn-block") : null,
@@ -1041,7 +1203,7 @@ route(/^\/tunnels\/xray$/, async (ctx) => {
 
 route(/^\/tunnels\/xray\/add$/, async (ctx) => {
   const link = h("textarea", { placeholder: "vless://…", style: "min-height:110px", autocapitalize: "off" });
-  ctx.put(h("h1", {}, "➕ Выход Xray"), h("label", {}, "Ссылка на сервер: vless://, vmess://, trojan://, ss:// или hysteria2://"), link,
+  ctx.put(title("➕ Выход Xray"), h("label", {}, "Ссылка на сервер: vless://, vmess://, trojan://, ss:// или hysteria2://"), link,
     btn("Добавить", (b) => {
       const v = link.value.trim();
       if (!/^(vless|vmess|trojan|ss|hysteria2|hy2):\/\//.test(v)) return fail(new Error("Это не ссылка Xray"));
@@ -1053,7 +1215,7 @@ route(/^\/tunnels\/xray\/add$/, async (ctx) => {
 route(/^\/tunnels\/tun2socks$/, async (ctx) => {
   const d = (await call("t2s", "status")) || {};
   const proxy = h("input", { value: d.proxy || "", placeholder: "5.6.7.8:1080", autocapitalize: "off", autocomplete: "off" });
-  ctx.put(h("h1", {}, "🧦 tun2socks"),
+  ctx.put(title("🧦 tun2socks"),
     h("div", { class: "card" }, h("div", { class: "muted small" }, "Все клиенты выходят через внешний SOCKS5-прокси."),
       kv("Статус", d.up ? h("span", { class: "ok" }, "● включён") : h("span", { class: "muted" }, "○ выключен")),
       d.proxy ? kv("Прокси", d.proxy) : null),
@@ -1083,13 +1245,13 @@ route(/^\/tunnels\/exits$/, async (ctx) => {
     const [mode, node] = v.split("|");
     await quick(b, "Балансировка", ["exits", "balance", mode, ...(node ? [node] : [])]);
   }
-  ctx.put(h("h1", {}, "🚪 Exit-ноды"), hint("Клиенты выходят в интернет через другие AWG/WG-серверы."), logCard(r.log),
+  ctx.put(title("🚪 Exit-ноды"), hint("Клиенты выходят в интернет через другие AWG/WG-серверы."), logCard(r.log),
     h("h2", {}, "Ноды"),
     h("div", { class: "card list" }, nodes.length ? nodes.map((n) => h("div", { class: "item", onclick: () =>
       quickAsk(null, `Удалить ноду ${n.name}? Её клиенты перейдут на общий выход.`, `Нода ${n.name} удалена`, ["exits", "del", n.name]) },
-    h("div", { class: "dot" + (n.up ? " on" : " blocked") }),
+    h("div", { class: "dot" + (n.up ? " on" : " bad") }),
     h("div", { class: "main" }, h("div", { class: "title" }, n.name), h("div", { class: "sub" }, n.up ? "поднята" : "лежит")),
-    h("div", { class: "side" }, "🗑"))) : h("div", { class: "empty" }, "Нод нет")),
+    h("div", { class: "side bad" }, icon("trash-2")))) : h("div", { class: "empty" }, "Нод нет")),
     btn("➕ Добавить ноду", () => go("/tunnels/exits/add"), "btn-block" + (nodes.length ? "" : " btn-primary")),
     nodes.length ? [h("h2", {}, "Маршруты"),
       h("div", { class: "actions" },
@@ -1099,13 +1261,13 @@ route(/^\/tunnels\/exits$/, async (ctx) => {
         btn("⚖️ Балансировка", balance),
         btn("👥 Клиенты и ноды", () => go("/tunnels/exits/clients")),
         btn("📜 Журнал", () => go("/log/exits"))),
-      hint("▶️ — все клиенты через ноды · 🎯 — только выбранные, остальные напрямую")] : null);
+      hint("«Все клиенты» — весь трафик через ноды · «Выбранные» — только отмеченные, остальные напрямую")] : null);
 });
 
 route(/^\/tunnels\/exits\/add$/, async (ctx) => {
   const name = h("input", { placeholder: "de1", maxlength: 6, autocapitalize: "off", autocomplete: "off" });
   const ta = h("textarea", { placeholder: "[Interface]\n…\n\n[Peer]\nEndpoint = …", style: "min-height:160px" });
-  ctx.put(h("h1", {}, "➕ Exit-нода"),
+  ctx.put(title("➕ Exit-нода"),
     h("label", {}, "Имя: латиница, цифры, _, до 6 символов"), name,
     h("label", {}, "Клиентский конфиг AWG/WG этой ноды"), fileField(ta), ta,
     hint("Маршрут всего сервера конфиг не заберёт: awg2 ставит Table = off."),
@@ -1129,7 +1291,7 @@ route(/^\/tunnels\/exits\/clients$/, async (ctx) => {
       .map(([val, l]) => ({ label: `${cur === val ? "🔘" : "⚪️"} ${l}`, value: val })));
     if (v && v !== cur) await quick(null, "Выход изменён", ["exits", "client", c.name, v]);
   }
-  ctx.put(h("h1", {}, "👥 Клиенты и ноды"),
+  ctx.put(title("👥 Клиенты и ноды"),
     hint((d && d.up ? "Нажми клиента, чтобы выбрать его выход." : "Маршруты выключены — выбор вступит в силу, когда их включишь.")
       + (mode !== "peers" ? " Выбор переводит маршруты в режим «выбранные клиенты»: остальные остаются на общем выходе." : "")),
     h("div", { class: "card list" }, cl.rows.length ? cl.rows.map((c) => h("div", { class: "item", onclick: () => pick(c) },
@@ -1140,13 +1302,13 @@ route(/^\/tunnels\/exits\/clients$/, async (ctx) => {
 // Каскад портов
 route(/^\/tunnels\/cascade$/, async (ctx) => {
   const rows = (await call("cascade", "list")) || [];
-  ctx.put(h("h1", {}, "🔀 Каскад портов"), hint("Трафик на порт этого сервера уходит на другой сервер."),
+  ctx.put(title("🔀 Каскад портов"), hint("Трафик на порт этого сервера уходит на другой сервер."),
     h("div", { class: "card list" }, rows.length ? rows.map((x) => h("div", { class: "item", onclick: () =>
       quickAsk(null, `Удалить правило ${x.proto.toUpperCase()} ${x.in} → ${x.dst}:${x.out}?`, "Правило удалено", ["cascade", "del", x.proto, String(x.in)]) },
-    h("div", { class: "dot" + (x.applied ? " on" : " blocked") }),
+    h("div", { class: "dot" + (x.applied ? " on" : " bad") }),
     h("div", { class: "main" }, h("div", { class: "title" }, `${x.proto.toUpperCase()} ${x.in} → ${x.dst}:${x.out}`),
       h("div", { class: "sub" }, [x.applied ? "применено" : "записано, но в iptables нет", x.comment].filter(Boolean).join(" · "))),
-    h("div", { class: "side" }, "🗑"))) : h("div", { class: "empty" }, "Правил нет")),
+    h("div", { class: "side bad" }, icon("trash-2")))) : h("div", { class: "empty" }, "Правил нет")),
     btn("➕ Добавить правило", () => go("/tunnels/cascade/add"), "btn-primary btn-block"),
     h("div", { class: "actions", style: "margin-top:8px" },
       rows.length ? btn("🔁 Переприменить", (b) => quick(b, "Правила переприменены", ["cascade", "reapply"])) : null,
@@ -1166,7 +1328,7 @@ route(/^\/tunnels\/cascade\/add$/, async (ctx) => {
   const dst = h("input", { placeholder: "5.6.7.8", inputmode: "decimal", autocomplete: "off" });
   const pout = h("input", { type: "number", min: 1, max: 65535, placeholder: "тот же" });
   const cm = h("input", { maxlength: 60, placeholder: "например, имя сервера" });
-  ctx.put(h("h1", {}, "➕ Правило каскада"),
+  ctx.put(title("➕ Правило каскада"),
     h("label", {}, "Протокол — UDP для AWG и WireGuard"), protoBox,
     h("label", {}, "Порт на этом сервере"), pin,
     h("label", {}, "Публичный IPv4 сервера назначения"), dst,
@@ -1192,7 +1354,7 @@ route(/^\/tunnels\/dns$/, async (ctx) => {
       [{ label: "⏹ Выключить", value: "off" }, { label: "🗑 Удалить совсем, с dnscrypt-proxy", value: "purge", cls: "bad" }]);
     if (v) await quick(b, "DNS выключен", ["dns", "remove", ...(v === "purge" ? ["purge"] : [])]);
   }
-  ctx.put(h("h1", {}, "🔐 Шифрованный DNS"), hint("Запросы клиентов идут через dnscrypt-proxy по DoH, DoT (853) закрыт."),
+  ctx.put(title("🔐 Шифрованный DNS"), hint("Запросы клиентов идут через dnscrypt-proxy по DoH, DoT (853) закрыт."),
     logCard(r.log),
     inst ? [h("h2", {}, "Резолверы"),
       h("div", { class: "card list" }, (d.presets || []).map((p) => h("div", { class: "item", onclick: () =>
@@ -1208,13 +1370,13 @@ route(/^\/tunnels\/dns$/, async (ctx) => {
       inst ? btn("🔄 Перезапустить", (b) => quick(b, "DNS перезапущен", ["dns", "restart"])) : null,
       btn("📜 Журнал", () => go("/log/dns")),
       inst ? btn("⏹ Выключить", off, "btn-danger") : null),
-    inst ? null : hint("⚠️ Принудительно — если на сервере уже работает свой DNS (Pi-hole, Unbound, bind)"));
+    inst ? null : hint("«Принудительно» — если на сервере уже работает свой DNS (Pi-hole, Unbound, bind)"));
 });
 
 route(/^\/tunnels\/dns\/manual$/, async (ctx) => {
   const d = (await call("dns", "status")) || {};
   const names = h("input", { value: d.upstream || "", placeholder: "cloudflare, google", autocapitalize: "off", autocomplete: "off" });
-  ctx.put(h("h1", {}, "✏️ Резолверы"),
+  ctx.put(title("✏️ Резолверы"),
     h("label", {}, "Имена через запятую — из списка public-resolvers (github.com/DNSCrypt/dnscrypt-resolvers)"), names,
     btn("Сохранить", (b) => {
       const v = names.value.trim();
@@ -1223,10 +1385,6 @@ route(/^\/tunnels\/dns\/manual$/, async (ctx) => {
     }, "btn-primary btn-block"));
 });
 
-// Строка меню раздела: заголовок, пояснение, «›»
-const menuItem = (title, sub, onclick) => h("div", { class: "item", onclick },
-  h("div", { class: "main" }, h("div", { class: "title" }, title), sub ? h("div", { class: "sub" }, sub) : null),
-  h("div", { class: "side" }, "›"));
 // Внешняя ссылка — браузером Telegram, не внутри панели
 const extLink = (url, text) => h("a", { href: url, onclick: (ev) => {
   ev.preventDefault();
@@ -1236,12 +1394,12 @@ const extLink = (url, text) => h("a", { href: url, onclick: (ev) => {
 // ── Диагностика ───────────────────────────────────────────
 route(/^\/diag$/, async (ctx) => {
   const r = await callR(["diag", "status"]);
-  ctx.put(h("h1", {}, "🩺 Диагностика"), logCard(r.log),
+  ctx.put(title("🩺 Диагностика"), logCard(r.log),
     btn("🔄 Обновить сводку", () => render(), "btn-block"),
     h("h2", {}, "Проверки"),
     h("div", { class: "card list" },
       menuItem("🌍 Домены мимикрии: мир", "какие домены пула отвечают отсюда", () => runJob(ctx, "Домены мимикрии (мир)", ["diag", "domains", "world"])),
-      menuItem("🇷🇺 Домены мимикрии: Россия", "пул для серверов в РФ", () => runJob(ctx, "Домены мимикрии (Россия)", ["diag", "domains", "ru"])),
+      menuItem("📍 Домены мимикрии: Россия", "пул для серверов в РФ", () => runJob(ctx, "Домены мимикрии (Россия)", ["diag", "domains", "ru"])),
       menuItem("🎯 Тест мимикрии", "захват первых пакетов клиента", () => go("/diag/sniff")),
       menuItem("🔍 DPI у клиента", "проверка со стороны клиента", () => go("/diag/dpi"))),
     h("h2", {}, "Ещё"),
@@ -1251,7 +1409,7 @@ route(/^\/diag$/, async (ctx) => {
 });
 
 route(/^\/diag\/logs$/, async (ctx) => {
-  ctx.put(h("h1", {}, "📜 Журналы"),
+  ctx.put(title("📜 Журналы"),
     h("div", { class: "card list" }, Object.entries(LOGS).map(([name, label]) => menuItem(label, name, () => go("/log/" + name)))));
 });
 
@@ -1261,7 +1419,7 @@ route(/^\/diag\/sniff$/, async (ctx) => {
     if (!await confirmTg(`На устройстве ${name} отключись от VPN. Нажми OK — и в течение 20 секунд подключись снова.`)) return;
     await runJob(ctx, `Тест мимикрии: ${name}`, ["diag", "sniff", name], null, { onBack: back });
   }
-  ctx.put(h("h1", {}, "🎯 Тест мимикрии"),
+  ctx.put(title("🎯 Тест мимикрии"),
     hint("Сервер 20 секунд слушает первые пакеты клиента и проверяет, видны ли пакеты мимикрии и на что они похожи."),
     rows.length ? [h("h2", {}, "Клиент"),
       h("div", { class: "card list" }, rows.slice(0, 60).map((c) =>
@@ -1276,7 +1434,7 @@ const DPI_CMD = {
 };
 route(/^\/diag\/dpi$/, async (ctx) => {
   const code = (text) => h("pre", { style: "cursor:pointer", onclick: () => copy(text) }, text);
-  ctx.put(h("h1", {}, "🔍 DPI у клиента"),
+  ctx.put(title("🔍 DPI у клиента"),
     hint("Запускать на устройстве клиента, не на сервере. Нажми на команду — она скопируется."),
     h("label", {}, "Docker"), code(DPI_CMD.docker),
     h("label", {}, "Python"), code(DPI_CMD.python),
@@ -1335,7 +1493,7 @@ route(/^\/backup$/, async (ctx) => {
       go("/backup/restore");
     }
   }
-  ctx.put(h("h1", {}, "💾 Бэкапы"),
+  ctx.put(title("💾 Бэкапы"),
     hint("Полный бэкап: сервер и клиенты, аккаунт WARP, WG + обфускатор, настройки туннелей. Хранятся в ~/awg_backup на сервере."),
     h("div", { class: "actions" },
       btn("💾 Создать", () => runJob(ctx, "Бэкап", ["backup", "create"], (d) => {
@@ -1346,11 +1504,11 @@ route(/^\/backup$/, async (ctx) => {
       btn("📤 Из файла", () => file.click())), file,
     h("h2", {}, "На сервере"),
     h("div", { class: "card list" }, rows.length ? rows.map((b) => h("div", { class: "item", onclick: () => pick(b) },
-      h("div", { style: "font-size:20px;width:28px;text-align:center;flex:none" }, b.full ? "📁" : "🗜"),
+      h("div", { class: "ibox" }, icon(b.full ? "folder" : "file-archive")),
       h("div", { class: "main" }, h("div", { class: "title" }, fmtTime(b.time)),
         h("div", { class: "sub" }, `${b.full ? "полный, каталог" : "архив"} · ${fmtBytes(b.size)}`)),
-      h("div", { class: "side" }, "›"))) : h("div", { class: "empty" }, "Бэкапов на сервере нет")),
-    hint("📁 — полный бэкап каталогом, 🗜 — архив. Восстановить можно и из архива прежнего бота."));
+      h("div", { class: "side" }, icon("chevron-right")))) : h("div", { class: "empty" }, "Бэкапов на сервере нет")),
+    hint("Полный бэкап лежит каталогом, рядом — его архив. Восстановить можно и из архива прежнего бота."));
 });
 
 route(/^\/backup\/restore$/, async (ctx) => {
@@ -1360,7 +1518,7 @@ route(/^\/backup\/restore$/, async (ctx) => {
   const meta = Object.fromEntries((d.meta || "").split("\n").filter((l) => l.includes("="))
     .map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
   const opt = { wgobf: !!d.wgobf, tunnels: !!d.tunnels };
-  ctx.put(h("h1", {}, "♻️ Восстановление"),
+  ctx.put(title("♻️ Восстановление"),
     h("div", { class: "card" },
       kv("Файл", rs.name),
       meta.timestamp ? kv("Создан", fmtStamp(meta.timestamp)) : null,
@@ -1411,7 +1569,7 @@ route(/^\/update$/, async (ctx) => {
       haptic(); toast(to === "beta" ? "Канал: бета" : "Канал: стабильный"); render();
     });
   }
-  ctx.put(h("h1", {}, "⬆️ Обновление"),
+  ctx.put(title("⬆️ Обновление"),
     h("div", { class: "card" },
       kv("awg2", d.version || "?"),
       kv("Канал", beta ? "🧪 бета — ранние сборки" : "стабильный"),
@@ -1428,7 +1586,7 @@ route(/^\/update$/, async (ctx) => {
       btn("♻️ Переустановить", () => jobAsk(ctx, "Поставить версию из канала поверх текущей? Если в канале версия старше — это откат.",
         "Переустановка awg2", ["update", "install", "force"])),
       btn(beta ? "🔀 На стабильный" : "🧪 Бета-канал", channel)),
-    hint("♻️ Переустановить — заново из текущего канала, даже без новой версии."));
+    hint("«Переустановить» — заново из текущего канала, даже без новой версии."));
 });
 
 // ── Журналы служб ─────────────────────────────────────────
@@ -1440,7 +1598,7 @@ const LOGS = { manager: "awg2 — действия", install: "компонен�
 route(/^\/log\/([a-z0-9-]+)$/, async (ctx, name) => {
   const r = await callR(["log", name, "150"]);
   const pre = h("pre", { style: "max-height:70vh" }, (r.log || "").trim() || "пусто");
-  ctx.put(h("h1", {}, "📜 " + (LOGS[name] || name)), pre, btn("🔄 Обновить", () => render(), "btn-block"));
+  ctx.put(title("📜 " + (LOGS[name] || name)), pre, btn("🔄 Обновить", () => render(), "btn-block"));
   pre.scrollTop = pre.scrollHeight;
 });
 
@@ -1449,10 +1607,15 @@ if (tg) {
   tg.ready();
   tg.expand();
   if (tg.BackButton) tg.BackButton.onClick(back);
+  // Тема Telegram сменилась, а своей пользователь не выбирал — следуем за ней
+  if (tg.onEvent) tg.onEvent("themeChanged", () => { if (!pref("theme", "")) { applyTheme(autoTheme()); drawTop(); } });
 }
 window.addEventListener("hashchange", render);
+drawTop();
 if (!tg || !tg.initData) {
   root.replaceChildren(h("div", { class: "empty" }, "Открой панель кнопкой в боте"));
 } else {
   render();
+  // Версия в шапке — для экранов, открытых не с главной
+  call("version").then((v) => { if (!S.version && v) { S.version = v.version; drawTop(); } }).catch(() => {});
 }

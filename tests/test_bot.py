@@ -656,6 +656,10 @@ async def run():
 
         async with http.get(base + "/app.js") as r:
             chk("скрипт панели отдаётся", r.status == 200 and "runJob" in await r.text(), r.status)
+        async with http.get(base + "/icons.js") as r:
+            chk("иконки панели отдаются", r.status == 200 and "const ICONS" in await r.text(), r.status)
+        async with http.get(base + "/panel.py") as r:
+            chk("кроме страницы, скрипта и иконок — ничего", r.status == 404, r.status)
         st, body = await api_("/api/call", {"args": ["status"]})
         chk("панель: общий вызов awg2 api", st == 200 and body["ok"] and body["data"].get("version"), [st, str(body)[:200]])
         st, body = await api_("/api/call", {"args": ["job", "list"]})

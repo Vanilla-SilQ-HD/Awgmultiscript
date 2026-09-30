@@ -49,8 +49,9 @@ if len(sys.argv) > 1:
     env["AWG2_SH"] = os.path.abspath(sys.argv[1])
 
 keep = os.environ.get("AWG_PANEL_SHOTS")
+THEMES = {"lite": "light", "pro": "dark", "none": "light"}      # обе темы Telegram
 for profile in ("lite", "pro", "none"):
-    print(f"Профиль сервера: {profile}")
+    print(f"Профиль сервера: {profile}, тема {THEMES[profile]}")
     out = os.path.join(keep, profile) if keep else tempfile.mkdtemp(prefix="panel-shots.")
     os.makedirs(out, exist_ok=True)
     stand = subprocess.Popen([sys.executable, os.path.join(HERE, "panel_stand.py")], env=dict(env, PROFILE=profile),
@@ -67,7 +68,7 @@ for profile in ("lite", "pro", "none"):
         _, port, init, err, root = ready[:5]
         chk("стенд панели поднялся", err == "-", err)
         try:
-            run = subprocess.run([node, os.path.join(HERE, "panel_drive.js"), port, init, out, "dark", profile, root],
+            run = subprocess.run([node, os.path.join(HERE, "panel_drive.js"), port, init, out, THEMES[profile], profile, root],
                                  env=env, capture_output=True, text=True, timeout=400)
             output = run.stdout + run.stderr
         except subprocess.TimeoutExpired:
