@@ -671,7 +671,31 @@ async def run():
         chk("приглашённому админу владельческое закрыто", st == 403 and "владелец" in body.get("error", ""), [st, body])
         st, body = await api_("/api/call", {"args": ["cert", "remove"]}, uid=333)
         chk("…и сертификат тоже", st == 403, [st, body])
-        admins.remove(333, 111)
+        st, body = await api_("/api/bot/info", {}, uid=333)
+        chk("панель: приглашённому — сводка бота без списка админов",
+            st == 200 and body.get("owner") is False and "admins" not in body and body.get("invited") == 1, [st, body])
+        st1, _ = await api_("/api/bot/invite", {}, uid=333)
+        st2, _ = await api_("/api/bot/icons", {"action": "off"}, uid=333)
+        st3, _ = await api_("/api/bot/webapp/restart", {}, uid=333)
+        chk("панель: приглашения, иконки и сервер панели — только владельцу", (st1, st2, st3) == (403, 403, 403),
+            (st1, st2, st3))
+        st, body = await api_("/api/bot/info", {})
+        chk("панель: владельцу — список админов с приглашённым",
+            st == 200 and body["owner"] and [a["uid"] for a in body["admins"]["invited"]] == [333], [st, body])
+        st, body = await api_("/api/bot/invite", {})
+        chk("панель: приглашение — ссылка на бота с одноразовым токеном",
+            st == 200 and f"?start={admins.INVITE_PREFIX}" in body.get("link", "") and admins.pending_invites() == 1,
+            [st, body])
+        st, body = await api_("/api/bot/invites/revoke", {})
+        chk("панель: приглашения гасятся", st == 200 and body.get("revoked") == 1 and admins.pending_invites() == 0, body)
+        st, body = await api_("/api/bot/admin/del", {"uid": 333})
+        chk("панель: владелец отзывает доступ", st == 200 and 333 not in admins.invited_ids(), [st, body])
+        st, body = await api_("/api/me", {})
+        chk("панель: /api/me — время старта бота (панель по нему ждёт перезапуск)",
+            isinstance(body.get("started"), int) and body["started"] > 0, body)
+        st, body = await api_("/api/wgobf/bundle", {"name": "nobody"})
+        chk("панель: комплект обфускатора без обфускатора — понятная ошибка",
+            st == 200 and body["ok"] is False and body.get("error"), [st, body])
 
         st, body = await api_("/api/clients", {})
         alice = next((c for c in body.get("rows") or [] if c["name"] == "alice"), {})

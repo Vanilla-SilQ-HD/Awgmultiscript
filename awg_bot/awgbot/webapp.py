@@ -222,7 +222,7 @@ class MiniApp:
     async def _me(self, request: web.Request) -> web.Response:
         user = self._user(request)
         return web.json_response({"id": user["id"], "name": user.get("first_name") or "",
-                                  "owner": access.is_owner(int(user["id"])), "bot": __version__})
+                                  "owner": access.is_owner(int(user["id"])), "bot": __version__, "started": STARTED})
 
     async def _status(self, request: web.Request) -> web.Response:
         self._user(request)
@@ -233,3 +233,4 @@ class MiniApp:
 
 
 SERVER = MiniApp()
+STARTED = int(time.time())          # панель по нему видит, что бот перезапустился

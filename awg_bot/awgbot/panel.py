@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import re
 from typing import Any, Callable
@@ -19,9 +20,11 @@ from typing import Any, Callable
 from aiogram.types import BufferedInputFile, FSInputFile
 from aiohttp import web
 
-from . import access, api, media, store
+from . import __version__, access, admins, api, icons, media, store
 from .sections import backup as bk
+from .sections import botself
 from .sections import clients as cls
+from .sections import wgobf
 
 # Команды awg2 api, открытые панели; первое слово — раздел
 ALLOWED = {"status", "version", "server", "module", "clients", "client", "mimicry", "diag", "backup",
@@ -38,7 +41,23 @@ UserOf = Callable[[web.Request], dict]
 
 
 def _bad(text: str) -> web.HTTPBadRequest:
-    return web.HTTPBadRequest(text=f'{{"error": "{text}"}}', content_type="application/json")
+    return web.HTTPBadRequest(text=json.dumps({"error": text}, ensure_ascii=False), content_type="application/json")
+
+
+def _owner(user: dict) -> None:
+    if not access.is_owner(int(user["id"])):
+        raise web.HTTPForbidden(text='{"error": "только владелец"}', content_type="application/json")
+
+
+def _read(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+_tasks: set[asyncio.Task] = set()       # отложенный перезапуск сервера панели
 
 
 async def _body(request: web.Request) -> dict:
@@ -228,7 +247,112 @@ def setup(app: web.Application, user_of: UserOf) -> None:
             await bot.send_document(uid, BufferedInputFile(data, filename=name),
                                     caption="💾 В бэкапе приватные ключи — храни как пароль")
             return web.json_response({"ok": True})
-        raise _bad("what: conf | export | zip | backup")
+        if what in ("wgobf", "wgobf_zip"):
+            send = wgobf.send_bundle if what == "wgobf" else wgobf.send_archive
+            await send(bot, uid, _name(body))
+            return web.json_response({"ok": True})
+        raise _bad("what: conf | export | zip | backup | wgobf | wgobf_zip")
+
+    # ── WG + обфускатор: комплект клиента на экран ──
+    @route("/api/wgobf/bundle")
+    async def _wgobf_bundle(request: web.Request, user: dict, body: dict) -> web.Response:
+        r = await api.call("wgobf", "bundle", _name(body))
+        if not r.ok or not isinstance(r.data, dict):
+            return _result(r)
+        files = {f["name"]: f["path"] for f in r.data.get("files") or []}
+        direct = _read(files.get("wg-direct.conf", ""))
+        png = media.qr_png(direct) if direct else None
+        return web.json_response({"ok": True, "link": (r.data.get("phobos") or "").strip(),
+                                  "conf": _read(files.get("phobos.conf", "")), "direct": direct,
+                                  "png": base64.b64encode(png).decode() if png else None})
+
+    # ── Бот: админы, оформление, сервер панели ──
+    @route("/api/bot/info")
+    async def _bot_info(request: web.Request, user: dict, body: dict) -> web.Response:
+        from . import webapp                                # webapp сам подключает панель
+        owner = access.is_owner(int(user["id"]))
+        st = await api.data("bot", "status", default={}) or {}
+        srv = webapp.SERVER
+        d: dict[str, Any] = {
+            "ok": True, "version": __version__, "owner": owner, "proxy": st.get("proxy") or "",
+            "owners": len(access.owners()), "invited": len(admins.invited_ids()),
+            "icons": {"active": icons.active(), "pack": icons.pack(), "count": len(icons.mapping()),
+                      "total": len(icons.TEMPLATE), "default": icons.DEFAULT_PACK},
+            "webapp": {"running": srv.running, "url": srv.url, "error": srv.error, "port": webapp.configured_port()},
+        }
+        if owner:
+            d["admins"] = {"owners": sorted(access.owners()), "pending": admins.pending_invites(),
+                           "invited": [{"uid": a.uid, "username": a.username, "added_at": a.added_at}
+                                       for a in admins.list_invited()]}
+        return web.json_response(d)
+
+    @route("/api/bot/invite")
+    async def _invite(request: web.Request, user: dict, body: dict) -> web.Response:
+        _owner(user)
+        token, exp = admins.create_invite(int(user["id"]))
+        if token is None:
+            raise _bad(str(exp))
+        me = await request.app["bot"].me()
+        return web.json_response({"ok": True, "expires": exp,
+                                  "link": f"https://t.me/{me.username}?start={admins.INVITE_PREFIX}{token}"})
+
+    @route("/api/bot/admin/del")
+    async def _admin_del(request: web.Request, user: dict, body: dict) -> web.Response:
+        _owner(user)
+        uid = str(body.get("uid") or "")
+        if not uid.isdigit():
+            raise _bad("uid — число")
+        ok, msg = admins.remove(int(uid), removed_by=int(user["id"]))
+        return web.json_response({"ok": ok, "message": msg, "error": "" if ok else msg})
+
+    @route("/api/bot/invites/revoke")
+    async def _revoke(request: web.Request, user: dict, body: dict) -> web.Response:
+        _owner(user)
+        return web.json_response({"ok": True, "revoked": admins.revoke_invites()})
+
+    @route("/api/bot/icons")
+    async def _icons(request: web.Request, user: dict, body: dict) -> web.Response:
+        """Иконки custom emoji в боте: включить набор и проверить на деле —
+        пробным сообщением в чат (не показал Telegram — middleware выключит)."""
+        _owner(user)
+        bot, uid, action = request.app["bot"], int(user["id"]), body.get("action")
+        if action == "off":
+            icons.disable("выключены владельцем")
+            return web.json_response({"ok": True, "active": False})
+        if action == "pack":
+            m = botself.PACK_RE.search(str(body.get("name") or icons.DEFAULT_PACK).strip())
+            if not m:
+                raise _bad("нужна ссылка вида t.me/addemoji/ИМЯ")
+            name, mapping = await botself.pack_icons(bot, m.group(1))
+            if not mapping:
+                raise _bad(name)
+        elif action == "on":
+            name, mapping = icons.pack(), icons.mapping()
+            if not mapping:
+                raise _bad("набор иконок ещё не выбран")
+        else:
+            raise _bad("action: pack | on | off")
+        icons.save(name, mapping, True)
+        sample = [e for e in icons.TEMPLATE if e in mapping][:8]
+        await bot.send_message(uid, "🎨 Проверка иконок из панели: " + " ".join(sample))
+        have, miss = icons.coverage(mapping)
+        return web.json_response({"ok": True, "active": icons.active(), "pack": name, "have": have, "miss": miss})
+
+    @route("/api/bot/webapp/restart")
+    async def _webapp_restart(request: web.Request, user: dict, body: dict) -> web.Response:
+        """Сервер панели — заново (новый сертификат, порт, удаление): ответ
+        уходит сейчас, перезапуск — через секунду."""
+        _owner(user)
+        from . import webapp
+        bot = request.app["bot"]
+
+        async def later() -> None:
+            await asyncio.sleep(1)
+            await webapp.SERVER.start(bot)
+        task = asyncio.get_running_loop().create_task(later())
+        _tasks.add(task)
+        task.add_done_callback(_tasks.discard)
+        return web.json_response({"ok": True})
 
     # ── Архив бэкапа с телефона: тело запроса — сам файл ──
     async def _upload(request: web.Request) -> web.Response:

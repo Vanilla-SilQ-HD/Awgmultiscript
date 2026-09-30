@@ -30,6 +30,14 @@ fake_acme()
 with open(os.path.join(BIN, "curl"), "w") as f:
     f.write('#!/usr/bin/env bash\nfor a in "$@"; do [[ "$a" == *http_code* ]] && { echo 204; exit 0; }\n'
             '  [[ "$a" == 0-4095 ]] && { echo \'VERSION="v9.9.9"\'; exit 0; }; done\nexit 1\n')
+# wg умеет ключи (клиенты WG + обфускатор), wg-quick — strip
+with open(os.path.join(BIN, "wg"), "w") as f:
+    f.write('#!/usr/bin/env bash\necho "wg $*" >> "$CALLS"\ncase "$1" in\n'
+            '  genkey|genpsk) head -c 32 /dev/urandom | base64 ;;\n  pubkey) sha256sum | head -c 43; echo "=" ;;\nesac\nexit 0\n')
+with open(os.path.join(BIN, "wg-quick"), "w") as f:
+    f.write('#!/usr/bin/env bash\necho "wg-quick $*" >> "$CALLS"\n[[ "$1" == strip ]] && printf "[Interface]\\nPrivateKey = x\\n"\nexit 0\n')
+for tool in ("wg", "wg-quick"):
+    os.chmod(os.path.join(BIN, tool), 0o755)
 # Модуль ядра «собран» — иначе awg2 не создаст сервер
 for tool in ("modinfo", "modprobe"):
     with open(os.path.join(BIN, tool), "w") as f:
@@ -63,6 +71,18 @@ if PROFILE != "none":
         f.write("awg-exit-n1\n")
     with open(ACTIVE, "w") as f:
         f.write("awg-exits-routing.service\n")
+    # Работает WG + обфускатор (STUN, чистый WG разрешён), клиентов пока нет
+    os.makedirs(os.path.join(ROOT, "etc/awg-wgobf"), exist_ok=True)
+    with open(os.path.join(ROOT, "etc/awg-wgobf/state"), "w") as f:
+        f.write("PORT=41000\nENDPOINT=203.0.113.10\nMASKING=STUN\nALLOW_CLEAN=1\nNET=10.66.66.0/24\nKEY=s3cretObfKey\n"
+                "SERVER_PUB=SRVPUBKEYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=\nWG_PORT=51900\nMTU=1380\nDNS=1.1.1.1, 1.0.0.1\n")
+    os.makedirs(os.path.join(ROOT, "etc/wireguard"), exist_ok=True)
+    with open(os.path.join(ROOT, "etc/wireguard/wgobf0.conf"), "w") as f:
+        f.write("[Interface]\nPrivateKey = X\nAddress = 10.66.66.1/24\nListenPort = 51900\n")
+    with open(ACTIVE, "a") as f:
+        f.write("awg-wgobf.service\n")
+    with open(LINKS, "a") as f:
+        f.write("wgobf0\n")
 
 with socket.socket() as s:
     s.bind(("127.0.0.1", 0))
@@ -79,13 +99,23 @@ sys.path.insert(0, os.path.join(HERE, "..", "awg_bot"))
 from aiogram import Bot  # noqa: E402
 from aiogram.client.session.base import BaseSession  # noqa: E402
 
-from awgbot import access, store, webapp  # noqa: E402
+from aiogram.types import Sticker, StickerSet, User  # noqa: E402
+
+from awgbot import access, admins, icons, store, webapp  # noqa: E402
 from awgbot.config import load_config  # noqa: E402
 
 
 class Session(BaseSession):
     async def make_request(self, bot, method, timeout=None):
-        print("TG", type(method).__name__, getattr(method, "chat_id", ""), flush=True)
+        name = type(method).__name__
+        print("TG", name, getattr(method, "chat_id", ""), flush=True)
+        if name == "GetMe":                          # ссылка-приглашение
+            return User(id=123456, is_bot=True, first_name="Toolza", username="toolza_test_bot")
+        if name == "GetStickerSet":                  # набор иконок: по иконке на эмодзи бота
+            return StickerSet(name=method.name, title="Icons", sticker_type="custom_emoji", stickers=[
+                Sticker(file_id=f"f{i}", file_unique_id=f"u{i}", type="custom_emoji", width=100, height=100,
+                        is_animated=False, is_video=False, emoji=e, custom_emoji_id=str(5000 + i))
+                for i, e in enumerate(icons.TEMPLATE)])
         return True
 
     async def stream_content(self, *args, **kwargs):
@@ -110,6 +140,7 @@ async def main():
     subprocess.run([API, "api", "cert", "issue", "ip"], capture_output=True)
     if PROFILE != "none":
         store.set_note("alice", "телефон Анны")
+        admins.add(333, 111, "helper")
     await webapp.SERVER.start(Bot(TOKEN, session=Session()))
     print("READY", PORT, init_data(111), webapp.SERVER.error or "-", ROOT, flush=True)
     while True:

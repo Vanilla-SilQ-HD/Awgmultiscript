@@ -87,6 +87,7 @@ const EMOJI_ICON = {
   "📅": "calendar-clock", "♾": "infinity", "🚪": "door-open", "☁": "cloud", "🛰": "satellite", "🧦": "waypoints",
   "🔐": "lock-keyhole", "🧪": "flask-conical", "🖥": "server", "🛡": "shield", "📁": "folder", "🗜": "file-archive",
   "◀": "arrow-left", "✅": "circle-check", "❌": "circle-x", "✖": "x", "🔃": "arrow-down-up", "📂": "folder",
+  "👮": "user", "🎨": "palette", "📱": "smartphone", "🔗": "share-2", "🙋": "user-plus", "🧯": "eraser",
 };
 const EMOJI_RE = /^(\p{Extended_Pictographic})\uFE0F?\s*/u;
 function withIcon(label) {
@@ -117,6 +118,8 @@ const act = (ic, label, onclick, cls) => h("button", { class: cls || null,
   onclick: (ev) => { ev.stopPropagation(); onclick(ev.currentTarget); } }, icon(ic), label);
 const tabsBar = (items, cur, pick) => h("div", { class: "tabs" }, items.map(([k, label, n]) =>
   h("button", { class: k === cur ? "on" : null, onclick: () => pick(k) }, label, n != null ? h("span", { class: "n" }, n) : null)));
+const segText = (items, cur, pick) => h("div", { class: "seg" }, items.map(([k, label]) =>
+  h("button", { class: k === cur ? "on" : null, onclick: () => pick(k) }, label)));
 const segBar = (items, cur, pick) => h("div", { class: "seg" }, items.map(([k, ic, label]) =>
   h("button", { class: k === cur ? "on" : null, "aria-label": label, title: label, onclick: () => pick(k) }, icon(ic))));
 // Мелкие настройки вида — только в этом браузере
@@ -149,8 +152,6 @@ applyLook();
 function lookSheet() {
   const box = h("div", { class: "sheet" });
   const bg = h("div", { class: "sheet-bg", onclick: (ev) => { if (ev.target === bg) bg.remove(); } }, box);
-  const segText = (items, cur, pick) => h("div", { class: "seg" }, items.map(([k, label]) =>
-    h("button", { class: k === cur ? "on" : null, onclick: () => pick(k) }, label)));
   function draw() {
     const scale = scalePref();
     const size = h("label", {}, `Размер — ${scale}%`);
@@ -406,6 +407,8 @@ function fileField(ta) {
   return [input, h("button", { class: "btn-block", style: "margin-top:0", onclick: () => input.click() }, "📎 Выбрать файл"),
     h("label", {}, "или вставь текст")];
 }
+// Кнопка «Скопировать» — с иконкой копирования, а не списка
+const copyBtn = (label, text, cls = "btn-block") => h("button", { class: cls, onclick: () => copy(text) }, icon("copy"), label);
 const btn = (label, onclick, cls) => h("button", { class: cls || null, onclick: (ev) => onclick(ev.currentTarget) }, label);
 const hint = (text) => h("div", { class: "muted small", style: "margin:8px 4px" }, text);
 const IP_RE = /^(\d{1,3}\.){3}\d{1,3}$/;
@@ -430,8 +433,8 @@ const SECTIONS = [
   ["🩺", "Диагностика", "/diag", "проверки, журналы"],
   ["💾", "Бэкапы", "/backup", "сохранить, вернуть"],
   ["⬆️", "Обновление", "/update", "версии, канал"],
-  ["🛡", "Обфускатор", null, "WG как Phobos"],
-  ["🤖", "Бот", null, "прокси, админы"],
+  ["🛡", "Обфускатор", "/wgobf", "WG как Phobos"],
+  ["🤖", "Бот", "/bot", "прокси, админы"],
 ];
 
 route(/^\/$/, async (ctx) => {
@@ -708,7 +711,7 @@ route(/^\/client\/([^/]+)\/qr$/, async (ctx, name) => {
     h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.target, async () => {
       await post("/api/send", { what: "conf", name }); haptic(); toast("Файл и QR — в чате с ботом");
     }) }, "✉️ Отправить файл в чат"),
-    h("button", { class: "btn-block", onclick: () => copy(d.text) }, "📋 Скопировать конфиг"),
+    copyBtn("Скопировать конфиг", d.text),
     h("pre", { class: "small" }, d.text));
 });
 
@@ -1636,6 +1639,370 @@ route(/^\/update$/, async (ctx) => {
         "Переустановка awg2", ["update", "install", "force"])),
       btn(beta ? "🔀 На стабильный" : "🧪 Бета-канал", channel)),
     hint("«Переустановить» — заново из текущего канала, даже без новой версии."));
+});
+
+// ── WG + обфускатор ───────────────────────────────────────
+const WGOBF_DNS = [["Cloudflare", "1.1.1.1, 1.0.0.1"], ["Google", "8.8.8.8, 8.8.4.4"], ["Quad9", "9.9.9.9, 149.112.112.112"]];
+const wgobfOnline = (c) => c.ago != null && c.ago < 180;
+const wgobfSeen = (c) => (c.ago == null ? pill("не подключался") : wgobfOnline(c) ? pill("онлайн · " + fmtDur(c.ago), "ok")
+  : pill(fmtDur(c.ago) + " назад"));
+const sendWgobf = (b, name, what) => busy(b, async () => {
+  await post("/api/send", { what, name });
+  haptic(); toast(what === "wgobf" ? "Ссылка, конфиг и файл .conf — в чате с ботом" : "Архив для Linux — в чате с ботом", 3000);
+});
+
+function wgobfInstall(ctx, d) {
+  const f = { masking: "STUN", clean: false, dns: 0 };
+  const port = h("input", { type: "number", min: 1024, max: 65535, placeholder: "случайный" });
+  const name = h("input", { placeholder: "client1", maxlength: 32, autocapitalize: "off", autocomplete: "off" });
+  const box = h("div");
+  const draw = () => box.replaceChildren(
+    h("label", {}, "Маскировка у клиентов"),
+    segText([["STUN", "STUN · видеозвонок"], ["NONE", "NONE · только XOR"]], f.masking, (v) => { f.masking = v; draw(); }),
+    h("label", {}, "DNS клиентов"),
+    segText(WGOBF_DNS.map(([l], i) => [i, l]), f.dns, (v) => { f.dns = v; draw(); }),
+    h("label", {}, "UDP-порт обфускатора"), port,
+    h("label", {}, "Имя первого клиента"), name,
+    h("div", { style: "margin-top:10px" }, switchRow("Чистый WG", "пускать и обычный WireGuard без обфускатора (iOS) — его DPI видит",
+      f.clean, (on) => { f.clean = on; })));
+  draw();
+  ctx.put(title("Обфускатор"),
+    ecard({ name: "WG + обфускатор", right: pill("не установлен"), meta: [tag("wg-obfuscator " + (d.version || ""))],
+      lines: ["отдельный WireGuard за обфускатором — как Phobos"] }),
+    hint("AWG не трогает. Клиентам нужен wg-obfuscator рядом с WireGuard: роутер Keenetic (AWG Manager → «Phobos»), "
+      + "Linux, Windows, Android — комплект это описывает."),
+    box,
+    btn("📦 Установить", () => {
+      const p = port.value.trim(), n = name.value.trim() || "client1";
+      if (p && !validPort(p, 1024)) return fail(new Error("Порт — число 1024-65535"));
+      if (!/^[A-Za-z0-9_-]{1,32}$/.test(n)) return fail(new Error("Имя: латиница, цифры, _ и -, до 32"));
+      const args = ["wgobf", "install", `masking=${f.masking}`, `clean=${f.clean ? 1 : 0}`, `client=${n}`,
+        `dns=${WGOBF_DNS[f.dns][1]}`, ...(p ? [`port=${p}`] : [])];
+      return runJob(ctx, "Установка WG + обфускатор", args, () =>
+        btn(`📄 Комплект ${n}`, () => go(`/wgobf/client/${encodeURIComponent(n)}`), "btn-primary btn-block"));
+    }, "btn-primary btn-block"));
+}
+
+route(/^\/wgobf$/, async (ctx) => {
+  const r = await callR(["wgobf", "status"]);
+  const d = r.data || {};
+  if (!d.installed) return wgobfInstall(ctx, d);
+  const rows = (await call("wgobf", "clients")) || [];
+  const online = rows.filter(wgobfOnline).length;
+  const mask = (v) => quick(null, "Маскировка " + v, ["wgobf", "masking", v]);
+  ctx.put(title("Обфускатор"),
+    ecard({ state: d.running ? "on" : "bad", name: "WG + обфускатор", attrs: { "data-name": "wgobf" },
+      right: pill(d.running ? "работает" : "остановлен", d.running ? "ok" : "bad"),
+      meta: [tag(d.masking || "?", "accent", "drama"), tag(d.clean ? "чистый WG можно" : "только обфускатор", d.clean ? "warn" : ""),
+        tag("wg-obfuscator " + (d.version || ""))],
+      lines: [h("span", { style: "cursor:pointer", onclick: (ev) => { ev.stopPropagation(); copy(d.endpoint); } },
+        d.endpoint || "", " ", icon("copy"))],
+      acts: [act("refresh-cw", "Рестарт", (b) => quick(b, "Перезапущено", ["wgobf", "restart"])),
+        act("key", "Ключ", (b) => quickAsk(b, "Сменить ключ обфускатора? Все клиенты отключатся, пока не получат новый комплект.",
+          "Ключ сменён", ["wgobf", "rotate-key"])),
+        act("file-text", "Журнал", () => go("/log/wgobf"))] }),
+    statGrid([
+      [`${online}/${rows.length}`, "Клиенты онлайн", "рукопожатие за 3 минуты"],
+      [d.masking || "?", "Маскировка", d.masking === "STUN" ? "под видеозвонок" : "только XOR"],
+    ]),
+    h("label", {}, "Маскировка у клиентов"),
+    segText([["STUN", "STUN · видеозвонок"], ["NONE", "NONE · только XOR"]], d.masking, (v) => (v !== d.masking ? mask(v) : null)),
+    h("div", { style: "margin-top:10px" }, switchRow("Чистый WG", "пускать и обычный WireGuard без обфускатора (iOS) — его DPI видит",
+      d.clean, (on) => call("wgobf", "clean", on ? "1" : "0"))),
+    h("h2", {}, "Клиенты"),
+    btn("➕ Добавить клиента", () => go("/wgobf/add"), "btn-primary btn-block"),
+    h("div", { style: "margin-top:10px" }, rows.length ? rows.map((c) => {
+      const enc = encodeURIComponent(c.name);
+      return ecard({ state: wgobfOnline(c) ? "on" : "", name: c.name, attrs: { "data-name": c.name },
+        onopen: () => go(`/wgobf/client/${enc}`), right: wgobfSeen(c), lines: [c.ip],
+        acts: [act("file-text", "Комплект", () => go(`/wgobf/client/${enc}`)), act("send", "В чат", (b) => sendWgobf(b, c.name, "wgobf")),
+          act("trash-2", "Удалить", (b) => quickAsk(b, `Удалить клиента ${c.name}?`, "Клиент удалён", ["wgobf", "del", c.name]), "bad")] });
+    }) : h("div", { class: "card empty" }, "Клиентов нет")),
+    btn("🗑 Удалить обфускатор", (b) => quickAsk(b, "Удалить WG + обфускатор со всеми его клиентами? AWG не затрагивается; "
+      + "архив на всякий случай ляжет в ~/awg_backup.", "Обфускатор удалён", ["wgobf", "remove"]), "btn-danger btn-block"));
+});
+
+route(/^\/wgobf\/add$/, async (ctx) => {
+  const rows = (await call("wgobf", "clients")) || [];
+  const taken = new Set(rows.map((c) => c.name));
+  const free = () => { let n = 1; while (taken.has("client" + n)) n++; return "client" + n; };
+  const name = h("input", { placeholder: "keenetic_home", maxlength: 32, autocapitalize: "off", autocomplete: "off" });
+  ctx.put(title("Новый клиент"), hint("Клиент WG + обфускатор — комплект со ссылкой для Keenetic и конфигами."),
+    h("label", {}, "Имя — латиница, цифры, _ и -, до 32"),
+    h("div", { class: "row" }, name, h("button", { onclick: () => { name.value = free(); } }, icon("dices"))),
+    btn("Создать", (b) => {
+      const v = name.value.trim() || free();
+      if (!/^[A-Za-z0-9_-]{1,32}$/.test(v)) return fail(new Error("Имя: латиница, цифры, _ и -, до 32"));
+      if (taken.has(v)) return fail(new Error(`Имя ${v} уже занято`));
+      return busy(b, async () => {
+        await call("wgobf", "add", v);
+        haptic(); toast("Клиент создан");
+        replace(`/wgobf/client/${encodeURIComponent(v)}`);
+      });
+    }, "btn-primary btn-block"));
+});
+
+route(/^\/wgobf\/client\/([^/]+)$/, async (ctx, name) => {
+  const d = await post("/api/wgobf/bundle", { name });
+  ctx.put(title(name, pill("обфускатор", "accent")),
+    h("div", { class: "pair" },
+      btn("✉️ Всё в чат", (b) => sendWgobf(b, name, "wgobf"), "btn-primary"),
+      btn("📦 Архив Linux", (b) => sendWgobf(b, name, "wgobf_zip"))),
+    // Ссылка phobos:// — длинный base64: на экране начало, целиком — копированием
+    d.link ? [h("h2", {}, "Ссылка для Keenetic"),
+      h("div", { class: "card" }, h("div", { class: "mono small", style: "overflow-wrap:anywhere" },
+        d.link.length > 90 ? d.link.slice(0, 90) + "…" : d.link),
+      h("div", { class: "muted small", style: "margin-top:4px" }, `AWG Manager → «Phobos» — одной вставкой · ${d.link.length} символов`)),
+      copyBtn("Скопировать ссылку", d.link, "btn-primary btn-block")] : null,
+    d.conf ? [h("h2", {}, "Конфиг"), hint("WireGuard и секция [instance] обфускатора — тот же файл .conf, что приходит в чат."),
+      h("pre", {}, d.conf), copyBtn("Скопировать конфиг", d.conf)] : null,
+    d.direct ? [h("h2", {}, "Чистый WireGuard"), hint("Без обфускатора — для iOS и обычного WireGuard. DPI его видит."),
+      d.png ? h("img", { class: "qr", src: "data:image/png;base64," + d.png, alt: "QR" }) : null,
+      copyBtn("Скопировать конфиг", d.direct)] : null,
+    btn("🗑 Удалить клиента", (b) => quickAsk(b, `Удалить клиента ${name}?`, "Клиент удалён", ["wgobf", "del", name],
+      () => replace("/wgobf")), "btn-danger btn-block"));
+});
+
+// ── Бот ───────────────────────────────────────────────────
+// Бот перезапускается (прокси, перезапуск): панель ждёт новый процесс —
+// у него другое время старта
+async function botRestarting(started, what) {
+  toast(`${what} — бот перезапускается…`, 8000);
+  const until = Date.now() + 120e3;
+  let back = false;
+  while (!back && Date.now() < until) {
+    await new Promise((ok) => setTimeout(ok, 2000));
+    try { back = (await post("/api/me")).started !== started; } catch { /* ещё не поднялся */ }
+  }
+  toast(back ? "✅ Бот снова на связи" : "Бот не ответил за 2 минуты — открой панель заново", 4000);
+  if (back) render();
+}
+// Сервер панели переезжает или выключается: дальше — только кнопкой «Меню»
+function panelMoved(ctx, head, text) {
+  post("/api/bot/webapp/restart").catch(() => {});
+  ctx.put(title(head), h("div", { class: "card" }, text),
+    hint("Закрой панель и открой её снова кнопкой «Меню» в чате с ботом."),
+    btn("Закрыть панель", () => (tg && tg.close ? tg.close() : null), "btn-primary btn-block"));
+}
+
+route(/^\/bot$/, async (ctx) => {
+  const [d, me] = await Promise.all([post("/api/bot/info"), post("/api/me")]);
+  const w = d.webapp || {}, ic = d.icons || {};
+  ctx.put(title("Бот"),
+    ecard({ state: "on", name: "Telegram-бот", attrs: { "data-name": "bot" }, right: pill("работает", "ok"),
+      meta: [tag("бот " + d.version, "accent"), tag(d.proxy ? "через прокси" : "напрямую", "", "network"),
+        tag(d.owner ? "ты — владелец" : "ты — админ")],
+      lines: [d.proxy || null],
+      acts: [act("refresh-cw", "Рестарт", async (b) => {
+        if (!await confirmTg("Перезапустить бота? Панель подождёт и продолжит работу.")) return;
+        await busy(b, async () => { await call("bot", "restart"); await botRestarting(me.started, "Перезапуск"); });
+      }), act("circle-arrow-up", "Обновить", () => updateBot(ctx)), act("file-text", "Журнал", () => go("/log/bot"))] }),
+    statGrid([
+      [`${d.owners} + ${d.invited}`, "Админы", "владельцы + приглашённые", d.owner ? () => go("/bot/admins") : null],
+      [ic.active ? `${ic.count}/${ic.total}` : "выкл", "Иконки", ic.active ? ic.pack : "обычные эмодзи", d.owner ? () => go("/bot/look") : null],
+      [w.running ? "работает" : "выкл", "Mini App", w.running ? `порт ${w.port}` : (w.error || "—"), d.owner ? () => go("/bot/app") : null],
+      [d.proxy ? "прокси" : "напрямую", "До Telegram", d.proxy ? "через прокси" : "без прокси", () => go("/bot/proxy")],
+    ]),
+    h("div", { class: "card list" },
+      menuItem("🌐 Прокси до Telegram", d.proxy || "нет — напрямую", () => go("/bot/proxy")),
+      d.owner ? menuItem("👮 Админы", `владельцев ${d.owners}, приглашённых ${d.invited}`, () => go("/bot/admins")) : null,
+      d.owner ? menuItem("🎨 Оформление", "иконки custom emoji в боте", () => go("/bot/look")) : null,
+      d.owner ? menuItem("📱 Mini App и сертификат", w.running ? w.url : "не запущена", () => go("/bot/app")) : null),
+    d.owner ? btn("🗑 Удалить бота", async () => {
+      if (!await confirmTg("Удалить бота: службу, код и конфиг с токеном? AWG не затрагивается, конфиг копируется в бэкапы.")) return;
+      if (!await confirmTg("Точно удалить? Панель и бот перестанут работать.")) return;
+      await busy(null, async () => {
+        await post("/api/job", { args: ["bot", "uninstall"] });
+        ctx.put(title("Бот удаляется"), h("div", { class: "card" }, "Задача удаления запущена на сервере. Панель сейчас отключится."),
+          hint("Вернуть бота: sudo awg2 → Telegram-бот → Установить."));
+      });
+    }, "btn-danger btn-block") : null);
+});
+
+route(/^\/bot\/proxy$/, async (ctx) => {
+  const [d, me] = await Promise.all([post("/api/bot/info"), post("/api/me")]);
+  const url = h("input", { placeholder: "socks5://логин:пароль@1.2.3.4:1080", autocapitalize: "off", autocomplete: "off" });
+  const cands = h("div");
+  // Проверка не прошла — спросить, сохранить ли всё равно
+  async function apply(b, v) {
+    let force = false;
+    for (;;) {
+      if (b) b.disabled = true;
+      try {
+        await callR(["bot", "proxy", "set", v, ...(force ? ["force"] : [])], { timeout: 180 });
+        break;
+      } catch (e) {
+        if (b) b.disabled = false;
+        if (force || !await confirmTg(`${e.message}\n\nСохранить адрес всё равно?`)) return fail(e);
+        force = true;
+      }
+    }
+    url.value = "";
+    await botRestarting(me.started, "Прокси сохранён");
+  }
+  ctx.put(title("Прокси до Telegram"),
+    h("div", { class: "card" }, kv("Сейчас", h("span", { class: "mono" }, d.proxy || "нет — напрямую")),
+      h("div", { class: "muted small" }, "Нужен, если Telegram у хостера заблокирован: SOCKS5/HTTP-прокси или туннель этого сервера.")),
+    btn("🔎 Найти на сервере", (b) => busy(b, async () => {
+      toast("Ищу прокси и туннели, проверяю Telegram через каждый…", 6000);
+      const rows = (await call("bot", "proxy", "candidates")) || [];
+      cands.replaceChildren(rows.length ? h("div", { class: "card list" }, rows.map((r) =>
+        h("div", { class: "item", onclick: (ev) => apply(null, r.url) },
+          h("div", { class: "dot " + (r.ok ? "on" : "bad") }),
+          h("div", { class: "main" }, h("div", { class: "title" }, r.label.split(" — ")[0]), h("div", { class: "sub mono" }, r.url)),
+          h("div", { class: "side" }, icon("chevron-right")))))
+        : h("div", { class: "card empty" }, "Подходящих выходов на сервере нет — введи адрес вручную"));
+    }), "btn-block"),
+    cands,
+    h("label", {}, "Или адрес: схема://[логин:пароль@]хост:порт — http, https, socks4, socks5, socks5h, iface://warp0"),
+    url,
+    btn("💾 Сохранить", (b) => {
+      const v = url.value.replace(/\s/g, "");
+      if (!/^(https?|socks4|socks5h?|iface):\/\/\S+$/.test(v)) return fail(new Error("Нужна схема: http, https, socks4, socks5, socks5h или iface"));
+      return apply(b, v);
+    }, "btn-primary btn-block"),
+    d.proxy ? h("div", { class: "pair", style: "margin-top:8px" },
+      btn("🩺 Проверить", (b) => busy(b, async () => { await call("bot", "proxy", "check"); haptic(); toast("✅ Через прокси Telegram отвечает"); })),
+      btn("🗑 Убрать", async (b) => {
+        if (!await confirmTg("Убрать прокси? Бот пойдёт к Telegram напрямую.")) return;
+        await busy(b, async () => { await call("bot", "proxy", "clear"); await botRestarting(me.started, "Прокси убран"); });
+      }, "btn-danger")) : null,
+    hint("После сохранения бот перезапустится — панель дождётся его сама."));
+});
+
+route(/^\/bot\/admins$/, async (ctx) => {
+  const d = await post("/api/bot/info");
+  if (!d.owner) return ctx.put(title("Админы"), h("div", { class: "card empty" }, "Список админов правит только владелец"));
+  const a = d.admins || { owners: [], invited: [], pending: 0 };
+  async function invite(b) {
+    const r = await busy(b, () => post("/api/bot/invite"));
+    if (!r) return;
+    const box = h("div", { class: "sheet" });
+    const bg = h("div", { class: "sheet-bg", onclick: (ev) => { if (ev.target === bg) { bg.remove(); render(); } } }, box);
+    const until = new Date(r.expires * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+    box.append(h("h3", {}, "Приглашение"),
+      hint(`Одноразовая ссылка, сгорит в ${until}. Перешли тому, кому даёшь доступ.`),
+      h("pre", {}, r.link),
+      h("button", { onclick: () => copy(r.link) }, icon("copy"), "Скопировать"),
+      h("button", { onclick: () => {
+        const share = "https://t.me/share/url?url=" + encodeURIComponent(r.link);
+        if (tg && tg.openTelegramLink) tg.openTelegramLink(share); else window.open(share, "_blank");
+      } }, icon("share-2"), "Переслать в Telegram"),
+      hint("⚠️ Админ может всё, кроме управления списком админов: бот — это root на сервере."),
+      h("button", { class: "btn-primary", onclick: () => { bg.remove(); render(); } }, "Готово"));
+    document.body.append(bg);
+  }
+  const who = (x) => (x.username ? "@" + x.username : String(x.uid));
+  ctx.put(title("Админы"),
+    h("h2", {}, "Владельцы"),
+    h("div", { class: "card list" }, a.owners.map((uid) => h("div", { class: "item" }, h("div", { class: "ibox" }, icon("shield-check")),
+      h("div", { class: "main" }, h("div", { class: "title mono" }, uid), h("div", { class: "sub" }, "ADMIN_ID в /etc/awg-bot.conf"))))),
+    h("h2", {}, "Приглашённые"),
+    a.invited.length ? h("div", { class: "card list" }, a.invited.map((x) => h("div", { class: "item", "data-uid": x.uid,
+      onclick: () => quickAdmin(x) }, h("div", { class: "ibox" }, icon("user")),
+    h("div", { class: "main" }, h("div", { class: "title" }, who(x)),
+      h("div", { class: "sub mono" }, `${x.uid}${x.added_at ? " · с " + fmtTime(x.added_at) : ""}`)),
+    h("div", { class: "side bad" }, icon("trash-2"))))) : h("div", { class: "card empty" }, "Приглашённых нет"),
+    btn("🙋 Пригласить", invite, "btn-primary btn-block"),
+    a.pending ? btn(`🧯 Погасить приглашения: ${a.pending}`, (b) => busy(b, async () => {
+      const r = await post("/api/bot/invites/revoke"); haptic(); toast(`Погашено приглашений: ${r.revoked}`); render();
+    }), "btn-block") : null,
+    hint("Приглашение — ссылка на 15 минут. Отозванный админ теряет доступ; выданные им конфиги продолжают работать."));
+  async function quickAdmin(x) {
+    if (!await confirmTg(`Отозвать доступ у ${who(x)}? Выданные им конфиги продолжат работать.`)) return;
+    await busy(null, async () => {
+      const r = await post("/api/bot/admin/del", { uid: x.uid }); haptic(); toast(r.message || "Доступ отозван"); render();
+    });
+  }
+});
+
+route(/^\/bot\/look$/, async (ctx) => {
+  const d = await post("/api/bot/info");
+  if (!d.owner) return ctx.put(title("Оформление"), h("div", { class: "card empty" }, "Оформление меняет только владелец"));
+  const ic = d.icons || {};
+  const pack = h("input", { placeholder: "t.me/addemoji/ИМЯ", autocapitalize: "off", autocomplete: "off" });
+  const apply = (b, body) => busy(b, async () => {
+    toast("Проверяю иконки — пробное сообщение в чате…", 5000);
+    const r = await post("/api/bot/icons", body);
+    haptic(r.active ? "success" : "error");
+    toast(r.active ? `✅ Иконки включены: ${r.have.length} из ${r.have.length + r.miss.length}`
+      : "❌ Telegram не показал иконки — нужен Telegram Premium у владельца бота или имя бота с Fragment", 5000);
+    render();
+  });
+  ctx.put(title("Оформление"),
+    ecard({ state: ic.active ? "on" : "", name: "Иконки в боте", right: pill(ic.active ? "включены" : "выключены", ic.active ? "ok" : ""),
+      meta: [ic.pack ? tag(ic.pack, "accent", "palette") : tag("набор не выбран"), ic.count ? tag(`${ic.count} иконок`) : null],
+      lines: ["custom emoji вместо эмодзи в тексте и на кнопках"] }),
+    hint("Цветные кнопки в боте — всегда. Иконки бот может показывать, только если у владельца бота (аккаунт, создавший "
+      + "его в @BotFather) есть Telegram Premium или у бота имя с Fragment. Перестанут быть видны — бот сам вернётся к эмодзи."),
+    btn(`📥 Набор ${ic.default || "TgAndroidIcons"}`, (b) => apply(b, { action: "pack", name: ic.default }), "btn-primary btn-block"),
+    h("label", {}, "Свой набор — ссылка на набор эмодзи"), pack,
+    btn("Применить набор", (b) => {
+      const v = pack.value.trim();
+      if (!v) return fail(new Error("Нужна ссылка вида t.me/addemoji/ИМЯ"));
+      return apply(b, { action: "pack", name: v });
+    }, "btn-block"),
+    h("div", { class: "pair", style: "margin-top:8px" },
+      ic.count && !ic.active ? btn("▶️ Включить", (b) => apply(b, { action: "on" })) : null,
+      ic.active ? btn("⏹ Выключить", (b) => busy(b, async () => {
+        await post("/api/bot/icons", { action: "off" }); haptic(); toast("Иконки выключены — снова обычные эмодзи"); render();
+      })) : null),
+    hint("Свои иконки по одной (custom emoji сообщением) — в боте: Бот → Оформление → Свои иконки."));
+});
+
+route(/^\/bot\/app$/, async (ctx) => {
+  const [d, c] = await Promise.all([post("/api/bot/info"), call("cert", "status")]);
+  if (!d.owner) return ctx.put(title("Mini App"), h("div", { class: "card empty" }, "Mini App настраивает только владелец"));
+  const w = d.webapp || {};
+  const dom = h("input", { placeholder: "panel.example.com", autocapitalize: "off", autocomplete: "off" });
+  const port = h("input", { type: "number", min: 1, max: 65535, placeholder: String(w.port || 8443) });
+  const issue = (head, args, after) => runJob(ctx, head, args, () => [
+    hint(after), btn("Закрыть панель", () => (tg && tg.close ? tg.close() : null), "btn-primary btn-block")]);
+  const setPort = async (v) => {
+    if (!await confirmTg(v === "off" ? "Выключить Mini App? Панель закроется, кнопка «Меню» станет обычной."
+      : `Перенести панель на порт ${v}? Её придётся открыть заново кнопкой «Меню».`)) return;
+    await busy(null, async () => {
+      await call("bot", "webapp", "port", v);
+      panelMoved(ctx, v === "off" ? "Mini App выключена" : "Панель переезжает", v === "off"
+        ? "Сервер панели остановлен. Включить — в боте: Бот → Mini App → Порт." : `Новый адрес — порт ${v}.`);
+    });
+  };
+  ctx.put(title("Mini App"),
+    ecard({ state: w.running ? "on" : "bad", name: "Сервер панели", right: pill(w.running ? "работает" : "выключен", w.running ? "ok" : "bad"),
+      meta: [tag("порт " + (w.port || "off"), "accent"), c.installed ? tag(c.kind === "ip" ? "сертификат на IP" : "сертификат на домен", "ok", "lock") : tag("нет сертификата", "bad")],
+      lines: [w.url || w.error] }),
+    c.installed ? statGrid([
+      [c.name || "—", "Сертификат", c.kind === "ip" ? "Let's Encrypt, IP" : "Let's Encrypt, домен"],
+      [c.expires ? fmtTime(c.expires).split(",")[0] : "—", "Действует до", c.renew ? "продлевается сам" : "⚠️ таймер продления не работает"],
+    ]) : null,
+    c.port80 ? h("div", { class: "card warn small" }, `Порт 80 занят (${c.port80}) — Let's Encrypt не сможет проверить адрес.`) : null,
+    h("h2", {}, "Сертификат"),
+    btn(`🔐 На IP ${c.ip || ""}`, () => issue("Сертификат на IP", ["cert", "issue", "ip"],
+      "Сертификат выпущен. Сервер панели подхватит его сам; если панель перестанет отвечать — открой её заново."), "btn-block"),
+    h("label", {}, "Или на домен — A-запись должна указывать на этот сервер"), dom,
+    btn("🌍 Выпустить на домен", () => {
+      const v = dom.value.trim().toLowerCase();
+      if (!DOMAIN_RE.test(v)) return fail(new Error("Нужен домен вида panel.example.com"));
+      return issue(`Сертификат на ${v}`, ["cert", "issue", "domain", v], `Сертификат на ${v} выпущен. Панель переезжает на домен — `
+        + "закрой её и открой снова кнопкой «Меню».").then(() => post("/api/bot/webapp/restart").catch(() => {}));
+    }, "btn-block"),
+    hint("На IP — сертификат живёт ~6 дней и продлевается сам; для проверки нужен свободный и открытый порт 80. На домен — 90 дней."),
+    h("h2", {}, "Порт"),
+    h("div", { class: "row" }, port, btn("OK", () => {
+      const v = port.value.trim();
+      if (!validPort(v) || v === "80") return fail(new Error("Порт — число 1-65535, кроме 80"));
+      return setPort(v);
+    })),
+    h("div", { class: "chips" }, ["8443", "443"].map((v) => h("button", { class: "chip", onclick: () => setPort(v) }, v)),
+      h("button", { class: "chip", onclick: () => setPort("off") }, "выключить")),
+    hint("443 — адрес без номера порта, если его не занял Xray. 80 занят проверкой сертификата."),
+    c.installed ? btn("🗑 Удалить сертификат", async (b) => {
+      if (!await confirmTg("Удалить сертификат? Mini App перестанет открываться, продление остановится.")) return;
+      await busy(b, async () => {
+        await call("cert", "remove");
+        panelMoved(ctx, "Сертификат удалён", "Mini App выключена — без сертификата Telegram её не откроет.");
+      });
+    }, "btn-danger btn-block") : null);
 });
 
 // ── Журналы служб ─────────────────────────────────────────

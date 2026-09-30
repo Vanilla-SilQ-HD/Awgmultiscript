@@ -319,7 +319,7 @@ async def _look_pack(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
                   [(f"📱 {icons.DEFAULT_PACK}", look.data("pk", icons.DEFAULT_PACK))])
 
 
-async def _pack_icons(bot, name: str) -> tuple[str, dict[str, str]]:  # type: ignore[no-untyped-def]
+async def pack_icons(bot, name: str) -> tuple[str, dict[str, str]]:  # type: ignore[no-untyped-def]
     """Имя и иконки набора или ("", {}) с причиной в имени при ошибке."""
     try:
         pack = await bot.get_sticker_set(name)
@@ -339,7 +339,7 @@ async def _look_pack_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> No
     if not m:
         await ask.retry(msg, state, ctx, "Нужна ссылка вида t.me/addemoji/ИМЯ")
         return
-    name, mapping = await _pack_icons(msg.bot, m.group(1))
+    name, mapping = await pack_icons(msg.bot, m.group(1))
     if not mapping:
         await ask.retry(msg, state, ctx, name)
         return
@@ -348,7 +348,7 @@ async def _look_pack_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> No
 
 @look("pk")
 async def _look_pack_btn(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    name, mapping = await _pack_icons(cb.bot, arg)
+    name, mapping = await pack_icons(cb.bot, arg)
     if not mapping:
         await ui.render(cb, f"❌ {esc(name)}", ui.kb(ui.back(look.data())))
         return

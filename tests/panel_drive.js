@@ -88,6 +88,11 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
       await page.click("text=Конфиг и QR");
       await page.waitForSelector("img.qr, .card.muted");
     });
+    await step("обфускатор не установлен", async () => {
+      await nav("/wgobf", "button:has-text('Установить')");
+      await page.waitForSelector("text=STUN · видеозвонок");
+      await shot("14-wgobf-install");
+    });
     await step("сервер после создания", async () => {
       await nav("/server", "text=Endpoint");
       await page.waitForSelector("text=10.66.1.0/24");
@@ -330,9 +335,73 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.click("button:has-text('Бета-канал')");
     await page.waitForSelector("text=бета — ранние сборки");
   });
-  await step("главная: плитки открываются", async () => {
+  // ── WG + обфускатор ──
+  await step("обфускатор", async () => {
+    await nav("/wgobf", "[data-name=wgobf]");
+    await page.waitForSelector("text=Клиентов нет");
+    await shot("50-wgobf");
+  });
+  await step("обфускатор: маскировка", async () => {
+    await page.click(".seg button:has-text('NONE')");
+    await page.waitForSelector(".toast >> text=NONE");
+  });
+  await step("обфускатор: клиент и комплект", async () => {
+    await nav("/wgobf/add", "input");
+    await page.fill("input", "kn1");
+    await page.click("button:has-text('Создать')");
+    await page.waitForURL(/#\/wgobf\/client\/kn1$/);
+    await page.waitForSelector("text=Ссылка для Keenetic");
+    await page.waitForSelector("pre >> text=[instance]");
+    await page.waitForSelector("img.qr");
+    await shot("51-wgobf-client");
+    await page.click("button:has-text('Всё в чат')");
+    await page.waitForSelector(".toast >> text=в чате с ботом");
+  });
+  await step("обфускатор: удалить клиента", async () => {
+    await page.click("button:has-text('Удалить клиента')");
+    await page.waitForURL(/#\/wgobf$/);
+    await page.waitForSelector("text=Клиентов нет");
+  });
+
+  // ── Бот ──
+  await step("бот", async () => { await nav("/bot", "[data-name=bot]"); await page.waitForSelector(".sgrid"); await shot("52-bot"); });
+  await step("админы: отозвать", async () => {
+    await nav("/bot/admins", "text=@helper");
+    await shot("53-admins");
+    await page.click("[data-uid='333']");
+    await page.waitForSelector("text=Приглашённых нет");
+  });
+  await step("админы: приглашение", async () => {
+    await page.click("button:has-text('Пригласить')");
+    await page.waitForSelector(".sheet pre >> text=/t\\.me\\/toolza_test_bot\\?start=inv_/");
+    await shot("54-invite");
+    await page.click(".sheet button:has-text('Готово')");
+    await page.waitForSelector("text=Погасить приглашения: 1");
+  });
+  await step("оформление: набор иконок", async () => {
+    await nav("/bot/look", "text=Иконки в боте");
+    await page.click("button:has-text('Набор TgAndroidIcons')");
+    await page.waitForSelector(".toast >> text=Иконки включены");
+    await page.waitForSelector(".pill >> text=включены");
+    await page.click("button:has-text('Выключить')");
+    await page.waitForSelector(".pill >> text=выключены");
+  });
+  await step("прокси", async () => {
+    await nav("/bot/proxy", "input");
+    await expectAlert("схема", async () => { await page.fill("input", "1.2.3.4:1080"); await page.click("button:has-text('Сохранить')"); });
+    await page.click("button:has-text('Найти на сервере')");
+    await page.waitForSelector(".card.empty, .item >> nth=0", { timeout: 60000 });
+    await shot("55-proxy");
+  });
+  await step("Mini App: сертификат на IP", async () => {
+    await nav("/bot/app", "text=Сервер панели");
+    await shot("56-app");
+    await page.click("button:has-text('На IP')");
+    await page.waitForSelector("h1:has-text('Сертификат на IP') .pill.ok", { timeout: 60000 });
+  });
+  await step("главная: все разделы в панели", async () => {
     await nav("/", ".tile");
-    if (await page.locator(".tile.soon").count() !== 2) throw new Error("ждали две плитки «скоро» (обфускатор и бот)");
+    if (await page.locator(".tile.soon").count() !== 0) throw new Error("остались плитки «скоро»");
   });
 
   const log = await page.evaluate(() => window.__log);
