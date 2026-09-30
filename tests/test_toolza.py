@@ -460,6 +460,24 @@ for _ in range(60):
     time.sleep(0.5)
 chk("ошибка задачи в итоге", st.get("state") == "done" and st.get("ok") is False and st.get("rc") == 2, st)
 
+print("Бэкап")
+r = api("backup", "create")
+bk_path = (r.get("data") or {}).get("path") or ""
+chk("бэкап — в каталоге песочницы, не в настоящем ~/awg_backup",
+    r.get("ok") and bk_path.startswith(os.path.join(ROOT, "awg_backup")), r)
+r = api("backup", "list")
+chk("архив бэкапа в списке", bk_path in [b["path"] for b in r.get("data") or []], r)
+r = api("backup", "inspect", bk_path)
+chk("inspect: клиенты и метаданные", r.get("ok") and r["data"]["clients"] >= 2 and "timestamp=" in r["data"]["meta"], r)
+junk = os.path.join(TMP, "junk.tar.gz")
+with open(junk, "wb") as f:
+    f.write(b"not a tar")
+r = api("backup", "inspect", junk)
+chk("не архив — понятная ошибка без трассировки Python",
+    r.get("ok") is False and "это не архив" in r.get("log", "") and "Traceback" not in r.get("log", ""), r)
+r = api("backup", "restore", bk_path)
+chk("восстановление из архива", r.get("ok") and "Восстановлено" in r.get("log", ""), r)
+
 print("Сертификат")
 fake_acme()
 CERT = os.path.join(ROOT, "etc/awg2/cert/fullchain.pem")

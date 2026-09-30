@@ -11983,7 +11983,11 @@ def cmd_safe_untar(archive, dest):
     root = os.path.realpath(dest)
     os.makedirs(root, exist_ok=True)
     n = 0
-    with tarfile.open(archive, "r:*") as tar:
+    try:
+        tar = tarfile.open(archive, "r:*")
+    except (tarfile.TarError, OSError):
+        die("это не архив tar.gz")
+    with tar:
         for m in tar.getmembers():
             parts = [p for p in m.name.replace("\\", "/").split("/") if p not in ("", ".")]
             if not parts or ".." in parts or not (m.isfile() or m.isdir()):

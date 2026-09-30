@@ -3,7 +3,8 @@
 
 Поднимает panel_stand.py (сервер панели на песочнице awg2) с профилями
 сервера lite и pro и без сервера и гоняет panel_drive.js: клиенты, сервер,
-туннели, мастер создания сервера, ошибки в консоли, текст «null» на экранах. Нет node, Playwright или
+туннели, диагностика, бэкапы, обновление, мастер создания сервера, ошибки в
+консоли, текст «null» на экранах. Нет node, Playwright или
 Chromium — тест пропускается.
 
 Запуск:  python3 tests/test_panel.py [путь/к/dist/awg2.sh]
@@ -63,10 +64,10 @@ for profile in ("lite", "pro", "none"):
         if not ready:
             chk("стенд панели поднялся", False, stand.stdout.read()[-800:] if stand.stdout else "")
             continue
-        _, port, init, err = ready[:4]
+        _, port, init, err, root = ready[:5]
         chk("стенд панели поднялся", err == "-", err)
         try:
-            run = subprocess.run([node, os.path.join(HERE, "panel_drive.js"), port, init, out, "dark", profile],
+            run = subprocess.run([node, os.path.join(HERE, "panel_drive.js"), port, init, out, "dark", profile, root],
                                  env=env, capture_output=True, text=True, timeout=400)
             output = run.stdout + run.stderr
         except subprocess.TimeoutExpired:

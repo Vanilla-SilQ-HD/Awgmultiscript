@@ -140,6 +140,12 @@ async function render() {
   replace("/");
 }
 
+// Строка вывода awg2 для узкого экрана: отступ меньше, колонки из пробелов сжаты
+const tidy = (l) => {
+  const lead = l.length - l.trimStart().length;
+  return " ".repeat(Math.max(0, lead - 2)) + l.trim().replace(/ {3,}/g, "  ");
+};
+
 // ── Задача с живым журналом ────────────────────────────────
 // Долгое (массовое создание, установка, сборка) идёт задачей awg2: журнал —
 // по ходу, итог — на том же экране. done(data) рисует кнопки итога;
@@ -169,14 +175,14 @@ async function runJob(ctx, title, args, done, opts = {}) {
       misses = 0;
     } catch (e) {
       // Бот мог перезапуститься по ходу задачи — задача awg2 от этого не встаёт
-      if (++misses < 20) continue;
+      if (++misses < 60) continue;
       throw e;
     }
     offset = st.offset || offset;
     if (st.log) {
       text += st.log;
       // Рамки заголовков из терминального вывода awg2 здесь не нужны
-      log.textContent = text.split("\n").filter((l) => !/^[\s━─═—–-]*$/.test(l)).slice(-40).join("\n") || "идёт…";
+      log.textContent = text.split("\n").filter((l) => !/^[\s━─═—–-]*$/.test(l)).map(tidy).slice(-300).join("\n") || "идёт…";
       log.scrollTop = log.scrollHeight;
     }
     time.textContent = fmtDur((Date.now() - started) / 1000);
@@ -222,13 +228,15 @@ function logCard(log, ...head) {
     const l = raw.trim();
     if (!l || /^[━─═—–-]+$/.test(l)) continue;
     const m = l.match(/^([^:]{2,22}?)\s*:\s+(.+)$/);
-    rows.push(m ? kv(m[1], h("span", { class: tone(m[2]) }, m[2]))
-      : h("div", { class: "small " + tone(l) }, l.replace(/^→\s*/, "")));
+    // Длинное значение — под названием, а не узким столбцом справа
+    rows.push(!m ? h("div", { class: "small " + tone(l) }, l.replace(/^→\s*/, ""))
+      : m[2].length > 26 ? h("div", { style: "padding:5px 0" }, h("div", { class: "muted" }, m[1]), h("div", { class: tone(m[2]) }, m[2]))
+        : kv(m[1], h("span", { class: tone(m[2]) }, m[2])));
   }
   return h("div", { class: "card" }, head, rows);
 }
 // Вывод awg2 без рамок заголовков — на телефоне они переносятся в мусор
-const plainLog = (text) => (text || "").split("\n").filter((l) => !/^[\s━─═]+$/.test(l) || !l.trim()).join("\n").trim();
+const plainLog = (text) => (text || "").split("\n").filter((l) => !/^[\s━─═]+$/.test(l) || !l.trim()).map(tidy).join("\n").trim();
 // Длинный вывод (диагностика) — снизу, поверх экрана
 function logSheet(title, text) {
   const bg = h("div", { class: "sheet-bg", onclick: (ev) => { if (ev.target === bg) bg.remove(); } },
@@ -269,9 +277,9 @@ const SECTIONS = [
   ["👥", "Клиенты", "/clients", "конфиги, сроки, QR"],
   ["🖥", "Сервер", "/server", "установка, модуль"],
   ["🌐", "Туннели и DNS", "/tunnels", "WARP, Xray, ноды"],
-  ["🩺", "Диагностика", null, "проверки, журналы"],
-  ["💾", "Бэкапы", null, "сохранить, вернуть"],
-  ["⬆️", "Обновление", null, "версии, канал"],
+  ["🩺", "Диагностика", "/diag", "проверки, журналы"],
+  ["💾", "Бэкапы", "/backup", "сохранить, вернуть"],
+  ["⬆️", "Обновление", "/update", "версии, канал"],
   ["🛡", "Обфускатор", null, "WG как Phobos"],
   ["🤖", "Бот", null, "прокси, админы"],
 ];
@@ -284,13 +292,14 @@ route(/^\/$/, async (ctx) => {
     tun2socks: "tun2socks", exits: "Exit-ноды", dns: "DNS" }[k] || k));
   if (d.wgobf === "up") up.push("WG+обф.");
   const alerts = [
-    s.exists && !s.up ? "⚠️ awg0 не поднят — Сервер → Проверить и починить" : null,
-    c.installed && c.reboot ? "▲ " + c.reboot : null,
-    d.update ? `⬆️ Доступна ${d.update}` : null,
+    s.exists && !s.up ? ["⚠️ awg0 не поднят — Сервер → Починить", "/server"] : null,
+    c.installed && c.reboot ? ["▲ " + c.reboot, "/server/module"] : null,
+    d.update ? [`⬆️ Доступна ${d.update} — обновить`, "/update"] : null,
   ].filter(Boolean);
   ctx.put(
     h("h1", {}, "AWG Toolza ", h("span", { class: "muted small" }, `${d.version || ""} · ${d.channel === "beta" ? "бета" : "стабильный"}`)),
-    alerts.length ? h("div", { class: "card warn", onclick: () => go("/server") }, alerts.map((a) => h("div", {}, a))) : null,
+    alerts.length ? h("div", { class: "card warn" }, alerts.map(([a, path]) =>
+      h("div", { style: "cursor:pointer;padding:2px 0", onclick: () => go(path) }, a))) : null,
     h("div", { class: "card" },
       h("div", { style: "font-weight:600" }, `🖥 ${d.host || ""} · ${d.ip || ""}`),
       h("div", { class: "muted small" }, d.os || ""),
@@ -1212,6 +1221,214 @@ route(/^\/tunnels\/dns\/manual$/, async (ctx) => {
       if (!/^[A-Za-z0-9_, -]+$/.test(v)) return fail(new Error("Допустимы латиница, цифры, дефис и запятая"));
       return quick(b, "Резолверы изменены", ["dns", "upstream", v], () => back());
     }, "btn-primary btn-block"));
+});
+
+// Строка меню раздела: заголовок, пояснение, «›»
+const menuItem = (title, sub, onclick) => h("div", { class: "item", onclick },
+  h("div", { class: "main" }, h("div", { class: "title" }, title), sub ? h("div", { class: "sub" }, sub) : null),
+  h("div", { class: "side" }, "›"));
+// Внешняя ссылка — браузером Telegram, не внутри панели
+const extLink = (url, text) => h("a", { href: url, onclick: (ev) => {
+  ev.preventDefault();
+  if (tg && tg.openLink) tg.openLink(url); else window.open(url, "_blank");
+} }, text || url);
+
+// ── Диагностика ───────────────────────────────────────────
+route(/^\/diag$/, async (ctx) => {
+  const r = await callR(["diag", "status"]);
+  ctx.put(h("h1", {}, "🩺 Диагностика"), logCard(r.log),
+    btn("🔄 Обновить сводку", () => render(), "btn-block"),
+    h("h2", {}, "Проверки"),
+    h("div", { class: "card list" },
+      menuItem("🌍 Домены мимикрии: мир", "какие домены пула отвечают отсюда", () => runJob(ctx, "Домены мимикрии (мир)", ["diag", "domains", "world"])),
+      menuItem("🇷🇺 Домены мимикрии: Россия", "пул для серверов в РФ", () => runJob(ctx, "Домены мимикрии (Россия)", ["diag", "domains", "ru"])),
+      menuItem("🎯 Тест мимикрии", "захват первых пакетов клиента", () => go("/diag/sniff")),
+      menuItem("🔍 DPI у клиента", "проверка со стороны клиента", () => go("/diag/dpi"))),
+    h("h2", {}, "Ещё"),
+    h("div", { class: "card list" },
+      menuItem("📜 Журналы служб", "последние строки журнала", () => go("/diag/logs")),
+      menuItem("🧩 Модуль ядра", "версии, пересборка, откат", () => go("/server/module"))));
+});
+
+route(/^\/diag\/logs$/, async (ctx) => {
+  ctx.put(h("h1", {}, "📜 Журналы"),
+    h("div", { class: "card list" }, Object.entries(LOGS).map(([name, label]) => menuItem(label, name, () => go("/log/" + name)))));
+});
+
+route(/^\/diag\/sniff$/, async (ctx) => {
+  const rows = (await call("diag", "sniff-list")) || [];
+  async function listen(name) {
+    if (!await confirmTg(`На устройстве ${name} отключись от VPN. Нажми OK — и в течение 20 секунд подключись снова.`)) return;
+    await runJob(ctx, `Тест мимикрии: ${name}`, ["diag", "sniff", name], null, { onBack: back });
+  }
+  ctx.put(h("h1", {}, "🎯 Тест мимикрии"),
+    hint("Сервер 20 секунд слушает первые пакеты клиента и проверяет, видны ли пакеты мимикрии и на что они похожи."),
+    rows.length ? [h("h2", {}, "Клиент"),
+      h("div", { class: "card list" }, rows.slice(0, 60).map((c) =>
+        menuItem(c.name, (c.endpoint || "").replace(/:\d+$/, ""), () => listen(c.name))))]
+      : [h("div", { class: "card empty" }, "Нет клиентов, которые уже подключались. Подключись с устройства и обнови."),
+        btn("🔄 Обновить", () => render(), "btn-block")]);
+});
+
+const DPI_CMD = {
+  docker: "docker run --rm -it --pull=always ghcr.io/runnin4ik/dpi-detector:latest",
+  python: "git clone https://github.com/Runnin4ik/dpi-detector.git\ncd dpi-detector && python -m pip install -r requirements.txt && python dpi_detector.py",
+};
+route(/^\/diag\/dpi$/, async (ctx) => {
+  const code = (text) => h("pre", { style: "cursor:pointer", onclick: () => copy(text) }, text);
+  ctx.put(h("h1", {}, "🔍 DPI у клиента"),
+    hint("Запускать на устройстве клиента, не на сервере. Нажми на команду — она скопируется."),
+    h("label", {}, "Docker"), code(DPI_CMD.docker),
+    h("label", {}, "Python"), code(DPI_CMD.python),
+    hint(["Windows и macOS — готовые сборки в ", extLink("https://github.com/Runnin4ik/dpi-detector/releases", "Releases"), "."]),
+    h("h2", {}, "Что делать с результатом"),
+    h("div", { class: "card small" },
+      h("div", {}, "• рабочий у провайдера клиента домен → домен мимикрии (карточка клиента → Мимикрия)"),
+      h("div", {}, "• подмена DNS / перехват UDP 53 → Туннели → Шифрованный DNS"),
+      h("div", {}, "• обрыв после первых КБ → профиль «AmneziaVPN» и короче I1-I5")),
+    hint("Сторонний проект (MIT), awg2 его не ставит."));
+});
+
+// ── Бэкапы ────────────────────────────────────────────────
+const BACKUP_MAX = 20 * 1024 * 1024;
+// «20260930_035321» из метаданных бэкапа → «30.09.2026 03:53»
+const fmtStamp = (s) => { const m = /^(\d{4})(\d\d)(\d\d)_(\d\d)(\d\d)/.exec(s || ""); return m ? `${m[3]}.${m[2]}.${m[1]} ${m[4]}:${m[5]}` : s; };
+// Отправка бэкапа в чат с отметкой на экране
+function sendBackup(path, note) {
+  note.textContent = "📥 Отправляю в чат…";
+  return post("/api/send", { what: "backup", path }).then(() => {
+    note.textContent = "✅ Файл — в чате с ботом. В нём приватные ключи — храни как пароль.";
+    haptic();
+  }, (e) => { note.textContent = "❌ " + e.message; });
+}
+async function uploadBackup(file) {
+  if (file.size > BACKUP_MAX) throw new Error("Файл больше 20 МБ — это не бэкап awg2");
+  const r = await fetch("/api/backup/upload", { method: "POST", body: file,
+    headers: { Authorization: "tma " + (tg ? tg.initData : ""), "Content-Type": "application/octet-stream" } });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || d.ok === false) throw new Error(d.error || `HTTP ${r.status}`);
+  return d.path;
+}
+
+route(/^\/backup$/, async (ctx) => {
+  const rows = ((await call("backup", "list")) || []).slice(0, 30);
+  // Без accept: на части Android фильтр по типу прячет .tar.gz; что это бэкап, проверит awg2
+  const file = h("input", { type: "file", style: "display:none",
+    onchange: () => busy(null, async () => {
+      const f = file.files[0];
+      if (!f) return;
+      toast("Загружаю " + f.name + "…", 4000);
+      S.restore = { path: await uploadBackup(f), name: f.name };
+      go("/backup/restore");
+    }) });
+  async function pick(b) {
+    const v = await sheet(`${b.full ? "📁" : "🗜"} ${b.name}`, [{ label: "📥 Прислать в чат", value: "send" },
+      { label: "♻️ Восстановить из него", value: "restore" }]);
+    if (v === "send") {
+      await busy(null, async () => {
+        toast("📥 Отправляю в чат…", 4000);
+        await post("/api/send", { what: "backup", path: b.path });
+        haptic(); toast("✅ Бэкап — в чате с ботом", 3000);
+      });
+    } else if (v === "restore") {
+      S.restore = { path: b.path, name: b.name };
+      go("/backup/restore");
+    }
+  }
+  ctx.put(h("h1", {}, "💾 Бэкапы"),
+    hint("Полный бэкап: сервер и клиенты, аккаунт WARP, WG + обфускатор, настройки туннелей. Хранятся в ~/awg_backup на сервере."),
+    h("div", { class: "actions" },
+      btn("💾 Создать", () => runJob(ctx, "Бэкап", ["backup", "create"], (d) => {
+        const note = h("div", { class: "small", style: "margin-top:6px" });
+        if (d && d.path) sendBackup(d.path, note);
+        return h("div", { class: "card" }, kv("Файл", (d && d.path || "").split("/").pop()), kv("Размер", fmtBytes(d && d.size)), note);
+      }), "btn-primary"),
+      btn("📤 Из файла", () => file.click())), file,
+    h("h2", {}, "На сервере"),
+    h("div", { class: "card list" }, rows.length ? rows.map((b) => h("div", { class: "item", onclick: () => pick(b) },
+      h("div", { style: "font-size:20px;width:28px;text-align:center;flex:none" }, b.full ? "📁" : "🗜"),
+      h("div", { class: "main" }, h("div", { class: "title" }, fmtTime(b.time)),
+        h("div", { class: "sub" }, `${b.full ? "полный, каталог" : "архив"} · ${fmtBytes(b.size)}`)),
+      h("div", { class: "side" }, "›"))) : h("div", { class: "empty" }, "Бэкапов на сервере нет")),
+    hint("📁 — полный бэкап каталогом, 🗜 — архив. Восстановить можно и из архива прежнего бота."));
+});
+
+route(/^\/backup\/restore$/, async (ctx) => {
+  const rs = S.restore;
+  if (!rs) return replace("/backup");
+  const d = (await call("backup", "inspect", rs.path)) || {};
+  const meta = Object.fromEntries((d.meta || "").split("\n").filter((l) => l.includes("="))
+    .map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
+  const opt = { wgobf: !!d.wgobf, tunnels: !!d.tunnels };
+  ctx.put(h("h1", {}, "♻️ Восстановление"),
+    h("div", { class: "card" },
+      kv("Файл", rs.name),
+      meta.timestamp ? kv("Создан", fmtStamp(meta.timestamp)) : null,
+      meta.hostname ? kv("Сервер", meta.hostname) : null,
+      meta.toolza ? kv("Версия", meta.toolza) : null,
+      meta.awg_version ? kv("Протокол", "AWG " + meta.awg_version) : null,
+      kv("Клиентов", d.clients || 0),
+      kv("WARP", d.warp ? "аккаунт есть" : "нет")),
+    h("div", { class: "card warn small" },
+      h("div", {}, "Сервер и клиенты восстанавливаются всегда — текущий сервер будет заменён; его awg0.conf сохраняется рядом."),
+      h("div", { style: "margin-top:4px" }, "Туннели восстанавливаются выключенными — их включают вручную.")),
+    d.wgobf ? switchRow("🛡 Обфускатор", "WG + обфускатор из бэкапа", true, (on) => { opt.wgobf = on; }) : null,
+    d.tunnels ? switchRow("🌐 Туннели", "настройки Xray, exit-нод, каскада и DNS", true, (on) => { opt.tunnels = on; }) : null,
+    btn("♻️ Восстановить", async () => {
+      if (!await confirmTg("Заменить текущий сервер и клиентов данными из бэкапа?")) return;
+      S.restore = null;
+      await runJob(ctx, "Восстановление из бэкапа", ["backup", "restore", rs.path, ...["wgobf", "tunnels"].filter((k) => opt[k])],
+        null, { onBack: () => replace("/backup") });
+    }, "btn-danger btn-block"),
+    btn("✖️ Отмена", () => { S.restore = null; back(); }, "btn-block"));
+});
+
+// ── Обновление ────────────────────────────────────────────
+function updateBot(ctx) {
+  return jobAsk(ctx, "Обновить бота из канала обновлений? Он перезапустится, панель подождёт и покажет итог.",
+    "Обновление бота", ["bot", "update"], () => [
+      hint("Панель уже старая — открой её заново, чтобы загрузилась новая версия."),
+      btn("🔄 Открыть панель заново", () => location.reload(), "btn-primary btn-block")]);
+}
+
+route(/^\/update$/, async (ctx) => {
+  const [d, me] = await Promise.all([call("update", "status"), post("/api/me")]);
+  const beta = d.channel === "beta", latest = d.available || "";
+  async function check(b) {
+    await busy(b, async () => {
+      const r = await call("update", "check");
+      haptic();
+      toast(r.newer ? `⬆️ Доступна ${r.latest}` : `Обновлений нет — в канале ${r.latest}`, 3000);
+      render();
+    });
+  }
+  async function channel(b) {
+    const to = beta ? "stable" : "beta";
+    if (to === "beta" && !await confirmTg("Бета — ранние сборки: правки приезжают раньше, но могут быть сырыми. Переключиться?")) return;
+    await busy(b, async () => {
+      await call("update", "channel", to);
+      await call("update", "check").catch(() => null);
+      haptic(); toast(to === "beta" ? "Канал: бета" : "Канал: стабильный"); render();
+    });
+  }
+  ctx.put(h("h1", {}, "⬆️ Обновление"),
+    h("div", { class: "card" },
+      kv("awg2", d.version || "?"),
+      kv("Канал", beta ? "🧪 бета — ранние сборки" : "стабильный"),
+      kv("Доступна", latest ? h("b", { class: "ok" }, latest) : h("span", { class: "muted" }, "новее нет")),
+      kv("Бот", me.bot || "?"),
+      h("div", { class: "muted small" }, d.repo || "")),
+    latest ? btn(`⬆️ Обновить до ${latest}`, () => runJob(ctx, "Обновление awg2", ["update", "install"], (res) => [
+      h("div", { class: "card" }, kv("Установлена", (res && res.version) || latest)),
+      hint("Бот обновляется отдельно — из того же канала."),
+      btn("🤖 Обновить бота", () => updateBot(ctx), "btn-primary btn-block")]), "btn-ok btn-block") : null,
+    h("div", { class: "actions", style: "margin-top:8px" },
+      btn("🔎 Проверить", check),
+      btn("🤖 Обновить бота", () => updateBot(ctx)),
+      btn("♻️ Переустановить", () => jobAsk(ctx, "Поставить версию из канала поверх текущей? Если в канале версия старше — это откат.",
+        "Переустановка awg2", ["update", "install", "force"])),
+      btn(beta ? "🔀 На стабильный" : "🧪 Бета-канал", channel)),
+    hint("♻️ Переустановить — заново из текущего канала, даже без новой версии."));
 });
 
 // ── Журналы служб ─────────────────────────────────────────

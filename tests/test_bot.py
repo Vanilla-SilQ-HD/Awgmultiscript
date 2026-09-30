@@ -707,6 +707,37 @@ async def run():
         chk("панель: удаление нескольких", st == 200 and body["ok"]
             and not os.path.exists(os.path.join(ROOT, "root", "pj-001_awg2.conf")), [st, body])
 
+        # Бэкап: в чат — только из списка на сервере; архив с телефона — телом запроса
+        st, body = await api_("/api/call", {"args": ["backup", "create"], "timeout": 300})
+        bk_path = (body.get("data") or {}).get("path") or ""
+        st, body = await api_("/api/send", {"what": "backup", "path": "/etc/passwd"})
+        chk("панель: в чат уходит только бэкап из списка, не любой файл", st == 400, [st, body])
+        mark = len(SESSION.sent)
+        st, body = await api_("/api/send", {"what": "backup", "path": bk_path})
+        chk("панель: бэкап — файлом в чат владельцу",
+            st == 200 and [n for n, m in SESSION.sent[mark:] if getattr(m, "chat_id", None) == 111] == ["SendDocument"],
+            [st, body, [n for n, _ in SESSION.sent[mark:]]])
+        with open(bk_path, "rb") as f:
+            archive = f.read()
+
+        async def upload(data, uid=111):
+            async with http.post(base + "/api/backup/upload", data=data,
+                                 headers={"Authorization": "tma " + init_data(uid),
+                                          "Content-Type": "application/octet-stream"}) as r:
+                return r.status, await r.json(content_type=None)
+
+        st, body = await upload(archive, uid=222)
+        chk("панель: загрузка бэкапа чужим — 403", st == 403, [st, body])
+        st, body = await upload(archive)
+        up = body.get("path") or ""
+        chk("панель: архив с телефона сохранён у бота, только для root",
+            st == 200 and os.path.isfile(up) and oct(os.stat(up).st_mode & 0o777) == "0o600", [st, body])
+        st, body = await api_("/api/call", {"args": ["backup", "inspect", up]})
+        chk("панель: загруженный архив читается как бэкап", st == 200 and body["ok"] and body["data"]["clients"] >= 1,
+            [st, str(body)[:200]])
+        st, body = await upload(b"x" * (20 * 1024 * 1024 + 1))
+        chk("панель: больше 20 МБ — отказ", st == 400 and "20 МБ" in body.get("error", ""), [st, body])
+
     text, _ = screen(await press(f"app:pset:{ports[1]}"))
     chk("смена порта перезапускает сервер", webapp.SERVER.running and webapp.SERVER.url.endswith(f":{ports[1]}/")
         and f"Порт Mini App: {ports[1]}" in text, [text[:200], webapp.SERVER.url])

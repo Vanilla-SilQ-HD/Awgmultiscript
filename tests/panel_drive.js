@@ -1,7 +1,7 @@
 const { chromium } = require("playwright");
 const fs = require("fs");
 const say = (...a) => fs.appendFileSync(process.argv[4] + "/run.log", a.join(" ") + "\n");
-const [port, initData, out, theme, profile] = process.argv.slice(2);
+const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2);
 (async () => {
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
@@ -37,7 +37,12 @@ const [port, initData, out, theme, profile] = process.argv.slice(2);
       [...el.childNodes].some((n) => n.nodeType === 3 && /^(null|undefined|false)$/.test(n.textContent.trim()))));
     if (bad) throw new Error("на экране текст null/undefined");
   };
-  const nav = async (hash, sel = "h1") => { await page.goto(base + "#" + hash, { waitUntil: "domcontentloaded" }); await page.waitForSelector(sel); await page.waitForTimeout(300); await noNull(); };
+  // Тот же адрес браузер навигацией не считает — тогда перезагружаем страницу
+  const nav = async (hash, sel = "h1") => {
+    if (page.url() === base + "#" + hash) await page.reload({ waitUntil: "domcontentloaded" });
+    else await page.goto(base + "#" + hash, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(sel); await page.waitForTimeout(300); await noNull();
+  };
   // Подсказка прошлого шага не должна сойти за итог этого
   const step = async (name, fn) => {
     await page.evaluate(() => document.querySelectorAll(".toast").forEach((t) => t.remove()));
@@ -224,6 +229,79 @@ const [port, initData, out, theme, profile] = process.argv.slice(2);
     await nav("/tunnels", ".item");
     await page.click("text=Всё напрямую");
     await page.waitForSelector(".toast >> text=клиенты идут напрямую");
+  });
+
+  // ── Диагностика ──
+  await step("диагностика", async () => { await nav("/diag", "text=Система"); await shot("40-diag"); });
+  await step("домены мимикрии", async () => {
+    await page.click("text=Домены мимикрии: мир");
+    await page.waitForSelector("button:has-text('Назад')", { timeout: 90000 });
+    await shot("41-domains");
+  });
+  await step("журналы", async () => {
+    await nav("/diag/logs", ".item");
+    const n = await page.locator(".item").count();
+    if (n < 15) throw new Error("журналов в списке " + n);
+    await page.click(".item >> text=Telegram-бот"); await page.waitForSelector("pre");
+  });
+  await step("тест мимикрии: клиенты", async () => { await nav("/diag/sniff", ".item"); await page.waitForSelector(".item >> text=alice"); });
+  await step("DPI у клиента", async () => {
+    await nav("/diag/dpi", "pre");
+    await page.click("pre >> nth=0"); await page.waitForSelector(".toast >> text=Скопировано");
+    await shot("42-dpi");
+  });
+
+  // ── Бэкапы ──
+  await step("бэкап: создать и в чат", async () => {
+    await nav("/backup", "text=Бэкапов на сервере нет");
+    await page.click("button:has-text('Создать')");
+    await page.waitForSelector("text=Файл — в чате с ботом", { timeout: 90000 });
+    await shot("43-backup-done");
+  });
+  await step("бэкапы на сервере", async () => {
+    await nav("/backup", ".item");
+    if (await page.locator(".item").count() !== 2) throw new Error("ждали каталог и архив");
+    await shot("44-backups");
+    await page.click(".item >> nth=0");
+    await page.click(".sheet >> text=Прислать в чат");
+    await page.waitForSelector(".toast >> text=в чате с ботом");
+  });
+  await step("бэкап с телефона", async () => {
+    const dir = `${sandboxRoot}/awg_backup`;
+    const archive = fs.readdirSync(dir).find((f) => f.endsWith(".tar.gz"));
+    await page.setInputFiles("input[type=file]", `${dir}/${archive}`);
+    await page.waitForURL(/#\/backup\/restore$/);
+    await page.waitForSelector("text=Клиентов");
+    await shot("45-restore");
+  });
+  await step("восстановление", async () => {
+    await page.click("button:has-text('♻️ Восстановить')");
+    await page.waitForSelector("h1 >> text=✅ Восстановление из бэкапа", { timeout: 90000 });
+    await shot("46-restored");
+  });
+  await step("не бэкап — понятная ошибка", async () => {
+    await nav("/backup", ".item");
+    await page.setInputFiles("input[type=file]", { name: "photo.tar.gz", mimeType: "application/gzip", buffer: Buffer.from("not a tar") });
+    await page.waitForSelector("text=Архив не распаковался");
+    await page.waitForSelector("text=это не архив tar.gz");
+  });
+
+  // ── Обновление ──
+  // Главная сама заглядывает в канал — v9.9.9 может быть уже известна
+  await step("обновление", async () => { await nav("/update", "text=Канал"); await page.waitForSelector("text=стабильный"); await shot("47-update"); });
+  await step("проверка обновлений", async () => {
+    await page.click("button:has-text('Проверить')");
+    await page.waitForSelector(".toast >> text=Доступна v9.9.9");
+    await page.waitForSelector("button:has-text('Обновить до v9.9.9')");
+    await shot("48-update-available");
+  });
+  await step("бета-канал", async () => {
+    await page.click("button:has-text('Бета-канал')");
+    await page.waitForSelector("text=бета — ранние сборки");
+  });
+  await step("главная: плитки открываются", async () => {
+    await nav("/", ".tile");
+    if (await page.locator(".tile.soon").count() !== 2) throw new Error("ждали две плитки «скоро» (обфускатор и бот)");
   });
 
   const log = await page.evaluate(() => window.__log);

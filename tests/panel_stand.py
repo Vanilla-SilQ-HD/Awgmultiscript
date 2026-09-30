@@ -1,6 +1,6 @@
 """panel_stand.py — сервер панели Mini App на песочнице awg2 для прогона в браузере.
 
-Запускает test_panel.py: печатает «READY порт initData» и работает, пока его
+Запускает test_panel.py: печатает «READY порт initData ошибка корень» и работает, пока его
 не остановят. PROFILE=lite|pro — профиль сервера (от него зависят экраны),
 none — сервера ещё нет (мастер создания); AWG2_SH — сборка awg2 (по
 умолчанию dist/awg2.sh). Telegram здесь нет: сессия бота только печатает
@@ -26,6 +26,10 @@ TOKEN = "123456:" + "A" * 35
 API = api_wrapper()
 fake_acme()
 
+# Канал обновлений «отвечает»: в нём v9.9.9 (проверка — первые 4 КБ файла)
+with open(os.path.join(BIN, "curl"), "w") as f:
+    f.write('#!/usr/bin/env bash\nfor a in "$@"; do [[ "$a" == *http_code* ]] && { echo 204; exit 0; }\n'
+            '  [[ "$a" == 0-4095 ]] && { echo \'VERSION="v9.9.9"\'; exit 0; }; done\nexit 1\n')
 # Модуль ядра «собран» — иначе awg2 не создаст сервер
 for tool in ("modinfo", "modprobe"):
     with open(os.path.join(BIN, tool), "w") as f:
@@ -107,7 +111,7 @@ async def main():
     if PROFILE != "none":
         store.set_note("alice", "телефон Анны")
     await webapp.SERVER.start(Bot(TOKEN, session=Session()))
-    print("READY", PORT, init_data(111), webapp.SERVER.error or "-", flush=True)
+    print("READY", PORT, init_data(111), webapp.SERVER.error or "-", ROOT, flush=True)
     while True:
         await asyncio.sleep(3600)
 

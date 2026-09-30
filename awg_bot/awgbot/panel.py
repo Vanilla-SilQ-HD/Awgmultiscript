@@ -1,14 +1,16 @@
 """panel.py — JSON API полной панели Mini App.
 
-Все запросы — POST с JSON; подпись Telegram и доступ проверяет webapp
-(user_of). Панель делает то же, что бот, и тем же путём — через awg2 api;
-сверх него здесь то, что ведёт сам бот: заметки и мониторинг клиентов,
-QR, отправка файлов в чат. Права — как в боте: владельческое (удаление
-всего, удаление бота, сертификат и порт Mini App) — только владельцам.
+Все запросы — POST с JSON (архив бэкапа — телом запроса); подпись Telegram
+и доступ проверяет webapp (user_of). Панель делает то же, что бот, и тем же
+путём — через awg2 api; сверх него здесь то, что ведёт сам бот: заметки и
+мониторинг клиентов, QR, файлы в чат, приём архива бэкапа с телефона. Права —
+как в боте: владельческое (удаление всего, удаление бота, сертификат и порт
+Mini App) — только владельцам.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import re
@@ -18,6 +20,7 @@ from aiogram.types import BufferedInputFile, FSInputFile
 from aiohttp import web
 
 from . import access, api, media, store
+from .sections import backup as bk
 from .sections import clients as cls
 
 # Команды awg2 api, открытые панели; первое слово — раздел
@@ -29,6 +32,7 @@ OWNER_ONLY = (("uninstall",), ("bot", "uninstall"), ("bot", "webapp", "port"), (
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 MAX_ARGS, MAX_ARG = 16, 4000
 TIMEOUT_MAX = 900
+UPLOAD_MAX = 20 * 1024 * 1024       # как у файлов, присланных боту
 
 UserOf = Callable[[web.Request], dict]
 
@@ -214,4 +218,31 @@ def setup(app: web.Application, user_of: UserOf) -> None:
             await bot.send_document(uid, BufferedInputFile(media.zip_files(files), filename="awg_clients.zip"),
                                     caption=f"📦 Конфиги: {len(files)}")
             return web.json_response({"ok": True})
-        raise _bad("what: conf | export | zip")
+        if what == "backup":
+            # Только бэкап из списка на сервере: иначе это чтение любого файла
+            path = str(body.get("path") or "")
+            rows = await api.data("backup", "list", default=[]) or []
+            if not path or path not in {b.get("path") for b in rows}:
+                raise _bad("такого бэкапа на сервере нет")
+            data, name = await asyncio.to_thread(bk.pack, path)
+            await bot.send_document(uid, BufferedInputFile(data, filename=name),
+                                    caption="💾 В бэкапе приватные ключи — храни как пароль")
+            return web.json_response({"ok": True})
+        raise _bad("what: conf | export | zip | backup")
+
+    # ── Архив бэкапа с телефона: тело запроса — сам файл ──
+    async def _upload(request: web.Request) -> web.Response:
+        user_of(request)
+        if (request.content_length or 0) > UPLOAD_MAX:
+            raise _bad("файл больше 20 МБ")
+        data = bytearray()
+        async for chunk in request.content.iter_chunked(1 << 16):
+            data += chunk
+            if len(data) > UPLOAD_MAX:
+                raise _bad("файл больше 20 МБ")
+        if not data:
+            raise _bad("пустой файл")
+        path = await asyncio.to_thread(bk.save_upload, bytes(data))
+        return web.json_response({"ok": True, "path": str(path)})
+
+    app.router.add_post("/api/backup/upload", _upload)

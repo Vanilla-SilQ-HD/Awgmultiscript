@@ -78,7 +78,7 @@ async def _view_screen(target: ui.Target, path: str, idx: str) -> None:
                           ui.back(act.data("list"))))
 
 
-def _pack(path: str) -> tuple[bytes, str]:
+def pack(path: str) -> tuple[bytes, str]:
     """Каталог полного бэкапа — в tar.gz на лету, архив — как есть."""
     if os.path.isfile(path):
         with open(path, "rb") as f:
@@ -96,7 +96,7 @@ async def _get(cb: CallbackQuery, state: FSMContext, idx: str) -> None:
         await cb.answer("Бэкапа уже нет", show_alert=True)
         return
     await cb.answer("Отправляю…")
-    data, name = _pack(path)
+    data, name = pack(path)
     await ui.chat_of(cb).answer_document(BufferedInputFile(data, filename=name),
                                          caption="💾 В бэкапе приватные ключи — храни как пароль")
 
@@ -121,15 +121,21 @@ async def _upload_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
     if not data:
         await ask.retry(msg, state, ctx, "Нужен файл-архив до 20 МБ")
         return
+    await _inspect(msg, state, str(save_upload(data)))
+
+
+def save_upload(data: bytes) -> Path:
+    """Присланный архив — в каталог загрузок бота (только root), прежние
+    загрузки старше суток удаляются."""
     UPLOADS.mkdir(parents=True, exist_ok=True)
     os.chmod(UPLOADS, 0o700)
     for old in UPLOADS.iterdir():                      # прежние загрузки больше не нужны
         if time.time() - old.stat().st_mtime > 86400:
             old.unlink(missing_ok=True)
-    path = UPLOADS / f"backup-{int(time.time())}.tar.gz"
+    path = UPLOADS / f"backup-{time.time_ns()}.tar.gz"
     path.write_bytes(data)
     os.chmod(path, 0o600)
-    await _inspect(msg, state, str(path))
+    return path
 
 
 async def _inspect(target: ui.Target, state: FSMContext, path: str) -> None:
