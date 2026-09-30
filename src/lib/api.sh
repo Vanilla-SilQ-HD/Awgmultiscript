@@ -820,7 +820,7 @@ api_dispatch() {
   local cmd="${1:-help}"
   shift || true
   case "$cmd" in
-    version) { _kv version "$VERSION"; _kv api:n "$API_VERSION"; } | api_obj ;;
+    version) { _kv version "$VERSION"; _kv api:n "$API_VERSION"; _kv channel "$UPDATE_CHANNEL"; } | api_obj ;;
     status) _api_status ;;
     server) _api_server "$@" ;;
     module) _api_module "$@" ;;

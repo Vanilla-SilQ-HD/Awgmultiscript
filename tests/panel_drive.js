@@ -57,6 +57,8 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     const t = await page.evaluate(() => document.documentElement.dataset.theme);
     if (t !== theme) throw new Error(`тема ${t}, а Telegram — ${theme}`);
     await page.waitForSelector(".top .ver");
+    if (await page.locator("h1").count()) throw new Error("на главной остался заголовок");
+    if (await page.locator(".top .chan").count()) throw new Error("плашка «бета» на стабильном канале");
     await shot("01-home");
   });
 
@@ -334,6 +336,8 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
   await step("бета-канал", async () => {
     await page.click("button:has-text('Бета-канал')");
     await page.waitForSelector("text=бета — ранние сборки");
+    await page.waitForSelector(".top .chan >> text=бета");
+    if (/null|undefined/.test(await page.textContent(".top"))) throw new Error("в шапке «null»");
   });
   // ── WG + обфускатор ──
   await step("обфускатор", async () => {

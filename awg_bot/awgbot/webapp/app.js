@@ -5,7 +5,7 @@
 
 const tg = window.Telegram && window.Telegram.WebApp;
 const root = document.getElementById("app");
-const S = { me: null, version: "", clients: null, sort: null, view: null, filter: "all", q: "", select: null };
+const S = { me: null, version: "", channel: "", clients: null, sort: null, view: null, filter: "all", q: "", select: null };
 
 // ── Связь с ботом ─────────────────────────────────────────
 async function post(path, body = {}) {
@@ -193,12 +193,16 @@ function menuToChat() {
   });
 }
 const topEl = document.getElementById("top");
-function drawTop() {
+function drawTop(compact = false) {
   const dark = document.documentElement.dataset.theme === "dark";
+  const beta = S.channel === "beta";
   topEl.className = "top";
-  topEl.replaceChildren(
+  topEl.replaceChildren(...[
     h("div", { class: "logo", onclick: () => go("/") }, icon("shield-check")),
-    h("div", { class: "ver", onclick: () => go("/") }, h("b", {}, "AwgToolza"), S.version ? h("span", {}, S.version) : null),
+    // Бета — плашкой справа; не влезает (узкий экран, крупный масштаб) — «β» у версии
+    h("div", { class: "ver", onclick: () => go("/") }, h("b", {}, "AwgToolza"),
+      S.version ? h("span", {}, S.version, beta && compact ? h("span", { class: "warn" }, " β") : null) : null),
+    beta && !compact ? pill("бета", "warn chan") : null,
     h("div", { class: "sp" }),
     h("button", { "aria-label": "Вид", title: "Вид панели", onclick: lookSheet }, icon("a-large-small")),
     h("button", { "aria-label": "Тема", title: "Тема", onclick: () => {
@@ -213,7 +217,11 @@ function drawTop() {
         ...SECTIONS.filter((x) => x[2]).map(([ic, t, p]) => ({ label: `${ic} ${t}`, value: p }))]);
       if (path === "chat") menuToChat();
       else if (path) go(path);
-    } }, icon("menu")));
+    } }, icon("menu")),
+  ].filter(Boolean));
+  // Запас в 1px — под масштабом ширины округляются и дают ложное «не влезает»
+  const ver = topEl.querySelector(".ver");
+  if (beta && !compact && ver && [...ver.children].some((c) => c.scrollWidth - c.clientWidth > 1)) drawTop(true);
 }
 
 // Одна подсказка за раз: новая сменяет прежнюю, а не ложится поверх
@@ -451,6 +459,7 @@ route(/^\/$/, async (ctx) => {
   const [me, d, cl] = await Promise.all([post("/api/me"), post("/api/status"), post("/api/clients").catch(() => null)]);
   S.me = me;
   S.version = d.version;
+  S.channel = d.channel;
   drawTop();
   if (cl) {
     S.clients = cl;
@@ -469,7 +478,6 @@ route(/^\/$/, async (ctx) => {
   ].filter(Boolean);
   const state = !s.exists ? "" : s.up ? "on" : "bad";
   ctx.put(
-    title("Обзор", pill(d.channel === "beta" ? "бета-канал" : "стабильный", d.channel === "beta" ? "warn" : "")),
     alerts.length ? h("div", { class: "card warn" }, alerts.map(([a, path]) =>
       h("div", { class: "row", style: "cursor:pointer;padding:3px 0", onclick: () => go(path) }, icon("triangle-alert"), a))) : null,
     ecard({ state, name: d.host || "сервер", onopen: () => go("/server"),
@@ -1628,6 +1636,8 @@ route(/^\/update$/, async (ctx) => {
     await busy(b, async () => {
       await call("update", "channel", to);
       await call("update", "check").catch(() => null);
+      S.channel = to;
+      drawTop();
       haptic(); toast(to === "beta" ? "Канал: бета" : "Канал: стабильный"); render();
     });
   }
@@ -2044,5 +2054,7 @@ if (!tg || !tg.initData) {
 } else {
   render();
   // Версия в шапке — для экранов, открытых не с главной
-  call("version").then((v) => { if (!S.version && v) { S.version = v.version; drawTop(); } }).catch(() => {});
+  call("version").then((v) => {
+    if (!S.version && v) { S.version = v.version; S.channel = v.channel || S.channel; drawTop(); }
+  }).catch(() => {});
 }
