@@ -34,7 +34,7 @@ ALLOWED = {"status", "version", "server", "module", "clients", "client", "mimicr
 OWNER_ONLY = (("uninstall",), ("bot", "uninstall"), ("bot", "webapp", "port"), ("cert", "issue"),
               ("cert", "remove"))
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
-MAX_ARGS, MAX_ARG = 16, 4000
+MAX_ARGS, MAX_ARG = 32, 4000       # правка всех параметров 3.1 — 23 аргумента
 TIMEOUT_MAX = 900
 UPLOAD_MAX = 20 * 1024 * 1024       # как у файлов, присланных боту
 

@@ -660,6 +660,24 @@ proto_upgrade_hint() {
   fi
 }
 
+# Снимок конфигов сервера и клиентов — откат, если awg0 не поднимется.
+_params_snapshot() {  # ПЕРЕМЕННАЯ
+  local __d f
+  mktmp __d -d || return 1
+  mkdir -p "$__d/clients"
+  cp -a "$SERVER_CONF" "$__d/"
+  while read -r f; do cp -a "$f" "$__d/clients/"; done < <(client_files)
+  printf -v "$1" '%s' "$__d"
+}
+
+_params_restore() {  # КАТАЛОГ_СНИМКА
+  err "awg0 не поднялся с новыми параметрами — возвращаю прежние"
+  cp -a "$1/${SERVER_CONF##*/}" "$SERVER_CONF"
+  rm -f "$CLIENT_DIR"/*_awg[23].conf
+  cp -a "$1/clients/." "$CLIENT_DIR/"
+  server_restart && ok "Прежняя конфигурация восстановлена"
+}
+
 # Перегенерация параметров обфускации с переходом на версию $1.
 # Ключи, адреса, имена, сроки и I1-I5 сохраняются. Все клиенты получают
 # новые конфиги — старые перестают подключаться.
@@ -680,10 +698,7 @@ server_regen_params() {
   fi
 
   auto_backup regen || warn "Авто-бэкап не удался"
-  mktmp snap -d || return 1
-  mkdir -p "$snap/clients"
-  cp -a "$SERVER_CONF" "$snap/"
-  while read -r f; do cp -a "$f" "$snap/clients/"; done < <(client_files)
+  _params_snapshot snap || return 1
 
   MTU=$(conf_iface_get MTU)
   gen_awg_params "$profile" "$target" || return 1
@@ -698,20 +713,136 @@ server_regen_params() {
   client_files_sync_suffix
 
   # Параметры [Interface] syncconf не применяет — только down/up.
-  if ! server_restart; then
-    err "awg0 не поднялся с новыми параметрами — возвращаю прежние"
-    cp -a "$snap/${SERVER_CONF##*/}" "$SERVER_CONF"
-    rm -f "$CLIENT_DIR"/*_awg[23].conf
-    cp -a "$snap/clients/." "$CLIENT_DIR/"
-    server_restart && ok "Прежняя конфигурация восстановлена"
-    return 1
-  fi
+  server_restart || { _params_restore "$snap"; return 1; }
   log_info "параметры перегенерированы: $cur → $target, клиентов $n"
   success_box "AWG $target: параметры обновлены, клиентов $n"
   warn "Каждому клиенту нужен новый конфиг — до замены он не подключится"
   (( n > 0 )) && info "Все конфиги архивом: Клиенты → Экспорт; по одному — QR/текст или бот"
   [[ "$target" == 3.1 && "$cur" != 3.1 ]] && info "Клиентам нужен AmneziaVPN 5.0.1.5+ или AmneziaWG с поддержкой 3.1"
   mimicry_module_warnings
+}
+
+# ── Параметры вручную ─────────────────────────────────────
+# Правки «Ключ=значение» поверх текущих параметров. Проверка — py params-check
+# (пределы генератора); итог — в PARAMS_*: KEYS «ключ<TAB>значение» после
+# правок, ERR и WARN построчно, CHANGED и BREAKING — ключи (BREAKING обязаны
+# совпадать у клиентов), NEW — новый блок параметров.
+PARAMS_KEYS="" PARAMS_ERR="" PARAMS_WARN="" PARAMS_CHANGED="" PARAMS_BREAKING="" PARAMS_NEW="" PARAMS_CLIENTS=0
+params_check() {
+  local out
+  out=$(server_params | py params-check "$(server_proto)" "$(conf_iface_get MTU)" "$@") || return 1
+  PARAMS_KEYS=$(sed -n 's/^K\t//p' <<< "$out")
+  PARAMS_ERR=$(sed -n 's/^E\t//p' <<< "$out")
+  PARAMS_WARN=$(sed -n 's/^W\t//p' <<< "$out")
+  PARAMS_CHANGED=$(sed -n 's/^C\t//p' <<< "$out")
+  PARAMS_BREAKING=$(sed -n 's/^B\t//p' <<< "$out")
+  PARAMS_NEW=$(sed -n 's/^P\t//p' <<< "$out")
+}
+
+# Новый блок — в сервер и всех клиентов (как при перегенерации: у клиентов те
+# же значения), рестарт; awg0 не поднялся — откат.
+params_edit_apply() {
+  local snap f n=0 keys
+  auto_backup params || warn "Авто-бэкап не удался"
+  _params_snapshot snap || return 1
+  py params-replace "$SERVER_CONF" <<< "$PARAMS_NEW" || { err "Не удалось обновить $SERVER_CONF"; return 1; }
+  while read -r f; do
+    py params-replace "$f" <<< "$PARAMS_NEW" && n=$((n + 1))
+  done < <(client_files)
+  server_restart || { _params_restore "$snap"; return 1; }
+  PARAMS_CLIENTS=$n
+  keys=$(tr '\n' ' ' <<< "$PARAMS_CHANGED"); keys="${keys% }"
+  log_info "параметры изменены вручную: $keys; клиентов $n"
+  success_box "Параметры AWG обновлены: ${keys// /, }"
+  if [[ -n "$PARAMS_BREAKING" ]]; then
+    keys=$(tr '\n' ' ' <<< "$PARAMS_BREAKING"); keys="${keys% }"
+    warn "${keys// /, } обязаны совпадать у клиентов — каждому нужен новый конфиг, до замены он не подключится"
+    (( n > 0 )) && info "Все конфиги архивом: Клиенты → Экспорт; по одному — QR/текст или бот"
+  else
+    info "Старые конфиги продолжают работать; новые значения клиент получит с новым конфигом ($n)"
+  fi
+}
+
+# awg2 api server params set [force] ПРАВКА... — предупреждения без force
+# не пропускает: бот и панель сперва показывают их человеку (params check).
+server_params_set() {
+  local force=0 l
+  [[ "${1:-}" == force ]] && { force=1; shift; }
+  server_exists || { err "Сервер не создан"; return 1; }
+  (( $# )) || { err "Нет правок: Ключ=значение"; return 1; }
+  params_check "$@" || return 1
+  if [[ -n "$PARAMS_ERR" ]]; then
+    while IFS= read -r l; do err "$l"; done <<< "$PARAMS_ERR"
+    return 1
+  fi
+  [[ -n "$PARAMS_CHANGED" ]] || { ok "Параметры не изменились"; return 0; }
+  if [[ -n "$PARAMS_WARN" ]]; then
+    while IFS= read -r l; do warn "$l"; done <<< "$PARAMS_WARN"
+    (( force )) || { err "Есть предупреждения — чтобы сохранить всё равно, добавь force"; return 1; }
+  fi
+  params_edit_apply
+}
+
+do_params_edit_menu() {
+  server_exists || { err "Сервер не создан"; return 1; }
+  local -a edits=() keys=() vals=()
+  local c i k v n mark l proto
+  proto=$(server_proto)
+  while true; do
+    params_check "${edits[@]}" || return 1
+    keys=(); vals=()
+    while IFS=$'\t' read -r k v; do keys+=("$k"); vals+=("$v"); done <<< "$PARAMS_KEYS"
+    n=${#keys[@]}
+    echo ""
+    hdr "Параметры AWG $proto вручную"
+    echo -e "  ${D}S и H обязаны совпадать у сервера и клиентов: после их правки старые конфиги${N}"
+    echo -e "  ${D}не подключатся. Jc/Jmin/Jmax и таймеры 3.x — не обязаны.${N}"
+    for (( i = 0; i < n; i++ )); do
+      mark=""
+      grep -qx "${keys[i]}" <<< "$PARAMS_CHANGED" && mark=" ${Y}← изменён${N}"
+      printf "  ${C}%2d)${N} %-22s %s%b\n" $((i + 1)) "${keys[i]}" "${vals[i]:-—}" "$mark"
+    done
+    echo -e "  ${G}$((n + 1)))${N} Проверить и применить"
+    echo -e "  ${W} 0)${N} ← Назад ${D}(правки не сохраняются)${N}"
+    read_choice c "${C}  Выбор [0-$((n + 1))]: ${N}" 0 $((n + 1)) 0
+    (( c == 0 )) && return 0
+    if (( c == n + 1 )); then
+      _params_edit_confirm || continue
+      params_edit_apply
+      pause
+      return 0
+    fi
+    k=${keys[c - 1]}; v=${vals[c - 1]}
+    if [[ "$k" =~ ^(RandomTrailers|DisableCookies)$ ]]; then
+      edits+=("$k=$([[ "$v" == on ]] && echo off || echo on)")
+      continue
+    fi
+    read_line l "${C}  $k (сейчас ${v:-—}; Enter — без изменений): ${N}"
+    l="${l// /}"
+    [[ -n "$l" ]] && edits+=("$k=$l")
+  done
+}
+
+# Показать итог проверки и спросить подтверждение; 1 — вернуться к правке.
+_params_edit_confirm() {
+  local l keys
+  [[ -n "$PARAMS_CHANGED" ]] || { info "Ничего не изменено"; return 1; }
+  if [[ -n "$PARAMS_ERR" ]]; then
+    while IFS= read -r l; do err "$l"; done <<< "$PARAMS_ERR"
+    return 1
+  fi
+  if [[ -n "$PARAMS_WARN" ]]; then
+    while IFS= read -r l; do warn "$l"; done <<< "$PARAMS_WARN"
+    ask_yes "  Сохранить всё равно? [y/N]: " n || return 1
+  fi
+  if [[ -n "$PARAMS_BREAKING" ]]; then
+    keys=$(tr '\n' ' ' <<< "$PARAMS_BREAKING"); keys="${keys% }"
+    warn "Меняются ${keys// /, } — все клиенты ($(client_files | grep -c . || true)) потеряют связь до получения нового конфига"
+    read_confirm "${R}  Продолжить? (введи yes): ${N}" || { info "Отменено"; return 1; }
+  else
+    info "Старые конфиги продолжат работать — клиентам совпадать не обязательно"
+    ask_yes "  Применить? [Y/n]: " y || return 1
+  fi
 }
 
 do_proto_menu() {
@@ -733,9 +864,10 @@ do_proto_menu() {
   else
     echo -e "  ${Y}2)${N} Вернуться на AWG 2.0 ${D}— для старых клиентов${N}"
   fi
+  echo -e "  ${C}3)${N} Изменить параметры вручную ${D}— Jc, S1-S4, H1-H4…${N}"
   echo -e "  ${W}0)${N} ← Назад"
-  read_choice c "${C}  Выбор [0-2]: ${N}" 0 2 0
-  case "$c" in 1) target=3.1 ;; 2) target=2.0 ;; *) return 0 ;; esac
+  read_choice c "${C}  Выбор [0-3]: ${N}" 0 3 0
+  case "$c" in 1) target=3.1 ;; 2) target=2.0 ;; 3) do_params_edit_menu; return ;; *) return 0 ;; esac
   echo ""
   warn "Все клиенты ($n) потеряют связь до получения нового конфига"
   [[ "$target" != "$cur" ]] && warn "Версия меняется: AWG $cur → AWG $target"

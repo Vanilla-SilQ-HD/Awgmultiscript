@@ -88,7 +88,7 @@ const EMOJI_ICON = {
   "📅": "calendar-clock", "♾": "infinity", "🚪": "door-open", "☁": "cloud", "🛰": "satellite", "🧦": "waypoints",
   "🔐": "lock-keyhole", "🧪": "flask-conical", "🖥": "server", "🛡": "shield", "📁": "folder", "🗜": "file-archive",
   "◀": "arrow-left", "✅": "circle-check", "❌": "circle-x", "✖": "x", "🔃": "arrow-down-up", "📂": "folder",
-  "👮": "user", "🎨": "palette", "💬": "message-square-text", "📱": "smartphone", "🔗": "share-2", "🙋": "user-plus", "🧯": "eraser",
+  "👮": "user", "🎨": "palette", "🎛": "sliders-horizontal", "↩": "undo-2", "💬": "message-square-text", "📱": "smartphone", "🔗": "share-2", "🙋": "user-plus", "🧯": "eraser",
 };
 const EMOJI_RE = /^(\p{Extended_Pictographic})\uFE0F?\s*/u;
 function withIcon(label) {
@@ -950,6 +950,7 @@ route(/^\/server$/, async (ctx) => {
     !d.exists ? btn("✨ Создать сервер", () => go("/server/create"), "btn-block" + (d.installed ? " btn-primary" : "")) : null,
     h("h2", {}, "Обслуживание"),
     h("div", { class: "card list" },
+      d.exists ? menuItem("🎛 Параметры AWG", "Jc, S1-S4, H1-H4 вручную", () => go("/server/params")) : null,
       menuItem("🧩 Модуль ядра", "версии, обновление, откат", () => go("/server/module")),
       menuItem(d.installed ? "📦 Компоненты" : "📦 Установить компоненты", "пакеты, модуль, amneziawg-tools",
         () => jobAsk(ctx, "Пакеты, заголовки ядра, сборка модуля AmneziaWG и amneziawg-tools из исходников. Обычно 5-15 минут. "
@@ -1089,7 +1090,80 @@ route(/^\/server\/proto$/, async (ctx) => {
         + "новые конфиги и до их замены не подключатся."),
       d.proto31 ? null : h("div", { class: "warn", style: "margin-top:6px" }, "▲ Модуль не умеет 3.1 — при переходе он обновится (долго)")),
     btn(cur === "3.1" ? "🔁 Новые параметры 3.1" : "⬆️ Перейти на 3.1", () => doIt("3.1"), "btn-primary btn-block"),
-    btn(cur === "2.0" ? "🔁 Новые параметры 2.0" : "⬇️ Вернуть 2.0", () => doIt("2.0"), "btn-block"));
+    btn(cur === "2.0" ? "🔁 Новые параметры 2.0" : "⬇️ Вернуть 2.0", () => doIt("2.0"), "btn-block"),
+    btn("🎛 Изменить параметры вручную", () => go("/server/params"), "btn-block"));
+});
+
+// Параметры AWG вручную: поля с текущими значениями, проверка в awg2 на лету
+// (server params check), запись одним вызовом (server params set force)
+const PARAM_GROUPS = [
+  ["Мусорные пакеты", 3, [["Jc", "Jc", "сколько"], ["Jmin", "Jmin", "байт"], ["Jmax", "Jmax", "байт"]]],
+  ["Паддинг", 4, [["S1", "S1", "инициация"], ["S2", "S2", "ответ"], ["S3", "S3", "cookie"], ["S4", "S4", "данные"]]],
+  ["Заголовки", 1, [["H1", "H1", "инициация"], ["H2", "H2", "ответ"], ["H3", "H3", "cookie"], ["H4", "H4", "данные"]]],
+  ["AWG 3.x", 2, [["ContentPaddingAddition", "Паддинг данных", "байт, a-b"], ["RekeyAfterTime", "RekeyAfter", "с"],
+    ["RekeyTimeout", "RekeyTimeout", "с"], ["RejectAfterTime", "RejectAfter", "с"], ["KeepaliveTimeout", "Keepalive", "с"],
+    ["MaxHandshakeAttempts", "MaxHandshake", "попыток"]]],
+];
+const PARAM_SWITCHES = [["RandomTrailers", "RandomTrailers", "хвосты случайной длины — обязаны совпадать у клиентов"],
+  ["DisableCookies", "DisableCookies", "сервер не отвечает cookie под нагрузкой — только на сервере"]];
+
+route(/^\/server\/params$/, async (ctx) => {
+  const d = await call("server", "params");
+  const orig = d.values || {}, cur = { ...orig }, inputs = {};
+  const msgs = h("div"), applyBtn = h("button", { class: "btn-primary", disabled: true }, "✅ Применить");
+  const edits = () => Object.keys(orig).filter((k) => cur[k] !== orig[k]).map((k) => `${k}=${cur[k]}`);
+  let seq = 0, timer = null, last = null;
+  async function check() {
+    const my = ++seq;
+    const r = await call("server", "params", "check", ...edits()).catch((e) => ({ errors: [e.message] }));
+    if (my !== seq || !ctx.live()) return;
+    last = r;
+    const changed = new Set(r.changed || []);
+    for (const [k, inp] of Object.entries(inputs)) inp.classList.toggle("chg", changed.has(k));
+    msgs.replaceChildren(...[
+      (r.errors || []).length ? h("div", { class: "card bad small" }, r.errors.map((e) => h("div", {}, "❌ " + e))) : null,
+      (r.warnings || []).length ? h("div", { class: "card warn small" }, r.warnings.map((w) => h("div", {}, "▲ " + w))) : null,
+    ].filter(Boolean));
+    applyBtn.disabled = !changed.size || (r.errors || []).length > 0;
+  }
+  const recheck = () => { clearTimeout(timer); timer = setTimeout(() => busy(null, check), 350); };
+  const field = ([k, label, sub]) => {
+    const inp = inputs[k] = h("input", { value: orig[k] || "", autocomplete: "off", autocapitalize: "off", spellcheck: "false",
+      inputmode: /^(Jc|Jmin|Jmax|S\d)$/.test(k) ? "numeric" : null, "data-key": k,
+      oninput: () => { cur[k] = inp.value.replace(/\s+/g, ""); recheck(); } });
+    return h("div", { class: "pf" }, h("label", {}, h("b", {}, label), " ", h("span", {}, sub)), inp);
+  };
+  applyBtn.onclick = () => busy(applyBtn, async () => {
+    await check();
+    const r = last || {};
+    if ((r.errors || []).length || !(r.changed || []).length) return;
+    const breaking = r.breaking || [];
+    const text = [`Меняются: ${r.changed.join(", ")}.`, ...(r.warnings || []).map((w) => "▲ " + w),
+      breaking.length ? `${breaking.join(", ")} обязаны совпадать у клиентов: все клиенты (${d.clients || 0}) потеряют связь `
+        + "до получения нового конфига." : "Старые конфиги продолжат работать.",
+      "Перед записью — авто-бэкап; не поднимется awg0 — вернутся прежние. Применить?"].join("\n");
+    if (!await confirmTg(text)) return;
+    const res = await callR(["server", "params", "set", "force", ...edits()]);
+    haptic(); toast("✅ Параметры AWG обновлены", 3000);
+    if ((res.data || {}).breaking && res.data.breaking.length && d.clients) {
+      const pick = await sheet("Клиентам нужны новые конфиги", [{ label: "📦 Все конфиги архивом в чат", value: "zip" },
+        { label: "👥 К клиентам", value: "cl" }]);
+      if (pick === "zip") await busy(null, async () => { await post("/api/send", { what: "export" }); toast("Архив всех конфигов — в чате с ботом"); });
+      if (pick === "cl") return go("/clients");
+    }
+    render();
+  });
+  const is3 = String(d.proto || "").startsWith("3");
+  ctx.put(title("🎛 Параметры AWG", pill("AWG " + (d.proto || "?"), "accent")),
+    h("div", { class: "card small muted" }, "S и H обязаны совпадать у сервера и клиентов — после их правки старые конфиги "
+      + "не подключатся. Jc/Jmin/Jmax" + (is3 ? ", паддинг данных и таймеры" : "") + " — не обязаны."),
+    PARAM_GROUPS.filter(([, , keys]) => keys.some(([k]) => k in orig)).map(([name, cols, keys]) => [h("h2", {}, name),
+      h("div", { class: "pgrid", style: `--c:${cols}` }, keys.filter(([k]) => k in orig).map(field))]),
+    PARAM_SWITCHES.filter(([k]) => k in orig).map(([k, label, sub]) => switchRow(label, sub, orig[k] === "on", async (on) => {
+      cur[k] = on ? "on" : "off"; recheck();
+    })),
+    msgs,
+    h("div", { class: "bar" }, h("button", { onclick: () => render() }, "↩️ Сбросить"), applyBtn));
 });
 
 route(/^\/server\/endpoint$/, async (ctx) => {

@@ -200,6 +200,192 @@ def cmd_params_replace(path):
     write_atomic(path, "\n".join(out))
 
 
+# ── Правка параметров вручную ─────────────────────────────
+# Пределы — те же, что соблюдает генератор (params.sh); здесь они проверяют
+# то, что ввёл человек. Совпадать у сервера и клиентов обязаны S1-S4, H1-H4,
+# HeaderProtectionKey и RandomTrailers; мусорные пакеты, ContentPaddingAddition
+# и таймеры — нет (README amneziawg-go: «client-side»).
+U32 = 0xFFFFFFFF
+HP_MIN_S, S4_MAX, JC_MAX, S_GAP = 12, 32, 128, 10
+MTU_OVERHEAD, MTU_SAFETY = 60, 24
+BREAKING = ("S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4", "HeaderProtectionKey", "RandomTrailers")
+EDIT_BASE = ("Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4")
+EDIT_3X = ("ContentPaddingAddition", "RekeyAfterTime", "RekeyTimeout", "RejectAfterTime",
+           "KeepaliveTimeout", "MaxHandshakeAttempts")
+EDIT_31 = ("RandomTrailers", "DisableCookies")
+SWITCHES = ("RandomTrailers", "DisableCookies")
+
+
+def params_editable(proto):
+    keys = list(EDIT_BASE)
+    if proto.startswith("3"):
+        keys += EDIT_3X
+    if proto == "3.1":
+        keys += EDIT_31
+    return keys
+
+
+def _prange(v):
+    """«a» или «a-b» (a ≤ b ≤ 2^32-1) → (a, b); иначе None."""
+    m = re.fullmatch(r"(\d{1,10})(?:-(\d{1,10}))?", v or "")
+    if not m:
+        return None
+    a = int(m[1])
+    b = int(m[2]) if m[2] else a
+    return (a, b) if a <= b <= U32 else None
+
+
+def _pnum(v):
+    return int(v) if re.fullmatch(r"\d{1,10}", v or "") and int(v) <= U32 else None
+
+
+def _params_norm(key, val):
+    val = re.sub(r"\s+", "", val or "")
+    if key in SWITCHES:
+        low = val.lower()
+        if low in ("on", "1", "yes", "true", "да", "вкл"):
+            return "on"
+        if low in ("off", "0", "no", "false", "нет", "выкл", ""):
+            return "off"
+    return val
+
+
+def params_check(proto, mtu, old, edits):
+    """old — {ключ: значение} из конфига, edits — [(ключ, значение)].
+    → (ошибки, предупреждения, изменённые, новый словарь)."""
+    errs, warns = [], []
+    editable = params_editable(proto)
+    by_low = {k.lower(): k for k in AWG_PARAM_KEYS}
+    new = dict(old)
+    for key, val in edits:
+        k = by_low.get(key.strip().lower())
+        if k is None:
+            errs.append(f"{key}: нет такого параметра AmneziaWG")
+        elif k == "HeaderProtectionKey":
+            errs.append("HeaderProtectionKey меняется перегенерацией: Протокол → новые параметры")
+        elif k not in editable:
+            errs.append(f"{k}: параметр AWG 3.x, а сервер на {proto}")
+        else:
+            new[k] = _params_norm(k, val)
+    for k in SWITCHES:
+        if new.get(k) == "off":
+            del new[k]
+    changed = [k for k in AWG_PARAM_KEYS if old.get(k, "") != new.get(k, "")]
+    ch = set(changed)
+    is3 = proto.startswith("3")
+
+    def num(k, lo, hi, what):
+        v = _pnum(new.get(k, ""))
+        if v is None or not lo <= v <= hi:
+            errs.append(f"{k} = {new.get(k, '') or 'пусто'}: нужно {what}")
+            return None
+        return v
+
+    jc = num("Jc", 0, JC_MAX, f"целое 0-{JC_MAX}")
+    jmin = num("Jmin", 0, 1472, "целое 0-1472")
+    jmax = num("Jmax", 0, 1472, "целое 0-1472 — больше не влезет в пакет 1500, а фрагменты заметны цензору")
+    if jmin is not None and jmax is not None and jmin > jmax:
+        errs.append(f"Jmin ({jmin}) больше Jmax ({jmax})")
+    if jc is not None and "Jc" in ch and not 3 <= jc <= 12:
+        warns.append(f"Jc = {jc}: рекомендуется 3-12" + (" — без мусорных пакетов" if jc == 0 else ""))
+
+    # Рукопожатия с паддингом обязаны влезать в 1280 — минимальный MTU IPv6
+    smin = HP_MIN_S if is3 else 0
+    s = {}
+    for k, base, hi in (("S1", 148, 1132), ("S2", 92, 1188), ("S3", 64, 1216), ("S4", 32, S4_MAX)):
+        what = f"целое {smin}-{hi}" + (" (AWG 3.x требует ≥ 12)" if is3 else "") + (" — предел amneziawg-tools" if k == "S4" else "")
+        s[k] = num(k, smin, hi, what)
+    if None not in (s["S1"], s["S2"], s["S3"]):
+        lens = {"S1": 148 + s["S1"], "S2": 92 + s["S2"], "S3": 64 + s["S3"]}
+        names = {"S1": "инициации", "S2": "ответа", "S3": "cookie"}
+        pairs = (("S1", "S2"), ("S1", "S3"), ("S2", "S3"))
+        for a, b in pairs:
+            d = abs(lens[a] - lens[b])
+            if d == 0:
+                errs.append(f"{a} и {b}: пакеты {names[a]} и {names[b]} выйдут одной длины ({lens[a]} Б) — "
+                            "сервер не отличит их")
+            elif d < S_GAP and ({a, b} & ch):
+                warns.append(f"{a} и {b}: длины пакетов {names[a]} и {names[b]} почти совпадают "
+                             f"({lens[a]} и {lens[b]} Б) — генератор разводит их на {S_GAP}+")
+
+    h = {}
+    for k in ("H1", "H2", "H3", "H4"):
+        r = _prange(new.get(k, ""))
+        if r is None:
+            errs.append(f"{k} = {new.get(k, '') or 'пусто'}: нужно число или диапазон a-b (a ≤ b ≤ {U32})")
+        else:
+            h[k] = r
+    keys = sorted(h)
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            if h[a][0] <= h[b][1] and h[b][0] <= h[a][1]:
+                errs.append(f"{a} и {b} пересекаются — сервер не отличит типы пакетов")
+    if not is3:
+        for k, (lo, hi) in h.items():
+            if k not in ch:
+                continue
+            if lo <= 4:
+                warns.append(f"{k}: задевает 1-4 — стандартные типы WireGuard, прямой признак для DPI")
+            if hi > 0x7FFFFFFF:
+                warns.append(f"{k}: выше 2147483647 — старый клиент AmneziaVPN для Windows не примет")
+            if hi - lo < 1000:
+                warns.append(f"{k}: узкий диапазон — заголовок почти постоянный, это подпись для DPI")
+
+    cpa = 0
+    if is3:
+        for k in EDIT_3X:
+            if k not in new:
+                continue
+            r = _prange(new[k])
+            if r is None or r[0] < (0 if k == "ContentPaddingAddition" else 1):
+                errs.append(f"{k} = {new[k] or 'пусто'}: нужно число или диапазон a-b"
+                            + ("" if k == "ContentPaddingAddition" else ", от 1"))
+            elif k == "ContentPaddingAddition":
+                cpa = r[1]
+        rat, rjt = _prange(new.get("RekeyAfterTime", "")), _prange(new.get("RejectAfterTime", ""))
+        if rat and rjt and rjt[0] <= rat[1]:
+            errs.append("RejectAfterTime должен быть целиком больше RekeyAfterTime — иначе сессия умрёт "
+                        "раньше, чем переустановится")
+        rkt = _prange(new.get("RekeyTimeout", ""))
+        if rkt and rkt[0] < 5 and "RekeyTimeout" in ch:
+            warns.append("RekeyTimeout меньше 5 с — лишние повторы рукопожатия")
+        for k in SWITCHES:
+            if k in new and new[k] != "on":
+                errs.append(f"{k}: только on или off")
+
+    # Запас до пути 1500: тот же расчёт, что у генератора (_check_mtu_headroom)
+    if str(mtu).isdigit() and s.get("S4") is not None and ({"S4", "ContentPaddingAddition"} & ch):
+        outer = int(mtu) + MTU_OVERHEAD + s["S4"] + cpa
+        if outer > 1500 - MTU_SAFETY:
+            warns.append(f"MTU {mtu}: внешний пакет до {outer} Б — не остаётся запаса до 1500; "
+                         "уменьши S4" + (" или ContentPaddingAddition" if is3 else ""))
+    return errs, warns, changed, new
+
+
+def cmd_params_check(proto, mtu, *edits):
+    """stdin — параметры сервера («Ключ = значение»), аргументы — правки
+    «Ключ=значение». Вывод построчно: K ключ значение (редактируемые, после
+    правок), E ошибка, W предупреждение, C изменённый ключ, B изменённый ключ,
+    который обязан совпадать у клиентов, P строка нового блока параметров."""
+    old = {}
+    for line in sys.stdin.read().splitlines():
+        m = re.match(r"^(\w+)\s*=\s*(.*?)\s*$", line)
+        if m and m[1] in AWG_PARAM_KEYS:
+            old[m[1]] = m[2]
+    pairs = []
+    for e in edits:
+        if "=" not in e:
+            die(f"правка «{e}»: нужно Ключ=значение")
+        k, v = e.split("=", 1)
+        pairs.append((k, v))
+    errs, warns, changed, new = params_check(proto, mtu, old, pairs)
+    out = [f"K\t{k}\t{new.get(k, 'off' if k in SWITCHES else '')}" for k in params_editable(proto)]
+    out += [f"E\t{x}" for x in errs] + [f"W\t{x}" for x in warns]
+    out += [f"C\t{k}" for k in changed] + [f"B\t{k}" for k in changed if k in BREAKING]
+    out += [f"P\t{k} = {new[k]}" for k in AWG_PARAM_KEYS if k in new]
+    print("\n".join(out))
+
+
 def cmd_keepalive_set(path, value):
     text = read(path)
     new = re.sub(r"^PersistentKeepalive\s*=.*$", "PersistentKeepalive = " + value, text, flags=re.M)
@@ -1078,7 +1264,7 @@ def cmd_safe_untar(archive, dest):
 COMMANDS = {
     "peers": cmd_peers, "meta-set": cmd_meta_set, "peer-del": cmd_peer_del,
     "peer-rename": cmd_peer_rename, "peers-clear": cmd_peers_clear,
-    "params-replace": cmd_params_replace, "keepalive-set": cmd_keepalive_set,
+    "params-replace": cmd_params_replace, "keepalive-set": cmd_keepalive_set, "params-check": cmd_params_check,
     "i-replace": cmd_i_replace,
     "expire-set": cmd_expire_set, "expire-clear": cmd_expire_clear,
     "expire-check": cmd_expire_check,

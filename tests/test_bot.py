@@ -404,6 +404,36 @@ async def run():
     chk("длинный домен endpoint не ломает кнопки", "srv:epgo:keep" in [d for _, d in buttons], [text, buttons])
     text, _ = screen(await press("srv:epgo:keep"))
     chk("endpoint применён", "✅" in text and long_domain in text, text)
+
+    SRV_CONF = os.path.join(ROOT, "etc/amnezia/amneziawg/awg0.conf")
+    text, buttons = screen(await press("srv"))
+    chk("кнопка «Параметры AWG» на экране сервера", "srv:par" in [d for _, d in buttons], buttons)
+    text, buttons = screen(await press("srv:par"))
+    datas = [d for _, d in buttons]
+    chk("параметры: значения и кнопки ключей", "Jc" in text and "= 5" in text and "srv:pk:Jc" in datas
+        and "srv:pk:H4" in datas and "srv:pk:RandomTrailers" not in datas and "srv:pgo" not in datas, [text, datas])
+    text, _ = screen(await press("srv:pk:Jc"))
+    chk("параметры: подсказка и текущее значение", "0-128" in text and "Сейчас: <code>5</code>" in text
+        or "Сейчас: 5" in text, text)
+    text, _ = screen(await say("много"))
+    chk("параметры: не число — повторный вопрос", "Нужно число" in text, text)
+    text, buttons = screen(await say("7"))
+    chk("параметры: правка помечена, можно применить", "✎ Jc" in text and "srv:pgo" in [d for _, d in buttons], [text, buttons])
+    await press("srv:pk:S2")
+    text, buttons = screen(await say("96"))
+    chk("параметры: ошибка видна сразу, применить нельзя", "❌" in text and "S1 и S2" in text
+        and "srv:pgo" not in [d for _, d in buttons], [text, buttons])
+    await press("srv:pk:S2")
+    await say("61")
+    text, buttons = screen(await press("srv:pgo"))
+    chk("параметры: подтверждение с предупреждением про клиентов", "Меняются: Jc, S2" in text
+        and "обязаны совпадать" in text and "srv:pok" in [d for _, d in buttons], [text, buttons])
+    text, buttons = screen(await press("srv:pok"))
+    conf_now = open(SRV_CONF).read()
+    chk("параметры записаны", "✅" in text and "\nJc = 7\n" in conf_now and "\nS2 = 61\n" in conf_now
+        and "cl:export" in [d for _, d in buttons], [text, buttons])
+    text, buttons = screen(await press("srv:par"))
+    chk("после записи правки сброшены", "✎" not in text and "= 7" in text, text)
     text, buttons = screen(await press("tun"))
     chk("экран туннелей", "warp" in [d for _, d in buttons] and "tun:panic" in [d for _, d in buttons], buttons)
 
@@ -492,7 +522,7 @@ async def run():
         not any(n == "SendMessage" and "офлайн" in (m.text or "") for n, m in SESSION.sent[mark:]))
 
     print("Все экраны")
-    screens = ["srv", "mod", "srv:proto", "srv:ep", "srv:install", "srv:reset", "srv:reboot",
+    screens = ["srv", "mod", "srv:proto", "srv:par", "srv:ep", "srv:install", "srv:reset", "srv:reboot",
                "cl:activity", "cl:exp:alice", "cl:mim:alice", "cl:tun:alice", "cl:ren:alice",
                "diag", "diag:status", "diag:dpi", "diag:logs", "diag:log:manager", "diag:sniff",
                "bk", "bk:list", "tun", "tc::warp", "warp", "warp:backend", "xr", "t2s", "ex", "cas", "dns",

@@ -167,6 +167,40 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
   await step("сервер", async () => { await nav("/server", "text=Endpoint"); await page.waitForSelector("text=Модуль ядра"); await shot("20-server"); });
   await step("рестарт awg0", async () => { await page.click(".ecard button:has-text('Рестарт')"); await page.waitForSelector(".toast"); });
   await step("протокол", async () => { await nav("/server/proto", "text=Перейти на 3.1"); await shot("21-proto"); });
+  await step("параметры AWG", async () => {
+    await nav("/server/params", "input[data-key=Jc]");
+    await shot("21b-params");
+    await page.fill("input[data-key=Jc]", "7");
+    await page.waitForSelector("input[data-key=Jc].chg");
+    await page.waitForSelector(".bar button.btn-primary:not([disabled])");
+    // S1 у сервера случайный (профиль none создаёт свой) — совпадение длин считаем от него
+    const s1 = Number(await page.inputValue("input[data-key=S1]"));
+    const s2 = await page.inputValue("input[data-key=S2]");
+    await page.fill("input[data-key=S2]", String(s1 + 56));
+    await page.waitForSelector(".card.bad >> text=S1 и S2");
+    await page.waitForSelector(".bar button.btn-primary[disabled]");
+    if (/\bnull\b/.test(await page.textContent("#app"))) throw new Error("в форме «null»");
+    await shot("21c-params-error");
+    await page.fill("input[data-key=S2]", s2);
+    const s4 = await page.inputValue("input[data-key=S4]");
+    await page.fill("input[data-key=S4]", s4 === "20" ? "21" : "20");
+    await page.waitForSelector("input[data-key=S4].chg");
+    await page.waitForSelector(".bar button.btn-primary:not([disabled])");
+    await page.click(".bar button.btn-primary");
+    await page.waitForSelector(".sheet >> text=Клиентам нужны новые конфиги");
+    await page.click(".sheet button:has-text('Все конфиги архивом')");
+    await page.waitForSelector(".toast >> text=Архив всех конфигов");
+    await page.waitForFunction(() => {
+      const jc = document.querySelector("input[data-key=Jc]");
+      return jc && jc.value === "7" && !document.querySelector("input.chg");
+    });
+    // Перед записью — авто-бэкап; убираем его, чтобы раздел «Бэкапы» начинался с пустого списка
+    const dir = `${sandboxRoot}/awg_backup`;
+    const auto = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.startsWith("auto_params_")) : [];
+    if (!auto.length) throw new Error("нет авто-бэкапа перед записью параметров");
+    auto.forEach((f) => fs.unlinkSync(`${dir}/${f}`));
+    if (!fs.readdirSync(dir).length) fs.rmdirSync(dir);
+  });
   await step("endpoint", async () => {
     await nav("/server/endpoint", "input");
     await expectAlert("vpn.example.com", async () => { await page.fill("input", "bad"); await page.click("text=Сохранить домен"); });

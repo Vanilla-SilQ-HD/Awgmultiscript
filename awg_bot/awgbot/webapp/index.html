@@ -269,6 +269,14 @@
   .switch.on { background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
   .switch.on::after { left: 21px; background: var(--ok); opacity: 1; }
 
+  /* Параметры AWG: поля сеткой, изменённое — цветом */
+  .pgrid { display: grid; grid-template-columns: repeat(var(--c, 2), minmax(0, 1fr)); gap: 8px; }
+  .pf label { margin: 0 2px 4px; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pf label b { color: var(--text); }
+  .pf input { font-family: var(--mono); font-size: 13px; padding: 9px 10px; min-height: 40px; }
+  .pf input.chg { border-color: var(--accent); background: var(--accent-soft); }
+  .card.bad { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 35%, transparent); color: var(--danger); }
+
   /* QR, журналы, всплывающее, выбор снизу */
   .qr { display: block; width: 100%; max-width: 300px; margin: 4px auto; border-radius: 12px; background: #fff; image-rendering: pixelated;
         border: 1px solid var(--border); }

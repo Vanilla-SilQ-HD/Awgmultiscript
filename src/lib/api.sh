@@ -135,6 +135,26 @@ _api_server() {
       server_create_opts "$@" || return 1
       { _kv client "$S_FIRST_CLIENT"; _kv file "$(client_file "$S_FIRST_CLIENT")"; } | api_obj ;;
     restart) do_restart ;;
+    params)
+      server_exists || { err "Сервер не создан"; return 1; }
+      local sub="${1:-}" k v
+      shift || true
+      case "$sub" in
+        ""|check)
+          params_check "$@" || return 1
+          {
+            _kv proto "$(server_proto)"; _kv mtu:n "$(conf_iface_get MTU)"
+            _kv clients:n "$(client_files | grep -c . || true)"
+            while IFS=$'\t' read -r k v; do _kv "values.$k" "$v"; done <<< "$PARAMS_KEYS"
+            _kv errors:j "$(py json-list <<< "$PARAMS_ERR")"; _kv warnings:j "$(py json-list <<< "$PARAMS_WARN")"
+            _kv changed:j "$(py json-list <<< "$PARAMS_CHANGED")"; _kv breaking:j "$(py json-list <<< "$PARAMS_BREAKING")"
+          } | api_obj ;;
+        set)
+          server_params_set "$@" || return 1
+          { _kv changed:j "$(py json-list <<< "$PARAMS_CHANGED")"; _kv breaking:j "$(py json-list <<< "$PARAMS_BREAKING")"
+            _kv clients:n "$PARAMS_CLIENTS"; } | api_obj ;;
+        *) _api_usage "server params [check|set [force]] [Ключ=значение...]" ;;
+      esac ;;
     proto)
       [[ "${1:-}" =~ ^(2\.0|3\.1)$ ]] || { _api_usage "server proto 2.0|3.1"; return; }
       server_exists || { err "Сервер не создан"; return 1; }
@@ -148,7 +168,7 @@ _api_server() {
       endpoint_set "$([[ "$1" == ip ]] || echo "$1")" "$([[ "${2:-}" == keep ]] && echo 0 || echo 1)" ;;
     reset) server_reset ;;
     reboot) server_reboot ;;
-    *) _api_usage "server info|install|create [ключ=значение...]|restart|proto 2.0|3.1|repair|endpoint ДОМЕН|ip [keep]|reset|reboot" ;;
+    *) _api_usage "server info|install|create [ключ=значение...]|restart|params [check|set [force]] [Ключ=значение...]|proto 2.0|3.1|repair|endpoint ДОМЕН|ip [keep]|reset|reboot" ;;
   esac
 }
 
@@ -793,7 +813,8 @@ _api_job() {
 # пока задача собирает модуль.
 _api_readonly() {
   case "$*" in
-    "bot proxy set"*|"bot proxy clear"*) return 1 ;;
+    "bot proxy set"*|"bot proxy clear"*|"server params set"*) return 1 ;;
+    "server params"|"server params check"*) return 0 ;;
   esac
   case "$1 ${2:-}" in
     "status "|"version "|"help "|"mimicry "|"log "*|"job "*|"diag "*) return 0 ;;

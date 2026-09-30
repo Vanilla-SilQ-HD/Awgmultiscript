@@ -410,6 +410,54 @@ chk("неизвестная команда — rc 2", r.get("ok") is False and r
 r = api("server", "proto", "9.9")
 chk("проверка аргументов", r.get("ok") is False and r["rc"] == 2 and "server proto" in r["error"], r)
 
+# Параметры вручную: проверка, запрет без force, применение, откат
+ALICE = os.path.join(ROOT, "root", "alice_awg2.conf")
+r = api("server", "params")
+d = r.get("data") or {}
+chk("api server params — текущие значения", r.get("ok") and d.get("proto") == "2.0" and d["values"]["Jc"] == "5"
+    and d["values"]["H1"] == "100-2000" and list(d["values"])[:3] == ["Jc", "Jmin", "Jmax"]
+    and d["errors"] == [] and d["changed"] == [] and "ContentPaddingAddition" not in d["values"], r)
+r = api("server", "params", "check", "Jc=7", "S2=96", "HeaderProtectionKey=x")
+d = r.get("data") or {}
+chk("params check: ошибки, изменённые, обязательные для клиентов", r.get("ok") and d["values"]["Jc"] == "7"
+    and any("S1 и S2" in e for e in d["errors"]) and any("перегенерацией" in e for e in d["errors"])
+    and d["changed"] == ["Jc", "S2"] and d["breaking"] == ["S2"], d)
+r = api("server", "params", "set", "S2=96")
+chk("params set с ошибкой не пишет конфиг", not r.get("ok") and "S1 и S2" in r["error"]
+    and kv(open(conf).read()).get("S2") == "60", r)
+r = api("server", "params", "set", "Jc=20")
+chk("предупреждение без force — отказ", not r.get("ok") and "force" in r["error"] and "рекомендуется 3-12" in r["log"]
+    and kv(open(conf).read()).get("Jc") == "5", r)
+reset_calls()
+r = api("server", "params", "set", "force", "Jc=20", "Jmax=100")
+d = r.get("data") or {}
+chk("params set force: сервер, клиенты, рестарт", r.get("ok") and d.get("changed") == ["Jc", "Jmax"]
+    and d.get("breaking") == [] and d.get("clients", 0) >= 2 and kv(open(conf).read()).get("Jc") == "20"
+    and kv(open(ALICE).read()).get("Jmax") == "100" and kv(open(ALICE).read()).get("S1") == "40"
+    and "awg-quick up" in calls() and "продолжают работать" in r.get("log", ""), [r, calls()])
+BK = os.path.join(ROOT, "awg_backup")
+chk("правка оставляет авто-бэкап", os.path.isdir(BK) and any(n.startswith("auto_params_") for n in os.listdir(BK)),
+    os.listdir(BK) if os.path.isdir(BK) else "нет каталога")
+r = api("server", "params", "set", "H1=10000-20000")
+chk("смена H — клиентам нужны новые конфиги", r.get("ok") and r["data"]["breaking"] == ["H1"]
+    and "обязаны совпадать" in r.get("log", "") and kv(open(ALICE).read()).get("H1") == "10000-20000", r)
+r = api("server", "params", "set", "Jc=20")
+chk("без изменений — без рестарта", r.get("ok") and "не изменились" in r.get("log", ""), r)
+FAILBIN = os.path.join(TMP, "failbin")
+os.makedirs(FAILBIN, exist_ok=True)
+with open(os.path.join(FAILBIN, "awg-quick"), "w") as f:
+    f.write('#!/usr/bin/env bash\n[[ "$1" == up ]] && { echo "Unable to modify interface: Invalid argument" >&2; exit 1; }\nexit 0\n')
+os.chmod(os.path.join(FAILBIN, "awg-quick"), 0o755)
+r = api("server", "params", "set", "S1=45", env={"PATH": FAILBIN + ":" + ENV["PATH"]})
+chk("awg0 не поднялся — откат сервера и клиентов", not r.get("ok") and kv(open(conf).read()).get("S1") == "40"
+    and kv(open(ALICE).read()).get("S1") == "40" and "возвращаю прежние" in r.get("log", ""), r)
+rc, out, _ = bash('printf "S1 = 86\\nS2 = 48\\nS3 = 16\\nS4 = 12\\nH1 = 1\\nH2 = 2\\nH3 = 3\\nH4 = 4\\nJc = 4\\nJmin = 10\\nJmax = 50\\n'
+                  'HeaderProtectionKey = K=\\nRekeyAfterTime = 115-150\\nRejectAfterTime = 180-210\\nRandomTrailers = on\\nDisableCookies = on\\n" '
+                  '| py params-check 3.1 1280 S3=8 RejectAfterTime=140-200 DisableCookies=off')
+chk("3.1: S ≥ 12, RejectAfterTime > RekeyAfterTime, off убирает ключ",
+    "E\tS3 = 8" in out and "RejectAfterTime должен" in out and "K\tDisableCookies\toff" in out
+    and "P\tDisableCookies" not in out and "P\tRandomTrailers = on" in out and "B\tS3" in out, out)
+
 # Перезапуск бота по просьбе самого бота — отложенный: awg2 живёт в cgroup
 # бота и обязан успеть ответить до того, как systemd его остановит
 with open(ACTIVE, "a") as f:

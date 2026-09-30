@@ -2718,6 +2718,24 @@ proto_upgrade_hint() {
   fi
 }
 
+# Снимок конфигов сервера и клиентов — откат, если awg0 не поднимется.
+_params_snapshot() {  # ПЕРЕМЕННАЯ
+  local __d f
+  mktmp __d -d || return 1
+  mkdir -p "$__d/clients"
+  cp -a "$SERVER_CONF" "$__d/"
+  while read -r f; do cp -a "$f" "$__d/clients/"; done < <(client_files)
+  printf -v "$1" '%s' "$__d"
+}
+
+_params_restore() {  # КАТАЛОГ_СНИМКА
+  err "awg0 не поднялся с новыми параметрами — возвращаю прежние"
+  cp -a "$1/${SERVER_CONF##*/}" "$SERVER_CONF"
+  rm -f "$CLIENT_DIR"/*_awg[23].conf
+  cp -a "$1/clients/." "$CLIENT_DIR/"
+  server_restart && ok "Прежняя конфигурация восстановлена"
+}
+
 # Перегенерация параметров обфускации с переходом на версию $1.
 # Ключи, адреса, имена, сроки и I1-I5 сохраняются. Все клиенты получают
 # новые конфиги — старые перестают подключаться.
@@ -2738,10 +2756,7 @@ server_regen_params() {
   fi
 
   auto_backup regen || warn "Авто-бэкап не удался"
-  mktmp snap -d || return 1
-  mkdir -p "$snap/clients"
-  cp -a "$SERVER_CONF" "$snap/"
-  while read -r f; do cp -a "$f" "$snap/clients/"; done < <(client_files)
+  _params_snapshot snap || return 1
 
   MTU=$(conf_iface_get MTU)
   gen_awg_params "$profile" "$target" || return 1
@@ -2756,20 +2771,136 @@ server_regen_params() {
   client_files_sync_suffix
 
   # Параметры [Interface] syncconf не применяет — только down/up.
-  if ! server_restart; then
-    err "awg0 не поднялся с новыми параметрами — возвращаю прежние"
-    cp -a "$snap/${SERVER_CONF##*/}" "$SERVER_CONF"
-    rm -f "$CLIENT_DIR"/*_awg[23].conf
-    cp -a "$snap/clients/." "$CLIENT_DIR/"
-    server_restart && ok "Прежняя конфигурация восстановлена"
-    return 1
-  fi
+  server_restart || { _params_restore "$snap"; return 1; }
   log_info "параметры перегенерированы: $cur → $target, клиентов $n"
   success_box "AWG $target: параметры обновлены, клиентов $n"
   warn "Каждому клиенту нужен новый конфиг — до замены он не подключится"
   (( n > 0 )) && info "Все конфиги архивом: Клиенты → Экспорт; по одному — QR/текст или бот"
   [[ "$target" == 3.1 && "$cur" != 3.1 ]] && info "Клиентам нужен AmneziaVPN 5.0.1.5+ или AmneziaWG с поддержкой 3.1"
   mimicry_module_warnings
+}
+
+# ── Параметры вручную ─────────────────────────────────────
+# Правки «Ключ=значение» поверх текущих параметров. Проверка — py params-check
+# (пределы генератора); итог — в PARAMS_*: KEYS «ключ<TAB>значение» после
+# правок, ERR и WARN построчно, CHANGED и BREAKING — ключи (BREAKING обязаны
+# совпадать у клиентов), NEW — новый блок параметров.
+PARAMS_KEYS="" PARAMS_ERR="" PARAMS_WARN="" PARAMS_CHANGED="" PARAMS_BREAKING="" PARAMS_NEW="" PARAMS_CLIENTS=0
+params_check() {
+  local out
+  out=$(server_params | py params-check "$(server_proto)" "$(conf_iface_get MTU)" "$@") || return 1
+  PARAMS_KEYS=$(sed -n 's/^K\t//p' <<< "$out")
+  PARAMS_ERR=$(sed -n 's/^E\t//p' <<< "$out")
+  PARAMS_WARN=$(sed -n 's/^W\t//p' <<< "$out")
+  PARAMS_CHANGED=$(sed -n 's/^C\t//p' <<< "$out")
+  PARAMS_BREAKING=$(sed -n 's/^B\t//p' <<< "$out")
+  PARAMS_NEW=$(sed -n 's/^P\t//p' <<< "$out")
+}
+
+# Новый блок — в сервер и всех клиентов (как при перегенерации: у клиентов те
+# же значения), рестарт; awg0 не поднялся — откат.
+params_edit_apply() {
+  local snap f n=0 keys
+  auto_backup params || warn "Авто-бэкап не удался"
+  _params_snapshot snap || return 1
+  py params-replace "$SERVER_CONF" <<< "$PARAMS_NEW" || { err "Не удалось обновить $SERVER_CONF"; return 1; }
+  while read -r f; do
+    py params-replace "$f" <<< "$PARAMS_NEW" && n=$((n + 1))
+  done < <(client_files)
+  server_restart || { _params_restore "$snap"; return 1; }
+  PARAMS_CLIENTS=$n
+  keys=$(tr '\n' ' ' <<< "$PARAMS_CHANGED"); keys="${keys% }"
+  log_info "параметры изменены вручную: $keys; клиентов $n"
+  success_box "Параметры AWG обновлены: ${keys// /, }"
+  if [[ -n "$PARAMS_BREAKING" ]]; then
+    keys=$(tr '\n' ' ' <<< "$PARAMS_BREAKING"); keys="${keys% }"
+    warn "${keys// /, } обязаны совпадать у клиентов — каждому нужен новый конфиг, до замены он не подключится"
+    (( n > 0 )) && info "Все конфиги архивом: Клиенты → Экспорт; по одному — QR/текст или бот"
+  else
+    info "Старые конфиги продолжают работать; новые значения клиент получит с новым конфигом ($n)"
+  fi
+}
+
+# awg2 api server params set [force] ПРАВКА... — предупреждения без force
+# не пропускает: бот и панель сперва показывают их человеку (params check).
+server_params_set() {
+  local force=0 l
+  [[ "${1:-}" == force ]] && { force=1; shift; }
+  server_exists || { err "Сервер не создан"; return 1; }
+  (( $# )) || { err "Нет правок: Ключ=значение"; return 1; }
+  params_check "$@" || return 1
+  if [[ -n "$PARAMS_ERR" ]]; then
+    while IFS= read -r l; do err "$l"; done <<< "$PARAMS_ERR"
+    return 1
+  fi
+  [[ -n "$PARAMS_CHANGED" ]] || { ok "Параметры не изменились"; return 0; }
+  if [[ -n "$PARAMS_WARN" ]]; then
+    while IFS= read -r l; do warn "$l"; done <<< "$PARAMS_WARN"
+    (( force )) || { err "Есть предупреждения — чтобы сохранить всё равно, добавь force"; return 1; }
+  fi
+  params_edit_apply
+}
+
+do_params_edit_menu() {
+  server_exists || { err "Сервер не создан"; return 1; }
+  local -a edits=() keys=() vals=()
+  local c i k v n mark l proto
+  proto=$(server_proto)
+  while true; do
+    params_check "${edits[@]}" || return 1
+    keys=(); vals=()
+    while IFS=$'\t' read -r k v; do keys+=("$k"); vals+=("$v"); done <<< "$PARAMS_KEYS"
+    n=${#keys[@]}
+    echo ""
+    hdr "Параметры AWG $proto вручную"
+    echo -e "  ${D}S и H обязаны совпадать у сервера и клиентов: после их правки старые конфиги${N}"
+    echo -e "  ${D}не подключатся. Jc/Jmin/Jmax и таймеры 3.x — не обязаны.${N}"
+    for (( i = 0; i < n; i++ )); do
+      mark=""
+      grep -qx "${keys[i]}" <<< "$PARAMS_CHANGED" && mark=" ${Y}← изменён${N}"
+      printf "  ${C}%2d)${N} %-22s %s%b\n" $((i + 1)) "${keys[i]}" "${vals[i]:-—}" "$mark"
+    done
+    echo -e "  ${G}$((n + 1)))${N} Проверить и применить"
+    echo -e "  ${W} 0)${N} ← Назад ${D}(правки не сохраняются)${N}"
+    read_choice c "${C}  Выбор [0-$((n + 1))]: ${N}" 0 $((n + 1)) 0
+    (( c == 0 )) && return 0
+    if (( c == n + 1 )); then
+      _params_edit_confirm || continue
+      params_edit_apply
+      pause
+      return 0
+    fi
+    k=${keys[c - 1]}; v=${vals[c - 1]}
+    if [[ "$k" =~ ^(RandomTrailers|DisableCookies)$ ]]; then
+      edits+=("$k=$([[ "$v" == on ]] && echo off || echo on)")
+      continue
+    fi
+    read_line l "${C}  $k (сейчас ${v:-—}; Enter — без изменений): ${N}"
+    l="${l// /}"
+    [[ -n "$l" ]] && edits+=("$k=$l")
+  done
+}
+
+# Показать итог проверки и спросить подтверждение; 1 — вернуться к правке.
+_params_edit_confirm() {
+  local l keys
+  [[ -n "$PARAMS_CHANGED" ]] || { info "Ничего не изменено"; return 1; }
+  if [[ -n "$PARAMS_ERR" ]]; then
+    while IFS= read -r l; do err "$l"; done <<< "$PARAMS_ERR"
+    return 1
+  fi
+  if [[ -n "$PARAMS_WARN" ]]; then
+    while IFS= read -r l; do warn "$l"; done <<< "$PARAMS_WARN"
+    ask_yes "  Сохранить всё равно? [y/N]: " n || return 1
+  fi
+  if [[ -n "$PARAMS_BREAKING" ]]; then
+    keys=$(tr '\n' ' ' <<< "$PARAMS_BREAKING"); keys="${keys% }"
+    warn "Меняются ${keys// /, } — все клиенты ($(client_files | grep -c . || true)) потеряют связь до получения нового конфига"
+    read_confirm "${R}  Продолжить? (введи yes): ${N}" || { info "Отменено"; return 1; }
+  else
+    info "Старые конфиги продолжат работать — клиентам совпадать не обязательно"
+    ask_yes "  Применить? [Y/n]: " y || return 1
+  fi
 }
 
 do_proto_menu() {
@@ -2791,9 +2922,10 @@ do_proto_menu() {
   else
     echo -e "  ${Y}2)${N} Вернуться на AWG 2.0 ${D}— для старых клиентов${N}"
   fi
+  echo -e "  ${C}3)${N} Изменить параметры вручную ${D}— Jc, S1-S4, H1-H4…${N}"
   echo -e "  ${W}0)${N} ← Назад"
-  read_choice c "${C}  Выбор [0-2]: ${N}" 0 2 0
-  case "$c" in 1) target=3.1 ;; 2) target=2.0 ;; *) return 0 ;; esac
+  read_choice c "${C}  Выбор [0-3]: ${N}" 0 3 0
+  case "$c" in 1) target=3.1 ;; 2) target=2.0 ;; 3) do_params_edit_menu; return ;; *) return 0 ;; esac
   echo ""
   warn "Все клиенты ($n) потеряют связь до получения нового конфига"
   [[ "$target" != "$cur" ]] && warn "Версия меняется: AWG $cur → AWG $target"
@@ -8011,7 +8143,7 @@ do_server_menu() {
     echo -e "  ${C}1)${N} Установить компоненты"
     echo -e "  ${C}2)${N} Создать сервер"
     echo -e "  ${C}3)${N} Перезапустить awg0"
-    echo -e "  ${C}4)${N} Протокол 2.0 / 3.1"
+    echo -e "  ${C}4)${N} Протокол и параметры AWG"
     echo -e "  ${C}5)${N} Модуль ядра и утилиты"
     echo -e "  ${C}6)${N} Проверить и починить"
     echo -e "  ${C}7)${N} Endpoint ${D}— ${ep:-IP сервера}${N}"
@@ -8232,6 +8364,26 @@ _api_server() {
       server_create_opts "$@" || return 1
       { _kv client "$S_FIRST_CLIENT"; _kv file "$(client_file "$S_FIRST_CLIENT")"; } | api_obj ;;
     restart) do_restart ;;
+    params)
+      server_exists || { err "Сервер не создан"; return 1; }
+      local sub="${1:-}" k v
+      shift || true
+      case "$sub" in
+        ""|check)
+          params_check "$@" || return 1
+          {
+            _kv proto "$(server_proto)"; _kv mtu:n "$(conf_iface_get MTU)"
+            _kv clients:n "$(client_files | grep -c . || true)"
+            while IFS=$'\t' read -r k v; do _kv "values.$k" "$v"; done <<< "$PARAMS_KEYS"
+            _kv errors:j "$(py json-list <<< "$PARAMS_ERR")"; _kv warnings:j "$(py json-list <<< "$PARAMS_WARN")"
+            _kv changed:j "$(py json-list <<< "$PARAMS_CHANGED")"; _kv breaking:j "$(py json-list <<< "$PARAMS_BREAKING")"
+          } | api_obj ;;
+        set)
+          server_params_set "$@" || return 1
+          { _kv changed:j "$(py json-list <<< "$PARAMS_CHANGED")"; _kv breaking:j "$(py json-list <<< "$PARAMS_BREAKING")"
+            _kv clients:n "$PARAMS_CLIENTS"; } | api_obj ;;
+        *) _api_usage "server params [check|set [force]] [Ключ=значение...]" ;;
+      esac ;;
     proto)
       [[ "${1:-}" =~ ^(2\.0|3\.1)$ ]] || { _api_usage "server proto 2.0|3.1"; return; }
       server_exists || { err "Сервер не создан"; return 1; }
@@ -8245,7 +8397,7 @@ _api_server() {
       endpoint_set "$([[ "$1" == ip ]] || echo "$1")" "$([[ "${2:-}" == keep ]] && echo 0 || echo 1)" ;;
     reset) server_reset ;;
     reboot) server_reboot ;;
-    *) _api_usage "server info|install|create [ключ=значение...]|restart|proto 2.0|3.1|repair|endpoint ДОМЕН|ip [keep]|reset|reboot" ;;
+    *) _api_usage "server info|install|create [ключ=значение...]|restart|params [check|set [force]] [Ключ=значение...]|proto 2.0|3.1|repair|endpoint ДОМЕН|ip [keep]|reset|reboot" ;;
   esac
 }
 
@@ -8890,7 +9042,8 @@ _api_job() {
 # пока задача собирает модуль.
 _api_readonly() {
   case "$*" in
-    "bot proxy set"*|"bot proxy clear"*) return 1 ;;
+    "bot proxy set"*|"bot proxy clear"*|"server params set"*) return 1 ;;
+    "server params"|"server params check"*) return 0 ;;
   esac
   case "$1 ${2:-}" in
     "status "|"version "|"help "|"mimicry "|"log "*|"job "*|"diag "*) return 0 ;;
@@ -11131,6 +11284,192 @@ def cmd_params_replace(path):
     write_atomic(path, "\n".join(out))
 
 
+# ── Правка параметров вручную ─────────────────────────────
+# Пределы — те же, что соблюдает генератор (params.sh); здесь они проверяют
+# то, что ввёл человек. Совпадать у сервера и клиентов обязаны S1-S4, H1-H4,
+# HeaderProtectionKey и RandomTrailers; мусорные пакеты, ContentPaddingAddition
+# и таймеры — нет (README amneziawg-go: «client-side»).
+U32 = 0xFFFFFFFF
+HP_MIN_S, S4_MAX, JC_MAX, S_GAP = 12, 32, 128, 10
+MTU_OVERHEAD, MTU_SAFETY = 60, 24
+BREAKING = ("S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4", "HeaderProtectionKey", "RandomTrailers")
+EDIT_BASE = ("Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4")
+EDIT_3X = ("ContentPaddingAddition", "RekeyAfterTime", "RekeyTimeout", "RejectAfterTime",
+           "KeepaliveTimeout", "MaxHandshakeAttempts")
+EDIT_31 = ("RandomTrailers", "DisableCookies")
+SWITCHES = ("RandomTrailers", "DisableCookies")
+
+
+def params_editable(proto):
+    keys = list(EDIT_BASE)
+    if proto.startswith("3"):
+        keys += EDIT_3X
+    if proto == "3.1":
+        keys += EDIT_31
+    return keys
+
+
+def _prange(v):
+    """«a» или «a-b» (a ≤ b ≤ 2^32-1) → (a, b); иначе None."""
+    m = re.fullmatch(r"(\d{1,10})(?:-(\d{1,10}))?", v or "")
+    if not m:
+        return None
+    a = int(m[1])
+    b = int(m[2]) if m[2] else a
+    return (a, b) if a <= b <= U32 else None
+
+
+def _pnum(v):
+    return int(v) if re.fullmatch(r"\d{1,10}", v or "") and int(v) <= U32 else None
+
+
+def _params_norm(key, val):
+    val = re.sub(r"\s+", "", val or "")
+    if key in SWITCHES:
+        low = val.lower()
+        if low in ("on", "1", "yes", "true", "да", "вкл"):
+            return "on"
+        if low in ("off", "0", "no", "false", "нет", "выкл", ""):
+            return "off"
+    return val
+
+
+def params_check(proto, mtu, old, edits):
+    """old — {ключ: значение} из конфига, edits — [(ключ, значение)].
+    → (ошибки, предупреждения, изменённые, новый словарь)."""
+    errs, warns = [], []
+    editable = params_editable(proto)
+    by_low = {k.lower(): k for k in AWG_PARAM_KEYS}
+    new = dict(old)
+    for key, val in edits:
+        k = by_low.get(key.strip().lower())
+        if k is None:
+            errs.append(f"{key}: нет такого параметра AmneziaWG")
+        elif k == "HeaderProtectionKey":
+            errs.append("HeaderProtectionKey меняется перегенерацией: Протокол → новые параметры")
+        elif k not in editable:
+            errs.append(f"{k}: параметр AWG 3.x, а сервер на {proto}")
+        else:
+            new[k] = _params_norm(k, val)
+    for k in SWITCHES:
+        if new.get(k) == "off":
+            del new[k]
+    changed = [k for k in AWG_PARAM_KEYS if old.get(k, "") != new.get(k, "")]
+    ch = set(changed)
+    is3 = proto.startswith("3")
+
+    def num(k, lo, hi, what):
+        v = _pnum(new.get(k, ""))
+        if v is None or not lo <= v <= hi:
+            errs.append(f"{k} = {new.get(k, '') or 'пусто'}: нужно {what}")
+            return None
+        return v
+
+    jc = num("Jc", 0, JC_MAX, f"целое 0-{JC_MAX}")
+    jmin = num("Jmin", 0, 1472, "целое 0-1472")
+    jmax = num("Jmax", 0, 1472, "целое 0-1472 — больше не влезет в пакет 1500, а фрагменты заметны цензору")
+    if jmin is not None and jmax is not None and jmin > jmax:
+        errs.append(f"Jmin ({jmin}) больше Jmax ({jmax})")
+    if jc is not None and "Jc" in ch and not 3 <= jc <= 12:
+        warns.append(f"Jc = {jc}: рекомендуется 3-12" + (" — без мусорных пакетов" if jc == 0 else ""))
+
+    # Рукопожатия с паддингом обязаны влезать в 1280 — минимальный MTU IPv6
+    smin = HP_MIN_S if is3 else 0
+    s = {}
+    for k, base, hi in (("S1", 148, 1132), ("S2", 92, 1188), ("S3", 64, 1216), ("S4", 32, S4_MAX)):
+        what = f"целое {smin}-{hi}" + (" (AWG 3.x требует ≥ 12)" if is3 else "") + (" — предел amneziawg-tools" if k == "S4" else "")
+        s[k] = num(k, smin, hi, what)
+    if None not in (s["S1"], s["S2"], s["S3"]):
+        lens = {"S1": 148 + s["S1"], "S2": 92 + s["S2"], "S3": 64 + s["S3"]}
+        names = {"S1": "инициации", "S2": "ответа", "S3": "cookie"}
+        pairs = (("S1", "S2"), ("S1", "S3"), ("S2", "S3"))
+        for a, b in pairs:
+            d = abs(lens[a] - lens[b])
+            if d == 0:
+                errs.append(f"{a} и {b}: пакеты {names[a]} и {names[b]} выйдут одной длины ({lens[a]} Б) — "
+                            "сервер не отличит их")
+            elif d < S_GAP and ({a, b} & ch):
+                warns.append(f"{a} и {b}: длины пакетов {names[a]} и {names[b]} почти совпадают "
+                             f"({lens[a]} и {lens[b]} Б) — генератор разводит их на {S_GAP}+")
+
+    h = {}
+    for k in ("H1", "H2", "H3", "H4"):
+        r = _prange(new.get(k, ""))
+        if r is None:
+            errs.append(f"{k} = {new.get(k, '') or 'пусто'}: нужно число или диапазон a-b (a ≤ b ≤ {U32})")
+        else:
+            h[k] = r
+    keys = sorted(h)
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            if h[a][0] <= h[b][1] and h[b][0] <= h[a][1]:
+                errs.append(f"{a} и {b} пересекаются — сервер не отличит типы пакетов")
+    if not is3:
+        for k, (lo, hi) in h.items():
+            if k not in ch:
+                continue
+            if lo <= 4:
+                warns.append(f"{k}: задевает 1-4 — стандартные типы WireGuard, прямой признак для DPI")
+            if hi > 0x7FFFFFFF:
+                warns.append(f"{k}: выше 2147483647 — старый клиент AmneziaVPN для Windows не примет")
+            if hi - lo < 1000:
+                warns.append(f"{k}: узкий диапазон — заголовок почти постоянный, это подпись для DPI")
+
+    cpa = 0
+    if is3:
+        for k in EDIT_3X:
+            if k not in new:
+                continue
+            r = _prange(new[k])
+            if r is None or r[0] < (0 if k == "ContentPaddingAddition" else 1):
+                errs.append(f"{k} = {new[k] or 'пусто'}: нужно число или диапазон a-b"
+                            + ("" if k == "ContentPaddingAddition" else ", от 1"))
+            elif k == "ContentPaddingAddition":
+                cpa = r[1]
+        rat, rjt = _prange(new.get("RekeyAfterTime", "")), _prange(new.get("RejectAfterTime", ""))
+        if rat and rjt and rjt[0] <= rat[1]:
+            errs.append("RejectAfterTime должен быть целиком больше RekeyAfterTime — иначе сессия умрёт "
+                        "раньше, чем переустановится")
+        rkt = _prange(new.get("RekeyTimeout", ""))
+        if rkt and rkt[0] < 5 and "RekeyTimeout" in ch:
+            warns.append("RekeyTimeout меньше 5 с — лишние повторы рукопожатия")
+        for k in SWITCHES:
+            if k in new and new[k] != "on":
+                errs.append(f"{k}: только on или off")
+
+    # Запас до пути 1500: тот же расчёт, что у генератора (_check_mtu_headroom)
+    if str(mtu).isdigit() and s.get("S4") is not None and ({"S4", "ContentPaddingAddition"} & ch):
+        outer = int(mtu) + MTU_OVERHEAD + s["S4"] + cpa
+        if outer > 1500 - MTU_SAFETY:
+            warns.append(f"MTU {mtu}: внешний пакет до {outer} Б — не остаётся запаса до 1500; "
+                         "уменьши S4" + (" или ContentPaddingAddition" if is3 else ""))
+    return errs, warns, changed, new
+
+
+def cmd_params_check(proto, mtu, *edits):
+    """stdin — параметры сервера («Ключ = значение»), аргументы — правки
+    «Ключ=значение». Вывод построчно: K ключ значение (редактируемые, после
+    правок), E ошибка, W предупреждение, C изменённый ключ, B изменённый ключ,
+    который обязан совпадать у клиентов, P строка нового блока параметров."""
+    old = {}
+    for line in sys.stdin.read().splitlines():
+        m = re.match(r"^(\w+)\s*=\s*(.*?)\s*$", line)
+        if m and m[1] in AWG_PARAM_KEYS:
+            old[m[1]] = m[2]
+    pairs = []
+    for e in edits:
+        if "=" not in e:
+            die(f"правка «{e}»: нужно Ключ=значение")
+        k, v = e.split("=", 1)
+        pairs.append((k, v))
+    errs, warns, changed, new = params_check(proto, mtu, old, pairs)
+    out = [f"K\t{k}\t{new.get(k, 'off' if k in SWITCHES else '')}" for k in params_editable(proto)]
+    out += [f"E\t{x}" for x in errs] + [f"W\t{x}" for x in warns]
+    out += [f"C\t{k}" for k in changed] + [f"B\t{k}" for k in changed if k in BREAKING]
+    out += [f"P\t{k} = {new[k]}" for k in AWG_PARAM_KEYS if k in new]
+    print("\n".join(out))
+
+
 def cmd_keepalive_set(path, value):
     text = read(path)
     new = re.sub(r"^PersistentKeepalive\s*=.*$", "PersistentKeepalive = " + value, text, flags=re.M)
@@ -12009,7 +12348,7 @@ def cmd_safe_untar(archive, dest):
 COMMANDS = {
     "peers": cmd_peers, "meta-set": cmd_meta_set, "peer-del": cmd_peer_del,
     "peer-rename": cmd_peer_rename, "peers-clear": cmd_peers_clear,
-    "params-replace": cmd_params_replace, "keepalive-set": cmd_keepalive_set,
+    "params-replace": cmd_params_replace, "keepalive-set": cmd_keepalive_set, "params-check": cmd_params_check,
     "i-replace": cmd_i_replace,
     "expire-set": cmd_expire_set, "expire-clear": cmd_expire_clear,
     "expire-check": cmd_expire_check,

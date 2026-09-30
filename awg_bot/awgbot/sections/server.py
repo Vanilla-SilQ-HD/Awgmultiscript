@@ -62,6 +62,7 @@ async def screen(target: ui.Target) -> None:
         ("✨ Создать сервер", act.data("create")) if not exists else None,
         ("🔄 Рестарт awg0", act.data("restart")) if exists else None,
         ("🔀 Протокол", act.data("proto")) if exists else None,
+        ("🎛 Параметры AWG", act.data("par")) if exists else None,
         ("🌍 Endpoint", act.data("ep")) if exists else None,
         ("🛠 Починить", act.data("repair")),
         ("♻️ Перезагрузка", act.data("reboot")),
@@ -338,6 +339,159 @@ async def _proto_ok(cb: CallbackQuery, state: FSMContext, target: str) -> None:
     # Всем клиентам нужны новые конфиги — кнопки к ним прямо в итоге
     await jobs.start(cb, f"Переход на AWG {target}", "server", "proto", target, back_to="srv",
                      ok_buttons=[("📦 Конфиги zip", "cl:export"), ("👥 Клиенты", "cl")])
+
+
+# ── Параметры AWG вручную ─────────────────────────────────
+# Правки копятся в FSM (params: {ключ: значение}); каждый показ экрана
+# проверяет их в awg2 (server params check) — ошибки видны сразу, а запись
+# (server params set) уходит одним вызовом после подтверждения.
+PSHORT = {"ContentPaddingAddition": "Паддинг", "RekeyAfterTime": "RekeyAfter", "RejectAfterTime": "RejectAfter",
+          "KeepaliveTimeout": "Keepalive", "MaxHandshakeAttempts": "MaxHS", "RandomTrailers": "Trailers",
+          "DisableCookies": "NoCookies"}
+PSWITCH = ("RandomTrailers", "DisableCookies")
+PHINT = {
+    "Jc": "сколько мусорных пакетов слать перед рукопожатием: 0-128, рекомендуется 3-12",
+    "Jmin": "наименьший размер мусорного пакета, байт: 0-1472",
+    "Jmax": "наибольший размер мусорного пакета, байт: 0-1472, не меньше Jmin",
+    "S1": "паддинг пакета инициации, байт", "S2": "паддинг пакета ответа, байт",
+    "S3": "паддинг cookie-пакета, байт", "S4": "паддинг пакетов с данными, байт: до 32",
+    "H1": "заголовок инициации: число или диапазон a-b", "H2": "заголовок ответа: число или диапазон a-b",
+    "H3": "заголовок cookie: число или диапазон a-b", "H4": "заголовок данных: число или диапазон a-b",
+    "ContentPaddingAddition": "добавка паддинга к данным: диапазон a-b, байт",
+    "RekeyAfterTime": "через сколько секунд переустанавливать сессию: число или a-b",
+    "RekeyTimeout": "повтор рукопожатия, секунды: число или a-b",
+    "RejectAfterTime": "предел жизни сессии, секунды: целиком больше RekeyAfterTime",
+    "KeepaliveTimeout": "keepalive после тишины, секунды: число или a-b",
+    "MaxHandshakeAttempts": "сколько раз повторять рукопожатие: число или a-b",
+}
+PMATCH = "S и H обязаны совпадать у клиентов — после их правки старые конфиги не подключатся."
+PVAL_RE = re.compile(r"^\d{1,10}(-\d{1,10})?$")
+
+
+def _pedits_args(edits: dict) -> list[str]:
+    return [f"{k}={v}" for k, v in edits.items()]
+
+
+@act("par")
+async def _params(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await state.update_data(params={})
+    await params_screen(cb, state)
+
+
+@act("pview")
+async def _params_view(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await params_screen(cb, state)
+
+
+async def params_screen(target: ui.Target, state: FSMContext) -> None:
+    edits = (await state.get_data()).get("params") or {}
+    r = await api.call("server", "params", "check", *_pedits_args(edits))
+    if not r.ok or not isinstance(r.data, dict):
+        await ui.render(target, ui.fail(r, "Параметры AWG"), ui.kb(ui.back("srv")))
+        return
+    d = r.data
+    vals: dict = d.get("values") or {}
+    changed = set(d.get("changed") or [])
+    await state.update_data(params_vals=vals)
+    w = max((len(k) for k in vals), default=0)
+    block = "\n".join(f"{'✎' if k in changed else ' '} {k.ljust(w)} = {v or '—'}" for k, v in vals.items())
+    text = (f"<b>🎛 Параметры AWG {esc(d.get('proto', ''))}</b>\n{ui.pre(block)}\n{PMATCH} "
+            "Jc/Jmin/Jmax и таймеры — не обязаны.")
+    if changed:
+        text += "\n\n✎ — изменено, ещё не применено."
+    text += "".join(f"\n❌ {esc(e)}" for e in d.get("errors") or [])
+    text += "".join(f"\n▲ {esc(x)}" for x in d.get("warnings") or [])
+
+    def key(k: str) -> ui.Button:
+        label = PSHORT.get(k, k)
+        if k in PSWITCH:
+            label += ": " + (vals.get(k) or "off")
+        return ("✎ " + label if k in changed else label), act.data("pk", k)
+
+    groups = [["Jc", "Jmin", "Jmax"], ["S1", "S2", "S3", "S4"], ["H1", "H2", "H3", "H4"],
+              ["ContentPaddingAddition", "RekeyAfterTime", "RekeyTimeout"],
+              ["RejectAfterTime", "KeepaliveTimeout", "MaxHandshakeAttempts"], list(PSWITCH)]
+    rows = [ui.Row(*[key(k) for k in g if k in vals]) for g in groups]
+    ready = changed and not d.get("errors")
+    await ui.render(target, text, ui.kb(
+        *rows,
+        ("✅ Применить", act.data("pgo")) if ready else None,
+        ("↩️ Сбросить правки", act.data("preset")) if changed else None,
+        ui.back("srv")))
+
+
+@act("pk")
+async def _param_key(cb: CallbackQuery, state: FSMContext, k: str) -> None:
+    data = await state.get_data()
+    cur = (data.get("params_vals") or {}).get(k, "")
+    if k in PSWITCH:
+        edits = dict(data.get("params") or {})
+        edits[k] = "off" if cur == "on" else "on"
+        await state.update_data(params=edits)
+        await params_screen(cb, state)
+        return
+    match = " Обязан совпадать у клиентов." if k[0] in "SH" else ""
+    await ask.ask(cb, state, "srv_param", f"<b>{esc(k)}</b> — {esc(PHINT.get(k, ''))}.{match}\n"
+                                          f"Сейчас: <code>{esc(cur or '—')}</code>\n\nНовое значение:",
+                  act.data("pview"), param=k)
+
+
+@ask.on("srv_param")
+async def _param_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
+    v = re.sub(r"\s+", "", ask.text_of(msg))
+    if not PVAL_RE.match(v):
+        await ask.retry(msg, state, ctx, "Нужно число или диапазон a-b, например 5 или 100-2000")
+        return
+    edits = dict((await state.get_data()).get("params") or {})
+    edits[ctx["param"]] = v
+    await state.update_data(params=edits)
+    await params_screen(msg, state)
+
+
+@act("preset")
+async def _params_reset(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await state.update_data(params={})
+    await params_screen(cb, state)
+
+
+@act("pgo")
+async def _params_go(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    edits = (await state.get_data()).get("params") or {}
+    r = await api.call("server", "params", "check", *_pedits_args(edits))
+    d = r.data if r.ok and isinstance(r.data, dict) else {}
+    if not d.get("changed") or d.get("errors"):
+        await params_screen(cb, state)
+        return
+    lines = [f"<b>🎛 Применить параметры?</b>\nМеняются: {esc(', '.join(d['changed']))}"]
+    lines += [f"▲ {esc(x)}" for x in d.get("warnings") or []]
+    if d.get("breaking"):
+        lines.append(f"\n⚠️ {esc(', '.join(d['breaking']))} обязаны совпадать у клиентов: все клиенты "
+                     f"({d.get('clients', 0)}) потеряют связь до получения нового конфига.")
+    else:
+        lines.append("\nСтарые конфиги продолжат работать — эти параметры клиентам совпадать не обязаны.")
+    lines.append("Перед записью — авто-бэкап; не поднимется awg0 — вернутся прежние.")
+    yes = "⚠️ Применить всё равно" if d.get("warnings") else "✅ Применить"
+    await ui.confirm(cb, "\n".join(lines), (yes, act.data("pok")), act.data("pview"))
+
+
+@act("pok")
+async def _params_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    edits = (await state.get_data()).get("params") or {}
+    if not edits:
+        await params_screen(cb, state)
+        return
+    await ui.render(cb, "⏳ Записываю параметры и перезапускаю awg0…")
+    r = await api.call("server", "params", "set", "force", *_pedits_args(edits))
+    if not r.ok:
+        await ui.render(cb, ui.fail(r, "Параметры AWG"), ui.kb(("✏️ К правке", act.data("pview")), ui.back("srv")))
+        return
+    await state.update_data(params={})
+    d = r.data if isinstance(r.data, dict) else {}
+    body = ui.pre("\n".join(r.log.strip().splitlines()[-8:]), 2500)
+    await ui.render(cb, f"✅ <b>Параметры AWG</b>\n{body}", ui.kb(
+        ("📦 Конфиги zip", "cl:export") if d.get("breaking") and d.get("clients") else None,
+        ("👥 Клиенты", "cl") if d.get("breaking") else None,
+        ("🎛 Параметры AWG", act.data("par")), ui.back("srv")))
 
 
 # ── Endpoint ──────────────────────────────────────────────
