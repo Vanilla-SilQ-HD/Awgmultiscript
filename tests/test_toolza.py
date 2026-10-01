@@ -588,4 +588,81 @@ chk("удаление: acme.sh забывает адрес, файлы и тай
     r.get("ok") and not os.path.exists(CERT) and "--remove -d 203.0.113.10" in calls()
     and not os.path.exists(os.path.join(ROOT, "var/lib/awg2/cert")), [r, calls()[-300:]])
 
+# Готовый сертификат сервера (порт 80 занят Caddy): тестовый CA и сертификат
+# на IP сервера в каталоге Caddy, рядом — самоподписанный и с чужим ключом
+print("Готовые сертификаты")
+CA = os.path.join(TMP, "ca")
+CADDY = os.path.join(ROOT, "var/lib/caddy/.local/share/caddy/certificates/acme/203.0.113.10")
+SELF = os.path.join(ROOT, "etc/letsencrypt/live/self")
+BADK = os.path.join(ROOT, "root/cert/bad")
+for d in (CA, CADDY, SELF, BADK):
+    os.makedirs(d, exist_ok=True)
+EC = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes"]
+def ossl(*a):
+    subprocess.run(["openssl", *a], check=True, capture_output=True, cwd=CA)
+ossl("req", "-x509", *EC, "-keyout", "ca.key", "-out", "ca.crt", "-days", "30", "-subj", "/CN=Test CA")
+ossl("req", *EC, "-keyout", f"{CADDY}/203.0.113.10.key", "-out", "leaf.csr", "-subj", "/CN=203.0.113.10")
+with open(os.path.join(CA, "ext"), "w") as f:
+    f.write("subjectAltName=IP:203.0.113.10\n")
+ossl("x509", "-req", "-in", "leaf.csr", "-CA", "ca.crt", "-CAkey", "ca.key", "-CAcreateserial",
+     "-out", f"{CADDY}/203.0.113.10.crt", "-days", "20", "-extfile", "ext")
+ossl("req", "-x509", *EC, "-keyout", f"{SELF}/privkey.pem", "-out", f"{SELF}/fullchain.pem", "-days", "20",
+     "-subj", "/CN=203.0.113.10", "-addext", "subjectAltName=IP:203.0.113.10")
+shutil.copy(f"{CADDY}/203.0.113.10.crt", f"{BADK}/fullchain.pem")
+ossl("genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", f"{BADK}/privkey.pem")
+CADDY_CRT = f"{CADDY}/203.0.113.10.crt"
+r = api("cert", "find")
+rows = r.get("data") or []
+chk("находит сертификат Caddy, самоподписанный и с чужим ключом — мимо",
+    r.get("ok") and [(x["name"], x["source"], x["cert"]) for x in rows] == [("203.0.113.10", "Caddy", CADDY_CRT)], r)
+r = api("cert", "use", "/etc/passwd")
+chk("подключается только найденный, не любой путь", not r.get("ok") and "нет" in (r.get("error") or ""), r)
+r = api("cert", "use", CADDY_CRT)
+st = api("cert", "status").get("data") or {}
+chk("готовый подключён ссылкой, продлевает Caddy", r.get("ok") and os.path.islink(CERT)
+    and os.path.realpath(CERT) == os.path.realpath(CADDY_CRT) and st.get("kind") == "external"
+    and st.get("source") == "Caddy" and st.get("installed") and st.get("name") == "203.0.113.10"
+    and not os.path.exists(os.path.join(ROOT, "units", "awg2-cert.timer.disabled")), [r, st])
+r = api("cert", "remove")
+chk("удаление готового: свои ссылки убраны, файлы Caddy целы", r.get("ok") and not os.path.lexists(CERT)
+    and os.path.exists(CADDY_CRT) and os.path.exists(f"{CADDY}/203.0.113.10.key"), r)
+
+BUSY = os.path.join(TMP, "busy80")
+os.makedirs(BUSY, exist_ok=True)
+with open(os.path.join(BUSY, "ss"), "w") as f:
+    f.write('#!/usr/bin/env bash\n[[ "$*" == *":80"* ]] && echo \'LISTEN 0 4096 *:80 *:* users:(("caddy",pid=1,fd=3))\'\nexit 0\n')
+os.chmod(os.path.join(BUSY, "ss"), 0o755)
+r = api("cert", "issue", "ip", env={"PATH": BUSY + ":" + ENV["PATH"]})
+chk("порт 80 занят — отказ с подсказкой про готовый сертификат", not r.get("ok") and "занят (caddy)" in (r.get("error") or "")
+    and "готовые сертификаты (1)" in r.get("log", ""), r)
+st = api("cert", "status", env={"PATH": BUSY + ":" + ENV["PATH"]}).get("data") or {}
+chk("статус: кто держит порт 80 и сколько готовых", st.get("port80") == "caddy" and st.get("found") == 1, st)
+
+print("Список изменений")
+MD = ("# Изменения\n\n---\n\n## v1.2.0 — 2026-11-01\n\n- новое **важное**\n  продолжение\n\n---\n\n"
+      "## v1.1.1 — 2026-10-01\n\n- исправление\n\n---\n\n## v1.1.0 — 2026-10-01 (бот 3.1.0)\n\n- панель\n")
+rc, out, _ = bash("py changelog-json v1.1.0", stdin=MD)
+d = json.loads(out) if rc == 0 else {}
+chk("изменения новее установленной, сверху новейшая", d.get("newer") is True
+    and [x["version"] for x in d.get("sections", [])] == ["v1.2.0", "v1.1.1"]
+    and d["sections"][0]["title"] == "2026-11-01" and d["sections"][0]["body"].endswith("продолжение"), d)
+rc, out, _ = bash("py changelog-json v1.2.0", stdin=MD)
+d = json.loads(out) if rc == 0 else {}
+chk("новее нет — раздел текущей версии", d.get("newer") is False
+    and [x["version"] for x in d.get("sections", [])] == ["v1.2.0"], d)
+r = api("update", "changelog")
+chk("нет связи с GitHub — понятная ошибка", not r.get("ok") and "недоступен" in (r.get("error") or ""), r)
+
+print("Мимикрия как у сервера")
+with open(conf, "w") as f:
+    f.write(OLD20.replace("# AWG_MIMICRY=quic", "# AWG_MIMICRY=dns\n# AWG_MIMICRY_DOMAIN=example.com\n# AWG_OBF_LEVEL=2"))
+def i_lines(name):
+    t = (api("client", "conf", name).get("data") or {}).get("text", "")
+    return sorted(set(re.findall(r"^(I[1-5]) =", t, re.M)))
+api("client", "add", "m_srv", "mimicry=server")
+api("client", "add", "m_srv3", "mimicry=server:3")
+chk("«как у сервера» — уровень сервера (только I1)", i_lines("m_srv") == ["I1"], i_lines("m_srv"))
+chk("«как у сервера» с уровнем 3 — цепочка того же профиля", i_lines("m_srv3") == ["I1", "I2", "I3", "I4", "I5"],
+    i_lines("m_srv3"))
+
 summary()

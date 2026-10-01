@@ -277,6 +277,19 @@
   .pf input.chg { border-color: var(--accent); background: var(--accent-soft); }
   .card.bad { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 35%, transparent); color: var(--danger); }
 
+  /* Список изменений на экране «Обновление» — прокрутка внутри карточки */
+  .chlog-h { display: flex; align-items: center; gap: 8px; font-weight: var(--w-bold); margin-bottom: 6px; }
+  .chlog-h svg.i { color: var(--accent); }
+  .chlog { max-height: 46vh; overflow-y: auto; overscroll-behavior: contain; font-size: 13px; line-height: 1.45;
+           margin: 0 -6px; padding: 0 6px; }
+  .chlog-v { font: var(--w-semi) 12px var(--mono); color: var(--accent); margin: 12px 0 2px; }
+  .chlog-v:first-child { margin-top: 0; }
+  .chlog-v span { color: var(--hint); font-weight: var(--w-text); }
+  .chlog ul { margin: 4px 0; padding-left: 18px; }
+  .chlog li { margin: 4px 0; }
+  .chlog p { margin: 6px 0; }
+  .chlog code { font: 12px var(--mono); background: var(--soft); border-radius: 5px; padding: 0 4px; overflow-wrap: anywhere; }
+
   /* QR, журналы, всплывающее, выбор снизу */
   .qr { display: block; width: 100%; max-width: 300px; margin: 4px auto; border-radius: 12px; background: #fff; image-rendering: pixelated;
         border: 1px solid var(--border); }

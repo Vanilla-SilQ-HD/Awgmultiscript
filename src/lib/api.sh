@@ -129,7 +129,7 @@ _api_server() {
           _kv port:n "$(server_port)"; _kv net "$(server_net)"; _kv mtu:n "$(conf_iface_get MTU)"
           _kv endpoint "$(endpoint_host):$(server_port)"; _kv domain "$(endpoint_domain)"
           _kv region "$(server_region)"; _kv mimicry "$(conf_marker AWG_MIMICRY)"
-          _kv mimicry_domain "$(conf_marker AWG_MIMICRY_DOMAIN)"
+          _kv mimicry_domain "$(conf_marker AWG_MIMICRY_DOMAIN)"; _kv obf_level "$(conf_marker AWG_OBF_LEVEL)"
           _kv clients:n "$(client_files | grep -c . || true)"
         fi
       } | api_obj
@@ -667,7 +667,10 @@ _api_update() {
     channel)
       update_channel_set "${1:-}" || return 1
       ok "Канал: $(update_channel_label)" ;;
-    *) _api_usage "update status|check|install [force]|channel stable|beta" ;;
+    changelog)
+      update_changelog_fetch || { err "Список изменений недоступен ($UPDATE_REPO)"; return 1; }
+      py changelog-json "$VERSION" <<< "$UPDATE_CHANGELOG" > "$API_DATA" ;;
+    *) _api_usage "update status|check|install [force]|channel stable|beta|changelog" ;;
   esac
 }
 
@@ -716,11 +719,17 @@ _api_cert() {
   case "$a" in
     status)
       { _kv installed:b "$(_b cert_installed)"; _kv kind "$(cert_get kind)"; _kv name "$(cert_get name)"
+        _kv source "$(cert_get source)"
         _kv expires:n "$(cert_expires)"; _kv renew:b "$(_b unit_enabled "$CERT_TIMER")"
-        _kv port80 "$(cert_port80_holder)"; _kv ip "$(public_ip_cached)"; } | api_obj ;;
+        _kv port80 "$(cert_port80_holder)"; _kv port80_unit "$(cert_port80_unit)"
+        _kv found:n "$(cert_find | grep -c . || true)"; _kv ip "$(public_ip_cached)"; } | api_obj ;;
+    find) cert_find | api_rows name source cert key expires:n ;;
+    use)
+      [[ -n "${1:-}" ]] || { _api_usage "cert use ПУТЬ_СЕРТИФИКАТА (из cert find)"; return; }
+      cert_use "$1" && webapp_fw ;;
     issue) cert_issue "$@" && webapp_fw ;;
     remove) cert_remove ;;
-    *) _api_usage "cert status|issue ip|issue domain ИМЯ|remove" ;;
+    *) _api_usage "cert status|find|use ПУТЬ|issue ip [pause]|issue domain ИМЯ [pause]|remove" ;;
   esac
 }
 
@@ -825,7 +834,7 @@ _api_readonly() {
     "status "|"version "|"help "|"mimicry "|"log "*|"job "*|"diag "*) return 0 ;;
     *" status"|*" info"|*" report"|*" tags"|*" backups"|*" list"|*" conf"|*" inspect") return 0 ;;
     "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|"wgobf bundle"|\
-    "bot proxy"|"bot webapp"|"update check"|"module check"|"cert ") return 0 ;;
+    "bot proxy"|"bot webapp"|"update check"|"update changelog"|"module check"|"cert "|"cert find") return 0 ;;
   esac
   return 1
 }

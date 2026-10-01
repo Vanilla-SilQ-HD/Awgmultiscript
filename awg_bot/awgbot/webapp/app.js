@@ -807,8 +807,11 @@ route(/^\/client\/([^/]+)\/date$/, async (ctx, name) => {
 
 // Мимикрия: профиль и уровень; новый конфиг — сразу на экран QR
 async function mimicryPicker(onPick) {
-  const profiles = (await call("mimicry")) || [];
-  let level = "3";
+  const [profiles, srv] = await Promise.all([call("mimicry").then((x) => x || []), call("server", "info").catch(() => ({}))]);
+  const srvMim = (srv && srv.mimicry) || "none", srvLevel = String((srv && srv.obf_level) || "1");
+  const srvLabel = (profiles.find((p) => p.id === srvMim) || {}).label || srvMim;
+  // По умолчанию — уровень сервера; выбранный уровень действует и на «Как у сервера»
+  let level = srvLevel === "2" ? "2" : "3";
   const lv = h("div", { class: "chips" });
   const drawLv = () => lv.replaceChildren(...[["3", "Цепочка I1-I5"], ["2", "Только I1"]].map(([v, l]) =>
     h("button", { class: "chip" + (level === v ? " on" : ""), onclick: () => { level = v; drawLv(); } }, l)));
@@ -817,7 +820,10 @@ async function mimicryPicker(onPick) {
     h("div", { class: "muted small", style: "margin:0 4px 6px" }, "Пакеты I1-I5 перед рукопожатием — под какой протокол маскироваться. Keenetic читает только I1, WireSock — ни одного."),
     h("label", {}, "Уровень"), lv,
     h("div", { class: "card list" },
-      h("div", { class: "item", onclick: () => onPick("server") }, h("div", { class: "main" }, h("div", { class: "title" }, "Как у сервера"))),
+      h("div", { class: "item", onclick: () => onPick(srvMim === "none" || srvLevel === "1" ? "server" : `server:${level}`) },
+        h("div", { class: "main" }, h("div", { class: "title" }, "Как у сервера"),
+          h("div", { class: "sub" }, srvMim === "none" || srvLevel === "1" ? "у сервера без I1-I5"
+            : `${srvLabel} — у сервера ${srvLevel === "2" ? "только I1" : "цепочка"}, уровень — выбранный выше`))),
       h("div", { class: "item", onclick: () => onPick("none") }, h("div", { class: "main" }, h("div", { class: "title" }, "Без I1-I5"))),
       profiles.map((p) => h("div", { class: "item", onclick: () => onPick(`${p.id}:${level}`) },
         h("div", { class: "main" }, h("div", { class: "title" }, p.label), h("div", { class: "sub" }, p.hint))))),
@@ -1731,9 +1737,59 @@ function updateBot(ctx) {
       btn("🔄 Открыть панель заново", () => location.reload(), "btn-primary btn-block")]);
 }
 
+// Список изменений из CHANGELOG.md канала: **жирный**, `код`, пункты «- »,
+// остальное — абзацы. Только DOM-узлы — текст из GitHub не идёт в innerHTML
+function mdInline(text) {
+  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/).filter(Boolean).map((t) =>
+    (t.length > 4 && t.startsWith("**") && t.endsWith("**") ? h("b", {}, t.slice(2, -2))
+      : t.length > 2 && t.startsWith("`") && t.endsWith("`") ? h("code", {}, t.slice(1, -1)) : t));
+}
+function mdBlocks(md) {
+  const blocks = [];
+  for (const raw of (md || "").split("\n")) {
+    const line = raw.trim(), last = blocks[blocks.length - 1], li = raw.match(/^[-•]\s+(.*)$/);
+    if (!line) blocks.push(["gap"]);
+    else if (li) blocks.push(["li", li[1].trim()]);
+    else if (last && last[0] === "li" && /^\s/.test(raw)) last[1] += " " + line;
+    else if (last && last[0] === "p") last[1] += " " + line;
+    else blocks.push(["p", line]);
+  }
+  const out = [];
+  let ul = null;
+  for (const [kind, text] of blocks) {
+    if (kind === "li") {
+      if (!ul) out.push(ul = h("ul"));
+      ul.append(h("li", {}, mdInline(text)));
+    } else {
+      ul = null;
+      if (kind === "p") out.push(h("p", {}, mdInline(text)));
+    }
+  }
+  return out;
+}
+function changelogView(c) {
+  const secs = c.sections || [];
+  if (!secs.length) return [h("div", { class: "muted small" }, "В списке изменений нет раздела для этой версии")];
+  const head = c.newer && secs.length > 1 ? `Что нового: ${c.current} → ${secs[0].version}` : `Что нового в ${secs[0].version}`;
+  return [h("div", { class: "chlog-h" }, icon("file-text"), head),
+    h("div", { class: "chlog" }, secs.map((x) => [
+      h("div", { class: "chlog-v" }, x.version, x.title ? h("span", {}, " · " + x.title) : null), mdBlocks(x.body)]))];
+}
+// Установлена новая версия awg2 — шапка показывает её сразу, не дожидаясь главной
+const setVersion = (v) => { if (v && v !== S.version) { S.version = v; drawTop(); } };
+
 route(/^\/update$/, async (ctx) => {
   const [d, me] = await Promise.all([call("update", "status"), post("/api/me")]);
   const beta = d.channel === "beta", latest = d.available || "";
+  setVersion(d.version);
+  const notes = h("div", { class: "card" }, h("div", { class: "muted small" }, "Загружаю список изменений…"));
+  call("update", "changelog").then((c) => {
+    if (!ctx.live()) return;
+    notes.replaceChildren(...changelogView(c || {}));
+    // В канале новее, а кэш проверки ещё не знает — проверить сейчас, чтобы появилась кнопка «Обновить»
+    if (c && c.newer && !latest) call("update", "check").then(() => { if (ctx.live()) render(); }).catch(() => {});
+  })
+    .catch(() => { if (ctx.live()) notes.replaceChildren(h("div", { class: "muted small" }, "Список изменений недоступен — нет связи с GitHub")); });
   async function check(b) {
     await busy(b, async () => {
       const r = await call("update", "check");
@@ -1761,6 +1817,7 @@ route(/^\/update$/, async (ctx) => {
       kv("Бот", me.bot || "?"),
       h("div", { class: "muted small" }, d.repo || "")),
     latest ? btn(`⬆️ Обновить до ${latest}`, () => runJob(ctx, "Обновление awg2", ["update", "install"], (res) => [
+      setVersion((res && res.version) || latest),
       h("div", { class: "card" }, kv("Установлена", (res && res.version) || latest)),
       hint("Бот обновляется отдельно — из того же канала."),
       btn("🤖 Обновить бота", () => updateBot(ctx), "btn-primary btn-block")]), "btn-ok btn-block") : null,
@@ -1768,9 +1825,10 @@ route(/^\/update$/, async (ctx) => {
       btn("🔎 Проверить", check),
       btn("🤖 Обновить бота", () => updateBot(ctx)),
       btn("♻️ Переустановить", () => jobAsk(ctx, "Поставить версию из канала поверх текущей? Если в канале версия старше — это откат.",
-        "Переустановка awg2", ["update", "install", "force"])),
+        "Переустановка awg2", ["update", "install", "force"], (res) => [setVersion(res && res.version)])),
       btn(beta ? "🔀 На стабильный" : "🧪 Бета-канал", channel)),
-    hint("«Переустановить» — заново из текущего канала, даже без новой версии."));
+    hint("«Переустановить» — заново из текущего канала, даже без новой версии."),
+    notes);
 });
 
 // ── WG + обфускатор ───────────────────────────────────────
@@ -2089,8 +2147,31 @@ route(/^\/bot\/app$/, async (ctx) => {
   const w = d.webapp || {};
   const dom = h("input", { placeholder: "panel.example.com", autocapitalize: "off", autocomplete: "off" });
   const port = h("input", { type: "number", min: 1, max: 65535, placeholder: String(w.port || 8443) });
-  const issue = (head, args, after) => runJob(ctx, head, args, () => [
+  const issueJob = (head, args, after) => runJob(ctx, head, args, () => [
     hint(after), btn("Закрыть панель", () => (tg && tg.close ? tg.close() : null), "btn-primary btn-block")]);
+  // Готовый сертификат сервера: выбрать из найденных и сослаться на него
+  const useFound = async () => {
+    const rows = (await call("cert", "find")) || [];
+    if (!rows.length) return toast("Готовых сертификатов на этот сервер не нашлось", 3000);
+    const pick = await sheet("📂 Готовые сертификаты сервера", rows.map((r) => ({
+      label: `${r.name} · ${r.source} · до ${fmtTime(r.expires).split(",")[0]}`, value: r.cert })));
+    if (!pick) return;
+    await busy(null, async () => {
+      await call("cert", "use", pick);
+      panelMoved(ctx, "Готовый сертификат подключён", "Mini App переехала на него; продлевает его та программа, что выпустила.");
+    });
+  };
+  // Порт 80 занят — выпуск с паузой службы или готовый сертификат
+  const issue = async (head, args, after) => {
+    if (!c.port80) return issueJob(head, args, after);
+    const opts = [];
+    if (c.port80_unit) opts.push({ label: `⏸ Останавливать ${c.port80_unit} на секунды выпуска и продления`, value: "pause" });
+    if (c.found) opts.push({ label: `📂 Взять готовый сертификат (${c.found})`, value: "found" });
+    if (!opts.length) return fail(new Error(`Порт 80 занят (${c.port80}), а службу не опознать — освободи порт на время выпуска`));
+    const pick = await sheet(`Порт 80 занят (${c.port80})`, opts);
+    if (pick === "pause") return issueJob(head, [...args, "pause"], after);
+    if (pick === "found") return useFound();
+  };
   const setPort = async (v) => {
     if (!await confirmTg(v === "off" ? "Выключить Mini App? Панель закроется, кнопка «Меню» станет обычной."
       : `Перенести панель на порт ${v}? Её придётся открыть заново кнопкой «Меню».`)) return;
@@ -2102,14 +2183,18 @@ route(/^\/bot\/app$/, async (ctx) => {
   };
   ctx.put(title("Mini App"),
     ecard({ state: w.running ? "on" : "bad", name: "Сервер панели", right: pill(w.running ? "работает" : "выключен", w.running ? "ok" : "bad"),
-      meta: [tag("порт " + (w.port || "off"), "accent"), c.installed ? tag(c.kind === "ip" ? "сертификат на IP" : "сертификат на домен", "ok", "lock") : tag("нет сертификата", "bad")],
+      meta: [tag("порт " + (w.port || "off"), "accent"), !c.installed ? tag("нет сертификата", "bad")
+        : tag(c.kind === "external" ? "готовый · " + (c.source || "") : c.kind === "ip" ? "сертификат на IP" : "сертификат на домен", "ok", "lock")],
       lines: [w.url || w.error] }),
     c.installed ? statGrid([
-      [c.name || "—", "Сертификат", c.kind === "ip" ? "Let's Encrypt, IP" : "Let's Encrypt, домен"],
-      [c.expires ? fmtTime(c.expires).split(",")[0] : "—", "Действует до", c.renew ? "продлевается сам" : "⚠️ таймер продления не работает"],
+      [c.name || "—", "Сертификат", c.kind === "external" ? "готовый, " + (c.source || "") : c.kind === "ip" ? "Let's Encrypt, IP" : "Let's Encrypt, домен"],
+      [c.expires ? fmtTime(c.expires).split(",")[0] : "—", "Действует до", c.kind === "external" ? "продлевает " + (c.source || "его программа")
+        : c.renew ? "продлевается сам" : "⚠️ таймер продления не работает"],
     ]) : null,
-    c.port80 ? h("div", { class: "card warn small" }, `Порт 80 занят (${c.port80}) — Let's Encrypt не сможет проверить адрес.`) : null,
+    c.port80 ? h("div", { class: "card warn small" }, `Порт 80 занят (${c.port80}) — выпуск только с паузой службы`
+      + (c.found ? ` или готовым сертификатом (${c.found}).` : ".")) : null,
     h("h2", {}, "Сертификат"),
+    c.found ? btn(`📂 Готовый сертификат сервера (${c.found})`, () => useFound(), "btn-block") : null,
     btn(`🔐 На IP ${c.ip || ""}`, () => issue("Сертификат на IP", ["cert", "issue", "ip"],
       "Сертификат выпущен. Сервер панели подхватит его сам; если панель перестанет отвечать — открой её заново."), "btn-block"),
     h("label", {}, "Или на домен — A-запись должна указывать на этот сервер"), dom,
@@ -2119,7 +2204,8 @@ route(/^\/bot\/app$/, async (ctx) => {
       return issue(`Сертификат на ${v}`, ["cert", "issue", "domain", v], `Сертификат на ${v} выпущен. Панель переезжает на домен — `
         + "закрой её и открой снова кнопкой «Меню».").then(() => post("/api/bot/webapp/restart").catch(() => {}));
     }, "btn-block"),
-    hint("На IP — сертификат живёт ~6 дней и продлевается сам; для проверки нужен свободный и открытый порт 80. На домен — 90 дней."),
+    hint("На IP — сертификат живёт ~6 дней и продлевается сам; для проверки нужен свободный и открытый порт 80. На домен — 90 дней. "
+      + "Готовый — уже выпущенный Caddy, certbot, Marzban, 3x-ui или nginx: порт 80 не нужен."),
     h("h2", {}, "Порт"),
     h("div", { class: "row" }, port, btn("OK", () => {
       const v = port.value.trim();

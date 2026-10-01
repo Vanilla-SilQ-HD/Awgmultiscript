@@ -32,7 +32,7 @@ ALLOWED = {"status", "version", "server", "module", "clients", "client", "mimicr
            "tunnels", "warp", "xray", "t2s", "exits", "cascade", "dns", "wgobf", "update", "log", "bot",
            "cert", "uninstall"}
 OWNER_ONLY = (("uninstall",), ("bot", "uninstall"), ("bot", "webapp", "port"), ("cert", "issue"),
-              ("cert", "remove"))
+              ("cert", "use"), ("cert", "remove"))
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 MAX_ARGS, MAX_ARG = 32, 4000       # правка всех параметров 3.1 — 23 аргумента
 TIMEOUT_MAX = 900
