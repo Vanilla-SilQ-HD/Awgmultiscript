@@ -496,13 +496,24 @@ async def _exdate(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
 
 
 # ── Мимикрия ──────────────────────────────────────────────
+def server_mimicry(srv: dict, profiles: list[dict]) -> str:
+    """Что выдаёт «Как у сервера»: профиль и уровень по меткам сервера."""
+    mim = srv.get("mimicry") or "none"
+    if mim == "none" or str(srv.get("obf_level") or "1") == "1":
+        return "без I1-I5"
+    label = next((p.get("label") for p in profiles if p.get("id") == mim), mim)
+    return f"{label}, " + ("только I1" if str(srv.get("obf_level")) == "2" else "цепочка I1-I5")
+
+
 async def mimicry_screen(target: ui.Target, title: str, pick: str, back_to: str, arg: str = "") -> None:
     """Выбор мимикрии. pick — действие, которому уходит строка мимикрии;
     arg — имя клиента (пусто для нового)."""
     tag = f"{arg}|" if arg else ""
     profiles = await api.data("mimicry", default=[])
+    srv = await api.data("server", "info", default={}) or {}
     await ui.render(target, f"<b>🎭 {esc(title)}</b>\n\nПакеты I1-I5 перед рукопожатием — под какой протокол "
-                            "маскироваться. Меняются только у клиента: сервер их не проверяет.\n\n"
+                            "маскироваться. Меняются только у клиента: сервер их не проверяет.\n"
+                            f"Как у сервера — {esc(server_mimicry(srv, profiles))}.\n\n"
                             + ui.profile_hints(profiles),
                     ui.kb(("Как у сервера", act.data(pick, tag + "server")),
                           ("Без I1-I5", act.data(pick, tag + "none")),

@@ -9,6 +9,12 @@
 #
 # Файлы для потребителей — $CERT_FULL и $CERT_KEY: acme.sh кладёт туда
 # сертификат при выпуске и после каждого продления (таймер $CERT_TIMER).
+#
+# Порт 80 занят (Caddy, nginx…) — два выхода. Готовый сертификат сервера:
+# его уже выпустила та программа, $CERT_FULL и $CERT_KEY становятся ссылками
+# на её файлы, а продлевает она сама (kind=external). Или выпуск с паузой:
+# acme.sh останавливает занявшую порт службу на секунды выпуска и каждого
+# продления (хуки он запоминает сам).
 
 cert_installed() { [[ -s "$CERT_FULL" && -s "$CERT_KEY" ]]; }
 cert_get() { sed -n "s/^$1=//p" "$CERT_STATE" 2>/dev/null | head -1; }
@@ -23,6 +29,42 @@ cert_expires() {
 # Кто слушает TCP 80 — пусто, если никто.
 cert_port80_holder() {
   ss -ltnpH 'sport = :80' 2>/dev/null | grep -oE 'users:\(\("[^"]+' | head -1 | sed 's/.*"//' || true
+}
+
+# Служба systemd, которая держит TCP 80, — её можно останавливать на время выпуска.
+cert_port80_unit() {
+  local pid unit
+  pid=$(ss -ltnpH 'sport = :80' 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  unit=$(grep -oE '[A-Za-z0-9@._-]+\.service' "/proc/$pid/cgroup" 2>/dev/null | tail -1)
+  [[ "$unit" =~ ^[A-Za-z0-9@._-]+\.service$ ]] && echo "$unit"
+  return 0
+}
+
+# Готовые сертификаты сервера: «имя<TAB>источник<TAB>сертификат<TAB>ключ<TAB>до».
+cert_find() {
+  py cert-find "$(public_ip_cached)" "${CERT_FIND_ROOT:-/}" "$ACME_HOME" "$CERT_DIR"
+}
+
+# cert_use СЕРТИФИКАТ — взять готовый: только из найденных, не любой путь.
+cert_use() {
+  local want="$1" name src crt key exp old
+  while IFS=$'\t' read -r name src crt key exp; do
+    [[ "$crt" == "$want" ]] && break
+    crt=""
+  done < <(cert_find)
+  [[ -n "$crt" ]] || { err "Такого готового сертификата на сервере нет"; return 1; }
+  old=$(cert_get name)
+  if [[ "$(cert_get kind)" =~ ^(ip|domain)$ && -n "$old" && -x "$ACME_DIR/acme.sh" ]]; then
+    acme --remove -d "$old" --ecc &>/dev/null
+  fi
+  remove_unit "$CERT_TIMER" "$CERT_SERVICE"
+  ufw_delete_matching "$CERT_TAG"
+  mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
+  ln -sfn "$crt" "$CERT_FULL" && ln -sfn "$key" "$CERT_KEY" || { err "Не удалось сослаться на $crt"; return 1; }
+  printf 'kind=external\nname=%s\nsource=%s\n' "$name" "$src" | write_file "$CERT_STATE" 600
+  log_info "сертификат: готовый $src $name"
+  ok "Сертификат $src на $name до $(date -d "@$exp" '+%d.%m.%Y'), продлевает $src"
 }
 
 acme() { "$ACME_DIR/acme.sh" --home "$ACME_HOME" --config-home "$ACME_HOME" "$@"; }
@@ -73,9 +115,12 @@ UNIT
   systemctl enable --now "$CERT_TIMER" &>/dev/null || warn "Таймер продления не запустился: systemctl status $CERT_TIMER"
 }
 
-# cert_issue ip | domain ИМЯ
+# cert_issue ip [pause] | domain ИМЯ [pause] — pause: если порт 80 занят
+# службой, она останавливается на время выпуска и каждого продления.
 cert_issue() {
-  local kind="${1:-}" name="${2:-}" args=() ip pub holder rc=0 old out
+  local kind="${1:-}" name="${2:-}" args=() ip pub holder unit pause="" rc=0 old out n
+  [[ "${*: -1}" == pause ]] && pause=1
+  [[ "$kind" == ip ]] && name=""
   case "$kind" in
     ip)
       name=$(public_ip)
@@ -92,7 +137,19 @@ cert_issue() {
     *) err "Сертификат: ip | domain ИМЯ"; return 1 ;;
   esac
   holder=$(cert_port80_holder)
-  [[ -z "$holder" ]] || { err "Порт 80 занят ($holder): acme.sh слушает его сам на время выпуска и продления"; return 1; }
+  if [[ -n "$holder" ]]; then
+    unit=$(cert_port80_unit)
+    if [[ -n "$pause" && -n "$unit" ]]; then
+      args+=(--pre-hook "systemctl stop $unit" --post-hook "systemctl start $unit")
+      warn "Порт 80 занят $unit — остановлю его на время выпуска (несколько секунд) и так же при каждом продлении"
+    else
+      err "Порт 80 занят ($holder): acme.sh слушает его сам на время выпуска и продления"
+      n=$(cert_find | grep -c . || true)
+      (( n > 0 )) && info "На сервере есть готовые сертификаты ($n) — их можно взять без порта 80"
+      [[ -n "$unit" ]] && info "Или выпуск с паузой $unit: служба останавливается на секунды выпуска и продления"
+      return 1
+    fi
+  fi
   acme_install || return 1
   ufw_allow 80/tcp "$CERT_TAG"
   info "Let's Encrypt: сертификат на $name…"
@@ -108,12 +165,15 @@ cert_issue() {
     return 1
   fi
   mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
+  # Был готовый сертификат — здесь ссылки на чужие файлы: acme.sh записал бы
+  # прямо в них и затёр сертификат той программы
+  rm -f "$CERT_FULL" "$CERT_KEY"
   acme --install-cert -d "$name" --ecc --key-file "$CERT_KEY" --fullchain-file "$CERT_FULL" &>/dev/null
   cert_installed || { err "Сертификат выпущен, но не скопирован в $CERT_DIR"; return 1; }
   chmod 600 "$CERT_KEY"
   # Прежний адрес больше не продлеваем — иначе таймер дёргал бы 80-й порт зря
   old=$(cert_get name)
-  [[ -n "$old" && "$old" != "$name" ]] && acme --remove -d "$old" --ecc &>/dev/null
+  [[ "$(cert_get kind)" != external && -n "$old" && "$old" != "$name" ]] && acme --remove -d "$old" --ecc &>/dev/null
   printf 'kind=%s\nname=%s\n' "$kind" "$name" | write_file "$CERT_STATE" 600
   cert_timer_install
   log_info "сертификат: $kind $name"
@@ -123,7 +183,8 @@ cert_issue() {
 cert_remove() {
   local name
   name=$(cert_get name)
-  [[ -n "$name" && -x "$ACME_DIR/acme.sh" ]] && acme --remove -d "$name" --ecc &>/dev/null
+  # Готовый сертификат чужой — убираем только свои ссылки на него
+  [[ "$(cert_get kind)" != external && -n "$name" && -x "$ACME_DIR/acme.sh" ]] && acme --remove -d "$name" --ecc &>/dev/null
   remove_unit "$CERT_TIMER" "$CERT_SERVICE"
   rm -rf "$CERT_DIR" "$CERT_STATE"
   ufw_delete_matching "$CERT_TAG"
@@ -132,8 +193,11 @@ cert_remove() {
 }
 
 cert_state_line() {
-  local exp
+  local exp k
   cert_installed || { echo -e "${D}нет${N}"; return; }
   exp=$(cert_expires)
-  echo -e "${W}$(cert_get name)${N} ${D}($([[ "$(cert_get kind)" == ip ]] && echo IP || echo домен), до $(date -d "@${exp:-0}" '+%d.%m %H:%M'))${N}"
+  case "$(cert_get kind)" in
+    ip) k=IP ;; external) k="готовый, $(cert_get source)" ;; *) k=домен ;;
+  esac
+  echo -e "${W}$(cert_get name)${N} ${D}($k, до $(date -d "@${exp:-0}" '+%d.%m %H:%M'))${N}"
 }

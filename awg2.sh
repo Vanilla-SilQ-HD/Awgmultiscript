@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.1.3"
+VERSION="v1.1.4"
 
 # ═════ core ═════
 # Базовые примитивы: вывод, ввод, журнал, временные файлы, случайные числа,
@@ -1893,10 +1893,10 @@ i_chain_len() { local s="" l; for l in ${I_LINES[@]+"${I_LINES[@]}"}; do s+="$l"
 
 # Цепочка по меткам сервера: так же, как её выдаёт бот, — клиенты одного
 # сервера получают одинаковый профиль и домен.
-gen_chain_from_server() {
+gen_chain_from_server() {  # [УРОВЕНЬ] — вместо уровня сервера
   local level mim dom
   I_LINES=()
-  level=$(conf_marker AWG_OBF_LEVEL); mim=$(conf_marker AWG_MIMICRY)
+  level=${1:-$(conf_marker AWG_OBF_LEVEL)}; mim=$(conf_marker AWG_MIMICRY)
   dom=$(conf_marker AWG_MIMICRY_DOMAIN)
   CPS_BUDGET=$(conf_marker AWG_CPS_BUDGET); CPS_BUDGET="${CPS_BUDGET:-0}"
   MIMICRY="${mim:-none}"
@@ -2054,6 +2054,7 @@ choose_and_gen_chain() {
 
 # Мимикрия по строке без вопросов (бот, командная строка):
 #   server — как у сервера (у «Standard» — свежий QUIC I1);  none — без I1-I5;
+#   server:2 | server:3 — профиль и домен сервера, но свой уровень;
 #   ПРОФИЛЬ[:УРОВЕНЬ[:ДОМЕН[:БЮДЖЕТ]]] — уровень 2 (только I1) или 3 (цепочка),
 #   без домена — случайный доступный из пула, без бюджета — по профилю.
 mimicry_from_spec() {
@@ -2064,6 +2065,9 @@ mimicry_from_spec() {
     server)
       if [[ "$(server_profile)" == standard ]]; then spec="quic:2"
       else gen_chain_from_server; return 0; fi ;;
+    server:2|server:3)
+      if [[ "$(server_profile)" == standard ]]; then spec="quic:${spec#server:}"
+      else gen_chain_from_server "${spec#server:}"; return 0; fi ;;
   esac
   IFS=: read -r p lvl dom bud <<< "$spec"
   [[ " ${MIMICRY_PROFILES[*]} " == *" $p "* ]] || { err "Профиль мимикрии: ${MIMICRY_PROFILES[*]}"; return 1; }
@@ -6969,6 +6973,12 @@ wgobf_cli() {
 #
 # Файлы для потребителей — $CERT_FULL и $CERT_KEY: acme.sh кладёт туда
 # сертификат при выпуске и после каждого продления (таймер $CERT_TIMER).
+#
+# Порт 80 занят (Caddy, nginx…) — два выхода. Готовый сертификат сервера:
+# его уже выпустила та программа, $CERT_FULL и $CERT_KEY становятся ссылками
+# на её файлы, а продлевает она сама (kind=external). Или выпуск с паузой:
+# acme.sh останавливает занявшую порт службу на секунды выпуска и каждого
+# продления (хуки он запоминает сам).
 
 cert_installed() { [[ -s "$CERT_FULL" && -s "$CERT_KEY" ]]; }
 cert_get() { sed -n "s/^$1=//p" "$CERT_STATE" 2>/dev/null | head -1; }
@@ -6983,6 +6993,42 @@ cert_expires() {
 # Кто слушает TCP 80 — пусто, если никто.
 cert_port80_holder() {
   ss -ltnpH 'sport = :80' 2>/dev/null | grep -oE 'users:\(\("[^"]+' | head -1 | sed 's/.*"//' || true
+}
+
+# Служба systemd, которая держит TCP 80, — её можно останавливать на время выпуска.
+cert_port80_unit() {
+  local pid unit
+  pid=$(ss -ltnpH 'sport = :80' 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  unit=$(grep -oE '[A-Za-z0-9@._-]+\.service' "/proc/$pid/cgroup" 2>/dev/null | tail -1)
+  [[ "$unit" =~ ^[A-Za-z0-9@._-]+\.service$ ]] && echo "$unit"
+  return 0
+}
+
+# Готовые сертификаты сервера: «имя<TAB>источник<TAB>сертификат<TAB>ключ<TAB>до».
+cert_find() {
+  py cert-find "$(public_ip_cached)" "${CERT_FIND_ROOT:-/}" "$ACME_HOME" "$CERT_DIR"
+}
+
+# cert_use СЕРТИФИКАТ — взять готовый: только из найденных, не любой путь.
+cert_use() {
+  local want="$1" name src crt key exp old
+  while IFS=$'\t' read -r name src crt key exp; do
+    [[ "$crt" == "$want" ]] && break
+    crt=""
+  done < <(cert_find)
+  [[ -n "$crt" ]] || { err "Такого готового сертификата на сервере нет"; return 1; }
+  old=$(cert_get name)
+  if [[ "$(cert_get kind)" =~ ^(ip|domain)$ && -n "$old" && -x "$ACME_DIR/acme.sh" ]]; then
+    acme --remove -d "$old" --ecc &>/dev/null
+  fi
+  remove_unit "$CERT_TIMER" "$CERT_SERVICE"
+  ufw_delete_matching "$CERT_TAG"
+  mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
+  ln -sfn "$crt" "$CERT_FULL" && ln -sfn "$key" "$CERT_KEY" || { err "Не удалось сослаться на $crt"; return 1; }
+  printf 'kind=external\nname=%s\nsource=%s\n' "$name" "$src" | write_file "$CERT_STATE" 600
+  log_info "сертификат: готовый $src $name"
+  ok "Сертификат $src на $name до $(date -d "@$exp" '+%d.%m.%Y'), продлевает $src"
 }
 
 acme() { "$ACME_DIR/acme.sh" --home "$ACME_HOME" --config-home "$ACME_HOME" "$@"; }
@@ -7033,9 +7079,12 @@ UNIT
   systemctl enable --now "$CERT_TIMER" &>/dev/null || warn "Таймер продления не запустился: systemctl status $CERT_TIMER"
 }
 
-# cert_issue ip | domain ИМЯ
+# cert_issue ip [pause] | domain ИМЯ [pause] — pause: если порт 80 занят
+# службой, она останавливается на время выпуска и каждого продления.
 cert_issue() {
-  local kind="${1:-}" name="${2:-}" args=() ip pub holder rc=0 old out
+  local kind="${1:-}" name="${2:-}" args=() ip pub holder unit pause="" rc=0 old out n
+  [[ "${*: -1}" == pause ]] && pause=1
+  [[ "$kind" == ip ]] && name=""
   case "$kind" in
     ip)
       name=$(public_ip)
@@ -7052,7 +7101,19 @@ cert_issue() {
     *) err "Сертификат: ip | domain ИМЯ"; return 1 ;;
   esac
   holder=$(cert_port80_holder)
-  [[ -z "$holder" ]] || { err "Порт 80 занят ($holder): acme.sh слушает его сам на время выпуска и продления"; return 1; }
+  if [[ -n "$holder" ]]; then
+    unit=$(cert_port80_unit)
+    if [[ -n "$pause" && -n "$unit" ]]; then
+      args+=(--pre-hook "systemctl stop $unit" --post-hook "systemctl start $unit")
+      warn "Порт 80 занят $unit — остановлю его на время выпуска (несколько секунд) и так же при каждом продлении"
+    else
+      err "Порт 80 занят ($holder): acme.sh слушает его сам на время выпуска и продления"
+      n=$(cert_find | grep -c . || true)
+      (( n > 0 )) && info "На сервере есть готовые сертификаты ($n) — их можно взять без порта 80"
+      [[ -n "$unit" ]] && info "Или выпуск с паузой $unit: служба останавливается на секунды выпуска и продления"
+      return 1
+    fi
+  fi
   acme_install || return 1
   ufw_allow 80/tcp "$CERT_TAG"
   info "Let's Encrypt: сертификат на $name…"
@@ -7068,12 +7129,15 @@ cert_issue() {
     return 1
   fi
   mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
+  # Был готовый сертификат — здесь ссылки на чужие файлы: acme.sh записал бы
+  # прямо в них и затёр сертификат той программы
+  rm -f "$CERT_FULL" "$CERT_KEY"
   acme --install-cert -d "$name" --ecc --key-file "$CERT_KEY" --fullchain-file "$CERT_FULL" &>/dev/null
   cert_installed || { err "Сертификат выпущен, но не скопирован в $CERT_DIR"; return 1; }
   chmod 600 "$CERT_KEY"
   # Прежний адрес больше не продлеваем — иначе таймер дёргал бы 80-й порт зря
   old=$(cert_get name)
-  [[ -n "$old" && "$old" != "$name" ]] && acme --remove -d "$old" --ecc &>/dev/null
+  [[ "$(cert_get kind)" != external && -n "$old" && "$old" != "$name" ]] && acme --remove -d "$old" --ecc &>/dev/null
   printf 'kind=%s\nname=%s\n' "$kind" "$name" | write_file "$CERT_STATE" 600
   cert_timer_install
   log_info "сертификат: $kind $name"
@@ -7083,7 +7147,8 @@ cert_issue() {
 cert_remove() {
   local name
   name=$(cert_get name)
-  [[ -n "$name" && -x "$ACME_DIR/acme.sh" ]] && acme --remove -d "$name" --ecc &>/dev/null
+  # Готовый сертификат чужой — убираем только свои ссылки на него
+  [[ "$(cert_get kind)" != external && -n "$name" && -x "$ACME_DIR/acme.sh" ]] && acme --remove -d "$name" --ecc &>/dev/null
   remove_unit "$CERT_TIMER" "$CERT_SERVICE"
   rm -rf "$CERT_DIR" "$CERT_STATE"
   ufw_delete_matching "$CERT_TAG"
@@ -7092,10 +7157,13 @@ cert_remove() {
 }
 
 cert_state_line() {
-  local exp
+  local exp k
   cert_installed || { echo -e "${D}нет${N}"; return; }
   exp=$(cert_expires)
-  echo -e "${W}$(cert_get name)${N} ${D}($([[ "$(cert_get kind)" == ip ]] && echo IP || echo домен), до $(date -d "@${exp:-0}" '+%d.%m %H:%M'))${N}"
+  case "$(cert_get kind)" in
+    ip) k=IP ;; external) k="готовый, $(cert_get source)" ;; *) k=домен ;;
+  esac
+  echo -e "${W}$(cert_get name)${N} ${D}($k, до $(date -d "@${exp:-0}" '+%d.%m %H:%M'))${N}"
 }
 
 # ═════ backup ═════
@@ -7352,6 +7420,22 @@ update_peek() {
   return 1
 }
 
+# CHANGELOG.md канала (лежит рядом с awg2.sh) → UPDATE_CHANGELOG; напрямую и
+# через зеркала, как и сам скрипт.
+UPDATE_CHANGELOG=""
+update_changelog_fetch() {
+  local mp out url="${UPDATE_URL%/*}/CHANGELOG.md"
+  UPDATE_CHANGELOG=""
+  for mp in "${GH_MIRRORS[@]}"; do
+    out=$(curl -fsSL --connect-timeout 5 --max-time 15 --max-filesize 1048576 -H 'Cache-Control: no-cache' \
+            "${mp}${url}?nocache=$(date +%s)" 2>/dev/null) || continue
+    [[ "$out" == *"## v"* ]] || continue
+    UPDATE_CHANGELOG="$out"
+    return 0
+  done
+  return 1
+}
+
 update_available() {  # → версия, если новее текущей
   local v
   v=$(awk '{print $1; exit}' "$UPDATE_CACHE" 2>/dev/null)
@@ -7592,8 +7676,45 @@ webapp_url() {
   echo "https://$(cert_get name)$([[ "$p" == 443 ]] || echo ":$p")/"
 }
 
+# Выпуск из меню: порт 80 занят — готовый сертификат сервера или пауза службы.
+_cert_issue_menu() {
+  local holder unit n c
+  holder=$(cert_port80_holder)
+  if [[ -z "$holder" ]]; then cert_issue "$@" && webapp_fw && bot_restart; return; fi
+  unit=$(cert_port80_unit)
+  n=$(cert_find | grep -c . || true)
+  warn "Порт 80 занят ($holder) — acme.sh нужен он на время выпуска и продления"
+  echo -e "  ${C}1)${N} Взять готовый сертификат сервера ${D}— найдено $n${N}"
+  [[ -n "$unit" ]] && echo -e "  ${C}2)${N} Останавливать $unit на время выпуска и продления ${D}— секунды простоя$([[ "$1" == ip ]] && echo ', раз в 3 дня')${N}"
+  echo -e "  ${W}0)${N} ← Отмена"
+  read_choice c "${C}  Выбор: ${N}" 0 2 0
+  case "$c" in
+    1) _cert_use_menu ;;
+    2) [[ -n "$unit" ]] && cert_issue "$@" pause && webapp_fw && bot_restart ;;
+  esac
+}
+
+_cert_use_menu() {
+  local rows=() i c name src crt key exp
+  mapfile -t rows < <(cert_find)
+  if (( ${#rows[@]} == 0 )); then
+    info "Готовых сертификатов на этот сервер не нашлось (Caddy, certbot, acme.sh, Marzban, 3x-ui, nginx)"
+    return 1
+  fi
+  for i in "${!rows[@]}"; do
+    IFS=$'\t' read -r name src crt key exp <<< "${rows[$i]}"
+    echo -e "  ${C}$((i + 1)))${N} $name ${D}— $src, до $(date -d "@$exp" '+%d.%m.%Y')${N}"
+    echo -e "     ${D}$crt${N}"
+  done
+  echo -e "  ${W}0)${N} ← Отмена"
+  read_choice c "${C}  Сертификат [0-${#rows[@]}]: ${N}" 0 "${#rows[@]}" 0
+  (( c )) || return 0
+  IFS=$'\t' read -r name src crt key exp <<< "${rows[$((c - 1))]}"
+  cert_use "$crt" && webapp_fw && bot_restart
+}
+
 do_webapp_menu() {
-  local c v p url
+  local c v p url n
   while true; do
     echo ""
     hdr "Mini App и HTTPS-сертификат"
@@ -7606,21 +7727,24 @@ do_webapp_menu() {
     fi
     echo -e "  ${D}Telegram открывает Mini App только по HTTPS. Let's Encrypt проверяет адрес через${N}"
     echo -e "  ${D}порт 80 — он должен быть свободен и открыт; сертификат на IP живёт ~6 дней и${N}"
-    echo -e "  ${D}продлевается сам.${N}"
+    echo -e "  ${D}продлевается сам. Порт занят (Caddy, nginx) — возьми готовый сертификат сервера.${N}"
     echo ""
+    n=$(cert_find | grep -c . || true)
     echo -e "  ${C}1)${N} Сертификат на IP ${D}— $(public_ip_cached)${N}"
     echo -e "  ${C}2)${N} Сертификат на домен"
-    echo -e "  ${C}3)${N} Порт Mini App ${D}— $p${N}"
-    echo -e "  ${R}4)${N} Удалить сертификат"
+    echo -e "  ${C}3)${N} Готовый сертификат сервера ${D}— найдено $n${N}"
+    echo -e "  ${C}4)${N} Порт Mini App ${D}— $p${N}"
+    echo -e "  ${R}5)${N} Удалить сертификат"
     echo -e "  ${W}0)${N} ← Назад"
-    read_choice c "${C}  Выбор [0-4]: ${N}" 0 4 0
+    read_choice c "${C}  Выбор [0-5]: ${N}" 0 5 0
     case "$c" in
-      1) cert_issue ip && webapp_fw && bot_restart ;;
+      1) _cert_issue_menu ip ;;
       2) read_line v "${C}  Домен (A-запись → $(public_ip_cached)): ${N}"
-         [[ -n "$v" ]] && cert_issue domain "$v" && webapp_fw && bot_restart ;;
-      3) read_line v "${C}  Порт (1-65535, off — выключить): ${N}"
+         [[ -n "$v" ]] && _cert_issue_menu domain "$v" ;;
+      3) _cert_use_menu ;;
+      4) read_line v "${C}  Порт (1-65535, off — выключить): ${N}"
          [[ -n "$v" ]] && webapp_port_set "$v" && bot_restart ;;
-      4) ask_yes "  Удалить сертификат? Mini App перестанет открываться [y/N]: " n && cert_remove && bot_restart ;;
+      5) ask_yes "  Удалить сертификат? Mini App перестанет открываться [y/N]: " n && cert_remove && bot_restart ;;
       0) return 0 ;;
     esac
     pause
@@ -8417,7 +8541,7 @@ _api_server() {
           _kv port:n "$(server_port)"; _kv net "$(server_net)"; _kv mtu:n "$(conf_iface_get MTU)"
           _kv endpoint "$(endpoint_host):$(server_port)"; _kv domain "$(endpoint_domain)"
           _kv region "$(server_region)"; _kv mimicry "$(conf_marker AWG_MIMICRY)"
-          _kv mimicry_domain "$(conf_marker AWG_MIMICRY_DOMAIN)"
+          _kv mimicry_domain "$(conf_marker AWG_MIMICRY_DOMAIN)"; _kv obf_level "$(conf_marker AWG_OBF_LEVEL)"
           _kv clients:n "$(client_files | grep -c . || true)"
         fi
       } | api_obj
@@ -8957,7 +9081,10 @@ _api_update() {
     channel)
       update_channel_set "${1:-}" || return 1
       ok "Канал: $(update_channel_label)" ;;
-    *) _api_usage "update status|check|install [force]|channel stable|beta" ;;
+    changelog)
+      update_changelog_fetch || { err "Список изменений недоступен ($UPDATE_REPO)"; return 1; }
+      py changelog-json "$VERSION" <<< "$UPDATE_CHANGELOG" > "$API_DATA" ;;
+    *) _api_usage "update status|check|install [force]|channel stable|beta|changelog" ;;
   esac
 }
 
@@ -9006,11 +9133,17 @@ _api_cert() {
   case "$a" in
     status)
       { _kv installed:b "$(_b cert_installed)"; _kv kind "$(cert_get kind)"; _kv name "$(cert_get name)"
+        _kv source "$(cert_get source)"
         _kv expires:n "$(cert_expires)"; _kv renew:b "$(_b unit_enabled "$CERT_TIMER")"
-        _kv port80 "$(cert_port80_holder)"; _kv ip "$(public_ip_cached)"; } | api_obj ;;
+        _kv port80 "$(cert_port80_holder)"; _kv port80_unit "$(cert_port80_unit)"
+        _kv found:n "$(cert_find | grep -c . || true)"; _kv ip "$(public_ip_cached)"; } | api_obj ;;
+    find) cert_find | api_rows name source cert key expires:n ;;
+    use)
+      [[ -n "${1:-}" ]] || { _api_usage "cert use ПУТЬ_СЕРТИФИКАТА (из cert find)"; return; }
+      cert_use "$1" && webapp_fw ;;
     issue) cert_issue "$@" && webapp_fw ;;
     remove) cert_remove ;;
-    *) _api_usage "cert status|issue ip|issue domain ИМЯ|remove" ;;
+    *) _api_usage "cert status|find|use ПУТЬ|issue ip [pause]|issue domain ИМЯ [pause]|remove" ;;
   esac
 }
 
@@ -9120,7 +9253,7 @@ _api_readonly() {
     "status "|"version "|"help "|"mimicry "|"log "*|"job "*|"diag "*) return 0 ;;
     *" status"|*" info"|*" report"|*" tags"|*" backups"|*" list"|*" conf"|*" inspect") return 0 ;;
     "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|\
-    "bot proxy"|"bot webapp"|"update check"|"module check"|"cert ") return 0 ;;
+    "bot proxy"|"bot webapp"|"update check"|"update changelog"|"module check"|"cert "|"cert find") return 0 ;;
   esac
   return 1
 }
@@ -12408,6 +12541,167 @@ def cmd_api_envelope(rc, data_file, log_file):
 
 
 # ════════════════════════ архивы ════════════════════════
+# ── Готовые сертификаты сервера ───────────────────────────
+# Сертификаты, которые уже выпустили другие программы (Caddy, certbot,
+# acme.sh, Marzban, 3x-ui, nginx), — Mini App может взять их, не трогая
+# порт 80: продлевает их тот, кто выпустил. Подходит только публичный
+# сертификат (не самоподписанный), с ключом от него, не истекающий в
+# ближайшие сутки и выписанный на этот сервер — IP сервера или домен,
+# который ведёт на него.
+CERT_GLOBS = (
+    ("Caddy", "var/lib/caddy/.local/share/caddy/certificates/*/*/*.crt", "{dir}/{stem}.key"),
+    ("Caddy", "root/.local/share/caddy/certificates/*/*/*.crt", "{dir}/{stem}.key"),
+    ("Caddy", "home/*/.local/share/caddy/certificates/*/*/*.crt", "{dir}/{stem}.key"),
+    ("Caddy", "var/lib/docker/volumes/*/_data/caddy/certificates/*/*/*.crt", "{dir}/{stem}.key"),
+    ("Caddy", "var/lib/docker/volumes/*/_data/certificates/*/*/*.crt", "{dir}/{stem}.key"),
+    ("certbot", "etc/letsencrypt/live/*/fullchain.pem", "{dir}/privkey.pem"),
+    ("acme.sh", "root/.acme.sh/*/fullchain.cer", "{dir}/{dirname}.key"),
+    ("Marzban", "var/lib/marzban/certs/*/fullchain.pem", "{dir}/key.pem"),
+    ("Marzban", "var/lib/marzban/certs/fullchain.pem", "{dir}/key.pem"),
+    ("3x-ui", "root/cert/*/fullchain.pem", "{dir}/privkey.pem"),
+    ("3x-ui", "root/cert/fullchain.pem", "{dir}/privkey.pem"),
+)
+NGINX_GLOBS = ("etc/nginx/nginx.conf", "etc/nginx/conf.d/*.conf", "etc/nginx/sites-enabled/*")
+
+
+def _openssl(*args, data=None):
+    import subprocess
+    try:
+        r = subprocess.run(["openssl", *args], input=data, capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _cert_candidates(root):
+    import glob
+    seen = set()
+    for source, pat, key_tpl in CERT_GLOBS:
+        for crt in sorted(glob.glob(os.path.join(root, pat))):
+            d = os.path.dirname(crt)
+            stem = os.path.basename(crt).rsplit(".", 1)[0]
+            dirname = os.path.basename(d).removesuffix("_ecc")
+            key = key_tpl.format(dir=d, stem=stem, dirname=dirname)
+            if (crt, key) not in seen:
+                seen.add((crt, key))
+                yield source, crt, key
+    # nginx: пары ssl_certificate / ssl_certificate_key в порядке появления
+    for pat in NGINX_GLOBS:
+        for conf in sorted(glob.glob(os.path.join(root, pat))):
+            try:
+                text = read(conf)
+            except (OSError, UnicodeDecodeError):
+                continue
+            crt = None
+            for m in re.finditer(r"^\s*(ssl_certificate(?:_key)?)\s+([^;\s]+)\s*;", text, re.M):
+                path = m[2].strip("'\"")
+                if not path.startswith("/") or "$" in path:
+                    continue
+                path = os.path.join(root, path.lstrip("/"))
+                if m[1] == "ssl_certificate":
+                    crt = path
+                elif crt and (crt, path) not in seen:
+                    seen.add((crt, path))
+                    yield "nginx", crt, path
+                    crt = None
+
+
+def _cert_info(crt, key):
+    """{names, ips, expires} публичного сертификата с подходящим ключом; иначе None."""
+    try:
+        if not (os.path.isfile(crt) and os.path.isfile(key)) or os.path.getsize(crt) > 1 << 20:
+            return None
+    except OSError:
+        return None
+    out = _openssl("x509", "-in", crt, "-noout", "-enddate", "-subject", "-issuer", "-ext", "subjectAltName",
+                   "-nameopt", "RFC2253")
+    if out is None:
+        return None
+    text = out.decode("utf-8", "replace")
+    sub = re.search(r"^subject=(.*)$", text, re.M)
+    iss = re.search(r"^issuer=(.*)$", text, re.M)
+    if not sub or not iss or sub[1].strip() == iss[1].strip():
+        return None                               # самоподписанный — Telegram не примет
+    end = re.search(r"^notAfter=(.*)$", text, re.M)
+    if not end:
+        return None
+    # «Dec  3 12:00:00 2026 GMT» — месяц по-английски при любой локали сервера
+    m = re.match(r"([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})", end[1].strip())
+    months = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+    if not m or m[1] not in months:
+        return None
+    import calendar
+    expires = calendar.timegm((int(m[6]), months.index(m[1]) + 1, int(m[2]), int(m[3]), int(m[4]), int(m[5]), 0, 0, 0))
+    if expires < time.time() + 86400:
+        return None
+    pub_c = _openssl("x509", "-in", crt, "-noout", "-pubkey")
+    pub_k = _openssl("pkey", "-in", key, "-pubout")
+    if not pub_c or not pub_k or pub_c.strip() != pub_k.strip():
+        return None                               # ключ не от этого сертификата
+    names = re.findall(r"DNS:([^,\s]+)", text)
+    ips = re.findall(r"IP Address:([0-9.]+)", text)
+    return {"names": [n.lower() for n in names if not n.startswith("*.")], "ips": ips, "expires": expires}
+
+
+def _resolves_to(name, ip):
+    import socket
+    try:
+        return ip in {a[4][0] for a in socket.getaddrinfo(name, None, socket.AF_INET)}
+    except (OSError, UnicodeError):
+        return False
+
+
+def cmd_cert_find(pub_ip, root="/", *exclude):
+    """Готовые сертификаты для Mini App: строки «имя<TAB>источник<TAB>сертификат
+    <TAB>ключ<TAB>до (unix)», свежие сверху; одно имя — один, самый долгий."""
+    skip = tuple(os.path.realpath(e) for e in exclude if e)
+    best = {}
+    for source, crt, key in _cert_candidates(root):
+        if skip and os.path.realpath(crt).startswith(skip):
+            continue
+        info = _cert_info(crt, key)
+        if not info:
+            continue
+        name = pub_ip if pub_ip in info["ips"] else next(
+            (n for n in info["names"] if _resolves_to(n, pub_ip)), "")
+        if name and (name not in best or info["expires"] > best[name][4]):
+            best[name] = (name, source, crt, key, info["expires"])
+    for row in sorted(best.values(), key=lambda r: -r[4]):
+        print("\t".join(map(str, row)))
+
+
+# ── Список изменений ──────────────────────────────────────
+CL_HEAD = re.compile(r"^##\s+(v\d+(?:\.\d+){1,3})\b\s*(.*)$")
+
+
+def _ver_tuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:4])
+
+
+def cmd_changelog_json(current):
+    """CHANGELOG.md из stdin → разделы для экрана «Обновление»: новее
+    установленной версии (сверху самая новая, не больше десяти), а если
+    новее нет — раздел текущей. Заголовок раздела: «## v1.1.1 — дата (бот 3.1.0)»."""
+    sections, cur = [], None
+    for line in sys.stdin.read().replace("\r", "").split("\n"):
+        m = CL_HEAD.match(line)
+        if m:
+            cur = {"version": m[1], "title": m[2].strip(" —–-"), "lines": []}
+            sections.append(cur)
+        elif line.startswith("## "):
+            cur = None
+        elif cur is not None:
+            cur["lines"].append(line)
+    for s in sections:
+        body = "\n".join(s.pop("lines")).strip()
+        s["body"] = re.sub(r"(?:\n\s*-{3,}\s*)+$", "", body).strip()[:20000]
+    now = _ver_tuple(current)
+    newer = sorted((s for s in sections if _ver_tuple(s["version"]) > now),
+                   key=lambda s: _ver_tuple(s["version"]), reverse=True)[:10]
+    shown = newer or [s for s in sections if _ver_tuple(s["version"]) == now][:1]
+    print(json.dumps({"current": current, "newer": bool(newer), "sections": shown}, ensure_ascii=False))
+
+
 def cmd_safe_untar(archive, dest):
     """Распаковать только обычные файлы и каталоги без выхода за dest:
     архив может прийти от пользователя (бэкап, загруженный в бота)."""
@@ -12455,6 +12749,7 @@ COMMANDS = {
     "xray-balancer": cmd_xray_balancer, "xray-balancer-get": cmd_xray_balancer_get,
     "xray-ru": cmd_xray_ru, "xray-prepare": cmd_xray_prepare,
     "pcap-analyze": cmd_pcap_analyze, "safe-untar": cmd_safe_untar,
+    "cert-find": cmd_cert_find, "changelog-json": cmd_changelog_json,
     "json-kv": cmd_json_kv, "json-rows": cmd_json_rows, "json-list": cmd_json_list,
     "clients-json": cmd_clients_json, "api-envelope": cmd_api_envelope,
     "api-job-status": cmd_api_job_status, "api-jobs": cmd_api_jobs,

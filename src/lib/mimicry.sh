@@ -98,10 +98,10 @@ i_chain_len() { local s="" l; for l in ${I_LINES[@]+"${I_LINES[@]}"}; do s+="$l"
 
 # Цепочка по меткам сервера: так же, как её выдаёт бот, — клиенты одного
 # сервера получают одинаковый профиль и домен.
-gen_chain_from_server() {
+gen_chain_from_server() {  # [УРОВЕНЬ] — вместо уровня сервера
   local level mim dom
   I_LINES=()
-  level=$(conf_marker AWG_OBF_LEVEL); mim=$(conf_marker AWG_MIMICRY)
+  level=${1:-$(conf_marker AWG_OBF_LEVEL)}; mim=$(conf_marker AWG_MIMICRY)
   dom=$(conf_marker AWG_MIMICRY_DOMAIN)
   CPS_BUDGET=$(conf_marker AWG_CPS_BUDGET); CPS_BUDGET="${CPS_BUDGET:-0}"
   MIMICRY="${mim:-none}"
@@ -259,6 +259,7 @@ choose_and_gen_chain() {
 
 # Мимикрия по строке без вопросов (бот, командная строка):
 #   server — как у сервера (у «Standard» — свежий QUIC I1);  none — без I1-I5;
+#   server:2 | server:3 — профиль и домен сервера, но свой уровень;
 #   ПРОФИЛЬ[:УРОВЕНЬ[:ДОМЕН[:БЮДЖЕТ]]] — уровень 2 (только I1) или 3 (цепочка),
 #   без домена — случайный доступный из пула, без бюджета — по профилю.
 mimicry_from_spec() {
@@ -269,6 +270,9 @@ mimicry_from_spec() {
     server)
       if [[ "$(server_profile)" == standard ]]; then spec="quic:2"
       else gen_chain_from_server; return 0; fi ;;
+    server:2|server:3)
+      if [[ "$(server_profile)" == standard ]]; then spec="quic:${spec#server:}"
+      else gen_chain_from_server "${spec#server:}"; return 0; fi ;;
   esac
   IFS=: read -r p lvl dom bud <<< "$spec"
   [[ " ${MIMICRY_PROFILES[*]} " == *" $p "* ]] || { err "Профиль мимикрии: ${MIMICRY_PROFILES[*]}"; return 1; }

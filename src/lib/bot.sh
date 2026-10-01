@@ -84,8 +84,45 @@ webapp_url() {
   echo "https://$(cert_get name)$([[ "$p" == 443 ]] || echo ":$p")/"
 }
 
+# Выпуск из меню: порт 80 занят — готовый сертификат сервера или пауза службы.
+_cert_issue_menu() {
+  local holder unit n c
+  holder=$(cert_port80_holder)
+  if [[ -z "$holder" ]]; then cert_issue "$@" && webapp_fw && bot_restart; return; fi
+  unit=$(cert_port80_unit)
+  n=$(cert_find | grep -c . || true)
+  warn "Порт 80 занят ($holder) — acme.sh нужен он на время выпуска и продления"
+  echo -e "  ${C}1)${N} Взять готовый сертификат сервера ${D}— найдено $n${N}"
+  [[ -n "$unit" ]] && echo -e "  ${C}2)${N} Останавливать $unit на время выпуска и продления ${D}— секунды простоя$([[ "$1" == ip ]] && echo ', раз в 3 дня')${N}"
+  echo -e "  ${W}0)${N} ← Отмена"
+  read_choice c "${C}  Выбор: ${N}" 0 2 0
+  case "$c" in
+    1) _cert_use_menu ;;
+    2) [[ -n "$unit" ]] && cert_issue "$@" pause && webapp_fw && bot_restart ;;
+  esac
+}
+
+_cert_use_menu() {
+  local rows=() i c name src crt key exp
+  mapfile -t rows < <(cert_find)
+  if (( ${#rows[@]} == 0 )); then
+    info "Готовых сертификатов на этот сервер не нашлось (Caddy, certbot, acme.sh, Marzban, 3x-ui, nginx)"
+    return 1
+  fi
+  for i in "${!rows[@]}"; do
+    IFS=$'\t' read -r name src crt key exp <<< "${rows[$i]}"
+    echo -e "  ${C}$((i + 1)))${N} $name ${D}— $src, до $(date -d "@$exp" '+%d.%m.%Y')${N}"
+    echo -e "     ${D}$crt${N}"
+  done
+  echo -e "  ${W}0)${N} ← Отмена"
+  read_choice c "${C}  Сертификат [0-${#rows[@]}]: ${N}" 0 "${#rows[@]}" 0
+  (( c )) || return 0
+  IFS=$'\t' read -r name src crt key exp <<< "${rows[$((c - 1))]}"
+  cert_use "$crt" && webapp_fw && bot_restart
+}
+
 do_webapp_menu() {
-  local c v p url
+  local c v p url n
   while true; do
     echo ""
     hdr "Mini App и HTTPS-сертификат"
@@ -98,21 +135,24 @@ do_webapp_menu() {
     fi
     echo -e "  ${D}Telegram открывает Mini App только по HTTPS. Let's Encrypt проверяет адрес через${N}"
     echo -e "  ${D}порт 80 — он должен быть свободен и открыт; сертификат на IP живёт ~6 дней и${N}"
-    echo -e "  ${D}продлевается сам.${N}"
+    echo -e "  ${D}продлевается сам. Порт занят (Caddy, nginx) — возьми готовый сертификат сервера.${N}"
     echo ""
+    n=$(cert_find | grep -c . || true)
     echo -e "  ${C}1)${N} Сертификат на IP ${D}— $(public_ip_cached)${N}"
     echo -e "  ${C}2)${N} Сертификат на домен"
-    echo -e "  ${C}3)${N} Порт Mini App ${D}— $p${N}"
-    echo -e "  ${R}4)${N} Удалить сертификат"
+    echo -e "  ${C}3)${N} Готовый сертификат сервера ${D}— найдено $n${N}"
+    echo -e "  ${C}4)${N} Порт Mini App ${D}— $p${N}"
+    echo -e "  ${R}5)${N} Удалить сертификат"
     echo -e "  ${W}0)${N} ← Назад"
-    read_choice c "${C}  Выбор [0-4]: ${N}" 0 4 0
+    read_choice c "${C}  Выбор [0-5]: ${N}" 0 5 0
     case "$c" in
-      1) cert_issue ip && webapp_fw && bot_restart ;;
+      1) _cert_issue_menu ip ;;
       2) read_line v "${C}  Домен (A-запись → $(public_ip_cached)): ${N}"
-         [[ -n "$v" ]] && cert_issue domain "$v" && webapp_fw && bot_restart ;;
-      3) read_line v "${C}  Порт (1-65535, off — выключить): ${N}"
+         [[ -n "$v" ]] && _cert_issue_menu domain "$v" ;;
+      3) _cert_use_menu ;;
+      4) read_line v "${C}  Порт (1-65535, off — выключить): ${N}"
          [[ -n "$v" ]] && webapp_port_set "$v" && bot_restart ;;
-      4) ask_yes "  Удалить сертификат? Mini App перестанет открываться [y/N]: " n && cert_remove && bot_restart ;;
+      5) ask_yes "  Удалить сертификат? Mini App перестанет открываться [y/N]: " n && cert_remove && bot_restart ;;
       0) return 0 ;;
     esac
     pause
