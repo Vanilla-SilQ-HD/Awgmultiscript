@@ -33,8 +33,8 @@ except ImportError:
 import aiohttp  # noqa: E402
 from aiogram.client.session.base import BaseSession  # noqa: E402
 from aiogram.exceptions import TelegramBadRequest  # noqa: E402
-from aiogram.types import (CallbackQuery, Chat, InlineKeyboardMarkup, Message, MessageEntity, Sticker,  # noqa: E402
-                           StickerSet, Update, User)
+from aiogram.types import (CallbackQuery, Chat, ChatMemberLeft, ChatMemberMember, ChatMemberUpdated,  # noqa: E402
+                           InlineKeyboardMarkup, Message, MessageEntity, Sticker, StickerSet, Update, User)
 
 # Как Telegram обходится с иконками (custom emoji) от бота: ok — показывает
 # (Premium у владельца), strip — молча срезает, reject — отклоняет запрос
@@ -235,6 +235,28 @@ async def run():
     text, _ = screen(await say("/start", STRANGER))
     chk("чужой видит отказ и свой ID", "Доступ запрещён" in text and "222" in text, text)
     chk("чужое нажатие отклонено", "⛔️ Нет доступа" in alerts(await press("cl", STRANGER)))
+
+    group = Chat(id=-1001234, type="supergroup", title="Группа")
+    mark = len(SESSION.sent)
+    await DP.feed_update(BOT, Update(update_id=next(seq), message=Message(
+        message_id=next(MSG_IDS), date=datetime.datetime.now(), chat=group, from_user=OWNER, text="/start")))
+    chk("в группе бот молчит даже владельцу", not [n for n, _ in SESSION.sent[mark:]], SESSION.sent[mark:])
+    mark = len(SESSION.sent)
+    gmsg = Message(message_id=next(MSG_IDS), date=datetime.datetime.now(), chat=group, text="экран")
+    await DP.feed_update(BOT, Update(update_id=next(seq), callback_query=CallbackQuery(
+        id=str(next(seq)), from_user=OWNER, chat_instance="g", data="cl", message=gmsg)))
+    chk("кнопка в группе — отказ, экран не показан",
+        alerts(SESSION.sent[mark:]) == ["Бот работает только в личных сообщениях"]
+        and not screen(SESSION.sent[mark:])[0], SESSION.sent[mark:])
+    mark = len(SESSION.sent)
+    now = datetime.datetime.now()
+    await DP.feed_update(BOT, Update(update_id=next(seq), my_chat_member=ChatMemberUpdated(
+        chat=group, from_user=STRANGER, date=now,
+        old_chat_member=ChatMemberLeft(user=User(id=999, is_bot=True, first_name="Bot")),
+        new_chat_member=ChatMemberMember(user=User(id=999, is_bot=True, first_name="Bot")))))
+    left = [m for n, m in SESSION.sent[mark:] if n == "LeaveChat"]
+    chk("бота добавили в группу — сам выходит", len(left) == 1 and left[0].chat_id == group.id, SESSION.sent[mark:])
+    chk("выход из групп включён в получаемые апдейты", "my_chat_member" in DP.resolve_used_update_types())
 
     print("Главное меню")
     text, buttons = screen(await say("/start"))
@@ -907,6 +929,15 @@ async def run():
     chk("свои иконки дополняют набор; обычное эмодзи на месте — оставить",
         "Иконки включены" in text and m.get("🖥") == "901" and m.get("🩺") == "903" and m.get("👥") == "222"
         and icons_mod.pack() == "TgAndroidIcons + свои", [icons_mod.pack(), m])
+    admin = User(id=333, is_bot=False, first_name="Admin")
+    admins.add(333, 111)
+    denied = [alerts(await press(d, admin)) for d in ("look", "look:pk:TgAndroidIcons", "look:own", "look:off",
+                                                       "adm:invite", "app:rm")]
+    chk("приглашённому админу оформление, админы и Mini App закрыты — каждая кнопка",
+        all(len(a) == 1 and "только владелец" in a[0] for a in denied)
+        and icons_mod.active() and icons_mod.pack() == "TgAndroidIcons + свои" and admins.pending_invites() == 0, denied)
+    admins.remove(333, removed_by=111)
+
     await press("look:off")
     chk("выключение иконок", not icons_mod.active() and icons_mod.mapping(), icons_mod.mapping())
     PREMIUM["mode"] = "strip"
