@@ -410,6 +410,21 @@ chk("неизвестная команда — rc 2", r.get("ok") is False and r
 r = api("server", "proto", "9.9")
 chk("проверка аргументов", r.get("ok") is False and r["rc"] == 2 and "server proto" in r["error"], r)
 
+# Срок клиента приходит от бота и панели — в арифметику bash не должна попасть
+# подстановка команды: «expire=+0+a[$(…)]d» раньше выполняла touch.
+PWNED = os.path.join(TMP, "PWNED_TS")
+r = api("client", "add", "victim", f"expire=+0+a[$(touch {PWNED})]d", "mimicry=none")
+chk("срок: инъекция в арифметику отбита", r.get("ok") is False and not os.path.exists(PWNED)
+    and "не распознан" in (r.get("error") or ""), r)
+r = api("client", "add", "victim2", "expire=$(touch /tmp/x);echo 1", "mimicry=none")
+chk("срок: команда в дате отбита", r.get("ok") is False and "не распознан" in (r.get("error") or ""), r)
+rows = api("clients", "list").get("data") or []
+chk("клиент с инъекцией в сроке не создан", not any(c["name"] in ("victim", "victim2") for c in rows), rows)
+r = api("client", "add", "okdate", "expire=+30d", "mimicry=none")
+chk("валидный срок +30d работает", r.get("ok"), r)
+r = api("client", "add", "okabs", "expire=2027-01-01", "mimicry=none")
+chk("валидная дата работает", r.get("ok"), r)
+
 # Параметры вручную: проверка, запрет без force, применение, откат
 ALICE = os.path.join(ROOT, "root", "alice_awg2.conf")
 r = api("server", "params")
