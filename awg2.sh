@@ -7206,11 +7206,15 @@ _restore_prepare() {
 }
 
 _restore_awg_files() {  # каталог бэкапа
-  local src="$1" f
+  local src="$1" f keep
   install -D -m 600 "$src/awg0.conf" "$SERVER_CONF"
-  # Конфиги клиентов, которых в бэкапе нет, иначе остаются сиротами: видны в
-  # «Показать конфиг», занимают имя и попадают в архив, хотя в awg0 их нет.
-  rm -f "$CLIENT_DIR"/*_awg[23].conf
+  # Конфиги клиентов, которых нет в восстановленном awg0.conf, иначе остаются
+  # сиротами: видны в «Показать конфиг», занимают имя и попадают в архив.
+  # Конфиги пиров, которые в awg0 есть, не трогаем: бэкап мог прийти без них.
+  keep=" $(clients_tsv | cut -f1 | tr '\n' ' ') "
+  for f in "$CLIENT_DIR"/*_awg[23].conf; do
+    [[ -f "$f" && "$keep" != *" $(client_name_of "$f") "* ]] && rm -f "$f"
+  done
   while IFS= read -r -d '' f; do
     rm -f "$CLIENT_DIR/$(client_name_of "$f")"_awg[23].conf
     install -m 600 "$f" "$CLIENT_DIR/${f##*/}"
@@ -8555,6 +8559,7 @@ _api_client_opts() {
       expire) if [[ -n "$v" ]]; then
                 _O_EXPIRE=$(_api_ts "$v")
                 [[ "$_O_EXPIRE" =~ ^[0-9]+$ ]] || { err "Срок не распознан: $v"; return 1; }
+                (( _O_EXPIRE > $(date +%s) + 60 )) || { err "Срок уже прошёл: $v"; return 1; }
               fi ;;
       mimicry) _O_MIM="$v" ;;
       dns) [[ "$v" =~ ^[0-9.,[:space:]]+$ ]] || { err "dns: IPv4 через запятую"; return 1; }; _O_DNS="$v" ;;
@@ -11556,7 +11561,7 @@ def cmd_i_replace(path):
     for line in read(path).split("\n"):
         if re.match(r"^I[1-5]\s*=", line):
             continue
-        if line.startswith("[Peer]") and not inserted:
+        if PEER_SPLIT.match(line) and not inserted:
             while out and out[-1] == "":
                 out.pop()
             out.extend(lines)

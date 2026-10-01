@@ -271,6 +271,7 @@ _api_client_opts() {
       expire) if [[ -n "$v" ]]; then
                 _O_EXPIRE=$(_api_ts "$v")
                 [[ "$_O_EXPIRE" =~ ^[0-9]+$ ]] || { err "Срок не распознан: $v"; return 1; }
+                (( _O_EXPIRE > $(date +%s) + 60 )) || { err "Срок уже прошёл: $v"; return 1; }
               fi ;;
       mimicry) _O_MIM="$v" ;;
       dns) [[ "$v" =~ ^[0-9.,[:space:]]+$ ]] || { err "dns: IPv4 через запятую"; return 1; }; _O_DNS="$v" ;;

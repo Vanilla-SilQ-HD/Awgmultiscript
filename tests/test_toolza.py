@@ -411,6 +411,9 @@ chk("api client del", r.get("ok") and not os.path.exists(os.path.join(ROOT, "roo
 r = api("clients", "bulk", "t:3", "mimicry=none")
 chk("api clients bulk", r.get("ok") and r["data"] == ["t-001", "t-002", "t-003"], r)
 api("clients", "bulk", "z:2", "mimicry=none")
+r = api("clients", "bulk", "past:2", "expire=2020-01-01", "mimicry=none")
+chk("bulk: срок в прошлом отвергается", r.get("ok") is False and "прошёл" in (r.get("error") or "")
+    and not any(c["name"].startswith("past-") for c in api("clients", "list").get("data") or []), r)
 r = api("clients", "del", "z-001, z-002,nobody")
 chk("api clients del — несколько, неизвестные пропускаются",
     r.get("ok") and r["data"] == ["z-001", "z-002"] and "Нет клиента: nobody" in r.get("log", "")
@@ -603,8 +606,15 @@ with open(junk, "wb") as f:
 r = api("backup", "inspect", junk)
 chk("не архив — понятная ошибка без трассировки Python",
     r.get("ok") is False and "это не архив" in r.get("log", "") and "Traceback" not in r.get("log", ""), r)
+# Клиент, созданный после бэкапа, — сирота после восстановления: его конфиг убирается;
+# конфиги клиентов, которые в awg0 бэкапа есть, остаются на месте
+api("client", "add", "late", "mimicry=none")
+LATE = os.path.join(ROOT, "root", "late_awg2.conf")
 r = api("backup", "restore", bk_path)
 chk("восстановление из архива", r.get("ok") and "Восстановлено" in r.get("log", ""), r)
+chk("restore: конфиг клиента не из бэкапа убран, остальные на месте",
+    not os.path.exists(LATE) and os.path.exists(ALICE)
+    and not any(c["name"] == "late" for c in api("clients", "list").get("data") or []), os.listdir(os.path.join(ROOT, "root")))
 
 print("Сертификат")
 fake_acme()

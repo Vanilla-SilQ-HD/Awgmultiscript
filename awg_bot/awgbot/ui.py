@@ -171,7 +171,11 @@ def pre(text: str, limit: int = 3000, tail: bool = True) -> str:
     if len(text) > limit:
         if tail:
             text = text[-limit:]
-            text = "…\n" + re.sub(r"^[^&\s]{0,6};", "", text)       # не начинать с хвоста &quot;
+            # Начать с целой строки (журналы построчные); нет переноса рядом —
+            # хотя бы не с огрызка сущности вроде «uot;»
+            nl = text.find("\n")
+            text = text[nl + 1:] if 0 <= nl < 200 else re.sub(r"^[a-z0-9#]{0,5};", "", text)
+            text = "…\n" + text
         else:
             text = re.sub(r"&[^;&]{0,6}$", "", text[:limit]) + "\n…"
     return f"<pre>{text}</pre>"

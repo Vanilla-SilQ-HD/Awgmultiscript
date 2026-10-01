@@ -406,7 +406,7 @@ def cmd_i_replace(path):
     for line in read(path).split("\n"):
         if re.match(r"^I[1-5]\s*=", line):
             continue
-        if line.startswith("[Peer]") and not inserted:
+        if PEER_SPLIT.match(line) and not inserted:
             while out and out[-1] == "":
                 out.pop()
             out.extend(lines)

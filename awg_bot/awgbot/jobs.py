@@ -98,9 +98,9 @@ async def _edit(bot: Bot, chat_id: int, msg_id: int, text: str,
                 return True
             log.debug("правка сообщения задачи: %s", e)
             return False
-    # Не дождались Telegram — сообщение на месте, но не обновлено; журнал
-    # догонит на следующем проходе.
-    return True
+    # Не дождались Telegram: по ходу задачи журнал догонит на следующем
+    # проходе, а итог уйдёт новым сообщением — лишь бы не потерялся.
+    return False
 
 
 async def _follow(bot: Bot, job_id: str, chat_id: int, msg_id: int, title: str, back_to: str,

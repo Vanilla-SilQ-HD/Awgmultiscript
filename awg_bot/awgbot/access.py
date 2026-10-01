@@ -51,8 +51,8 @@ class AccessMiddleware(BaseMiddleware):
         """Ровно команда /start (с «@бот» или payload приглашения), а не
         «/startfoo»: та прошла бы мимо CommandStart() в общий обработчик и
         показала бы чужому меню со сводкой сервера."""
-        cmd = (text or "").split(maxsplit=1)[0] if text else ""
-        return cmd.partition("@")[0] == "/start"
+        parts = (text or "").split(maxsplit=1)
+        return bool(parts) and parts[0].partition("@")[0] == "/start"
 
     async def __call__(self, handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
                        event: TelegramObject, data: dict[str, Any]) -> Any:
