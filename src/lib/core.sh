@@ -147,8 +147,16 @@ pause() {
 # провале показывает хвост именно этого шага.
 _RUN_STEP_PID=""
 
+# Фоновый сабшелл шага не передаёт SIGINT детям (apt-get, dkms, make):
+# убиваем дерево целиком, иначе сборка продолжается после «Прервано».
+_kill_tree() {
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do _kill_tree "$c"; done
+  kill -TERM "$1" 2>/dev/null
+}
+
 _run_step_abort() {
-  [[ -n "$_RUN_STEP_PID" ]] && kill "$_RUN_STEP_PID" 2>/dev/null
+  [[ -n "$_RUN_STEP_PID" ]] && _kill_tree "$_RUN_STEP_PID"
   printf '\r\033[K\n'
   warn "Прервано пользователем"
   exit 130

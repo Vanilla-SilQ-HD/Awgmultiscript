@@ -110,12 +110,12 @@ do_expire_menu() {
     echo ""
     hdr "Срок действия клиентов"
     now=$(date +%s)
-    while IFS=$'\t' read -r name pub _ exp orig _; do
+    while IFS='|' read -r name pub _ exp orig _; do
       [[ -n "$exp" ]] || continue
       n=$((n + 1))
       if [[ -n "$orig" ]]; then echo -e "  ${R}🚫 ${name}${N} ${D}— заблокирован, $(expire_fmt "$exp")${N}"
       else echo -e "  ${Y}⏰ ${name}${N} ${D}— $(expire_fmt "$exp")${N}"; fi
-    done < <(clients_tsv)
+    done < <(clients_psv)
     (( n )) || echo -e "  ${D}Сроков нет — все клиенты бессрочные${N}"
     n=0
     echo ""

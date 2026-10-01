@@ -82,8 +82,15 @@ chk("2.0 без метки AWG_PROTO", out.strip() == "2.0|10.23.45.0/24|51820|r
 rc, out, _ = bash("clients_tsv")
 rows = [r.split("\t") for r in out.strip().splitlines()]
 chk("клиенты и метки", [r[0] for r in rows] == ["alice", "bob"] and rows[1][3] == "1", out)
-rc, out, _ = bash('conf_marker_set AWG_PROTO 3.1; conf_marker AWG_PROTO; head -3 "$SERVER_CONF"')
+rc, out, _ = bash('conf_marker_set AWG_PROTO 3.1; conf_marker AWG_PROTO; sed -n "1,/^\\[Interface\\]/p" "$SERVER_CONF"')
 chk("метка вставляется в шапку", out.splitlines()[0] == "3.1" and "# AWG_PROTO=3.1" in out, out)
+# Конфиг без шапки (начинается с [Interface]): «1a» ставила метку внутрь секции, где её не видно
+with open(conf, "w") as f:
+    f.write(OLD20[OLD20.index("[Interface]"):])
+rc, out, _ = bash('conf_marker_set AWG_ENDPOINT vpn.example.com; conf_marker AWG_ENDPOINT; head -1 "$SERVER_CONF"')
+chk("метка перед [Interface], когда шапки нет", out.splitlines() == ["vpn.example.com", "# AWG_ENDPOINT=vpn.example.com"], out)
+with open(conf, "w") as f:
+    f.write(OLD20)
 with open(conf, "w") as f:
     f.write(OLD20.replace("H4 = 1610612736-1610620000", "H4 = 4\nHeaderProtectionKey = K=\nRandomTrailers = on"))
 rc, out, _ = bash("server_proto")
@@ -118,6 +125,30 @@ with open(EXIT, "w") as f:
     f.write("[Interface]\nPrivateKey = X\nAddress = 10.9.0.2/32\nDNS = 1.1.1.1\nTable = auto\n\n[Peer]\nEndpoint = 1.2.3.4:51820\nAllowedIPs = 0.0.0.0/0\n")
 rc, out, _ = bash(f'py exit-conf-fix "{EXIT}"; cat "{EXIT}"')
 chk("exit-нода: Table = off, без DNS", "Table = off" in out and "DNS" not in out and "Table = auto" not in out, out)
+
+# Пиры в записи wireguard-tools: «[Peer] # имя», «[peer]» с отступом, комментарий после значения
+LOOSE = os.path.join(TMP, "loose.conf")
+with open(LOOSE, "w") as f:
+    f.write("[Interface]\nPrivateKey = P\nAddress = 10.5.0.1/24\n\n[Peer] # carol\nPublicKey = PC= # note\n"
+            "AllowedIPs = 10.5.0.2/32\n\n  [peer]\n# dave\nPublicKey=PD=\nAllowedIPs = 10.5.0.3/32\n")
+rc, out, _ = bash(f'py peers "{LOOSE}"')
+rows = [r.split("\t") for r in out.strip("\n").split("\n")]
+chk("пиры в вольной записи видны, имя — и из заголовка", [r[1] for r in rows] == ["PC=", "PD="]
+    and rows[0][2] == "10.5.0.2/32" and [r[0] for r in rows] == ["carol", "dave"], out)
+# Таб для read — пробельный разделитель: пустые колонки TSV схлопывались, и пир без имени
+# получал в имя ключ, а клиент со сроком — чужое orig_ips (показывался заблокированным)
+rc, out, _ = bash(f'SERVER_CONF="{LOOSE}"; clients_name_ip')
+chk("clients_name_ip: колонки не съезжают", out.split() == ["carol|10.5.0.2", "dave|10.5.0.3"], out)
+TSV = os.path.join(TMP, "peers.tsv")
+with open(TSV, "w") as f:
+    f.write("alice\tPUBA=\t10.8.0.2/32\t1800000000\t\tnone\n")
+rc, out, _ = bash(f'clients_tsv() {{ cat "{TSV}"; }}; clients_psv | {{ IFS="|" read -r name pub aip exp orig rest; echo "$exp|$orig|$rest"; }}')
+chk("clients_psv: пустая колонка остаётся пустой", out.strip() == "1800000000||none", out)
+
+# Валидаторы: ведущие нули — не восьмеричные числа и не ошибка арифметики
+rc, out, err = bash('valid_port 0080 && echo a; valid_port 65536 || echo b; valid_port 0 || echo c; '
+                    'valid_cidr 10.0.0.0/08 && echo d; valid_cidr 10.0.0.0/33 || echo e')
+chk("valid_port/valid_cidr с ведущими нулями", out.split() == ["a", "b", "c", "d", "e"] and "too great" not in err, out + err)
 
 WG = os.path.join(ROOT, "etc/wireguard/wgobf0.conf")
 os.makedirs(os.path.dirname(WG), exist_ok=True)
@@ -373,6 +404,9 @@ chk("api client del", r.get("ok") and not os.path.exists(os.path.join(ROOT, "roo
 r = api("clients", "bulk", "t:3", "mimicry=none")
 chk("api clients bulk", r.get("ok") and r["data"] == ["t-001", "t-002", "t-003"], r)
 api("clients", "bulk", "z:2", "mimicry=none")
+r = api("clients", "bulk", "past:2", "expire=2020-01-01", "mimicry=none")
+chk("bulk: срок в прошлом отвергается", r.get("ok") is False and "прошёл" in (r.get("error") or "")
+    and not any(c["name"].startswith("past-") for c in api("clients", "list").get("data") or []), r)
 r = api("clients", "del", "z-001, z-002,nobody")
 chk("api clients del — несколько, неизвестные пропускаются",
     r.get("ok") and r["data"] == ["z-001", "z-002"] and "Нет клиента: nobody" in r.get("log", "")
@@ -396,6 +430,29 @@ r = api("exits", "add", "n1", stdin="")
 chk("stdin обязателен для exits add", r.get("ok") is False and "stdin" in r["error"], r)
 r = api("exits", "add", "n1", stdin="[Interface]\nPrivateKey = X\n")
 chk("конфиг ноды читается из stdin", r.get("ok") is False and "Endpoint" in r["error"], r)
+# Новый срок заблокированному клиенту возвращает адрес, а не оставляет его на 127.0.0.2
+api("client", "add", "erin", "mimicry=none")
+rc, out, _ = bash('py meta-set "$SERVER_CONF" erin expires 1; py expire-check "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$EXPIRE_STATE_DIR" >/dev/null; '
+                  'client_expire_set erin $(( $(date +%s) + 86400 )) >/dev/null; clients_tsv | grep "^erin"')
+cols = out.strip().split("\t")
+chk("срок заблокированному снимает блокировку", len(cols) >= 5 and cols[2].startswith("10.23.45.") and cols[4] == ""
+    and cols[3].isdigit() and int(cols[3]) > 1e9, repr(out))
+api("client", "del", "erin")
+# Предупреждение о длине I1-I5 — по каждому клиенту отдельно, не суммой по всем
+for n in ("l1", "l2"):
+    with open(os.path.join(ROOT, "root", f"{n}_awg2.conf"), "w") as f:
+        f.write("[Interface]\nPrivateKey = X\nI1 = " + "<b 0x" + "aa" * 1000 + ">\n")
+rc, out, _ = bash("mimicry_module_warnings 2>&1")
+chk("длина I1-I5: два клиента по 2 КБ — без предупреждения", "длиннее" not in out, out)
+with open(os.path.join(ROOT, "root", "l3_awg2.conf"), "w") as f:
+    f.write("[Interface]\nPrivateKey = X\nI1 = " + "<b 0x" + "aa" * 1850 + ">\n")
+rc, out, _ = bash("mimicry_module_warnings 2>&1")
+chk("длина I1-I5: один клиент на 3.7 КБ — предупреждение", "длиннее" in out, out)
+for n in ("l1", "l2", "l3"):
+    os.remove(os.path.join(ROOT, "root", f"{n}_awg2.conf"))
+# json-rows/json-list делят только по \n: U+2028 и \r внутри значения — не новая строка
+rc, out, _ = bash("printf 'n\\tx\\tc1\\xe2\\x80\\xa8c2\\r\\n' | py json-rows name ip on")
+chk("json-rows: U+2028 и \\r не режут строку", json.loads(out) == [{"name": "n", "ip": "x", "on": "c1\u2028c2"}], out)
 rfd, wfd = os.pipe()          # пишущий конец держим открытым до конца вызова
 try:
     out = subprocess.run([API_WRAP, "version"], stdin=rfd, capture_output=True, text=True,
@@ -538,8 +595,15 @@ with open(junk, "wb") as f:
 r = api("backup", "inspect", junk)
 chk("не архив — понятная ошибка без трассировки Python",
     r.get("ok") is False and "это не архив" in r.get("log", "") and "Traceback" not in r.get("log", ""), r)
+# Клиент, созданный после бэкапа, — сирота после восстановления: его конфиг убирается;
+# конфиги клиентов, которые в awg0 бэкапа есть, остаются на месте
+api("client", "add", "late", "mimicry=none")
+LATE = os.path.join(ROOT, "root", "late_awg2.conf")
 r = api("backup", "restore", bk_path)
 chk("восстановление из архива", r.get("ok") and "Восстановлено" in r.get("log", ""), r)
+chk("restore: конфиг клиента не из бэкапа убран, остальные на месте",
+    not os.path.exists(LATE) and os.path.exists(ALICE)
+    and not any(c["name"] == "late" for c in api("clients", "list").get("data") or []), os.listdir(os.path.join(ROOT, "root")))
 
 print("Сертификат")
 fake_acme()

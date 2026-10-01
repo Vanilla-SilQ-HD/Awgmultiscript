@@ -156,10 +156,12 @@ exits_up() {  # all|peers
   mode="${mode:-all}"
   server_exists || { err "Сначала создай сервер"; return 1; }
   [[ -n "$(exits_up_nodes)" ]] || { err "Ни одна exit-нода не поднята — добавь или перезапусти ноду"; return 1; }
+  # Список клиентов режима peers — до проверки «уже включено»: иначе при
+  # переключении all → peers на ходу файла нет, и маршруты не получает никто.
+  if [[ "$mode" == peers ]]; then peers_sync "$EXITS_PEERS"; peers_seed "$EXITS_PEERS"; fi
   if exits_is_up; then exits_state_set mode "$mode"; exits_reapply; ok "Режим: $mode"; return 0; fi
   tunnel_guard exits || return 1
   exits_state_set state active mode "$mode"
-  if [[ "$mode" == peers ]]; then peers_sync "$EXITS_PEERS"; peers_seed "$EXITS_PEERS"; fi
   _exits_write_unit || return 1
   if ! systemctl enable --now "$EXITS_UNIT" &>/dev/null; then
     err "Маршрутизация не запустилась:"
@@ -410,7 +412,7 @@ exits_status() {
   echo -e "  Ноды      : ${W}$n${N} (поднято $(exits_up_nodes | grep -c . || true))"
   if exits_is_up; then
     mode=$(exits_state_get mode); bal=$(exits_state_get balancer)
-    echo -e "  Маршруты  : ${G}● включены${N} — $([[ "$mode" == peers ]] && echo "выборочно, $(grep -c . "$EXITS_PEERS" 2>/dev/null || echo 0) кл." || echo "все клиенты")"
+    echo -e "  Маршруты  : ${G}● включены${N} — $([[ "$mode" == peers ]] && echo "выборочно, $(n=$(grep -c . "$EXITS_PEERS" 2>/dev/null); echo "${n:-0}") кл." || echo "все клиенты")"
     if [[ "$bal" == ecmp ]]; then echo -e "  Балансир  : ECMP"
     else echo -e "  Балансир  : одна нода ($(exits_state_get single_exit))"; fi
   elif unit_enabled "$EXITS_UNIT"; then

@@ -209,7 +209,10 @@ choose_cps_domain() {
       warn "Не похоже на домен"
     done
   fi
-  mimicry_pool_domain
+  # STUN/WebRTC без своего домена обходятся адресами ICE-провайдера — как
+  # в mimicry_from_spec; пул TLS-доменов им не подставляем.
+  _profile_needs_domain "$MIMICRY" && mimicry_pool_domain
+  return 0
 }
 
 # Случайный доступный домен из встроенного пула профиля → CPS_DOMAIN.

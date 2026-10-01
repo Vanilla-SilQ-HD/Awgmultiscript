@@ -304,6 +304,7 @@ _choose_dns() {
     3) S_DNS="9.9.9.9, 149.112.112.112" ;; 4) S_DNS="77.88.8.8, 77.88.8.1" ;;
     5) while true; do
          read_line d "${C}  DNS через запятую: ${N}"
+         [[ -n "$d" ]] || { S_DNS="1.1.1.1, 1.0.0.1"; break; }
          [[ "$d" =~ ^[0-9.,[:space:]]+$ ]] && { S_DNS="$d"; break; }
          warn "Нужны IPv4-адреса через запятую"
        done ;;
@@ -323,6 +324,7 @@ _choose_mtu() {  # $1 — значение по умолчанию
     1) MTU=$1 ;; 2) MTU=1420 ;; 3) MTU=1380 ;; 4) MTU=1320 ;; 5) MTU=1280 ;;
     6) while true; do
          read_line v "${C}  MTU (1280-1500): ${N}"
+         [[ -n "$v" ]] || { MTU=$1; break; }
          [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1280 && v <= 1500 )) && { MTU=$v; break; }
          warn "Число 1280-1500"
        done ;;
@@ -390,6 +392,7 @@ _choose_net() {
   fi
   while true; do
     read_line v "${C}  Подсеть вида 10.8.0.0/24: ${N}"
+    [[ -n "$v" ]] || { warn "Подсеть не выбрана"; return 1; }
     if valid_cidr "$v" && [[ "${v#*/}" == 24 ]]; then
       v="${v%.*}.0/24"
       if taken_networks | py net-overlaps "$v" >/dev/null; then
@@ -644,7 +647,9 @@ mimicry_module_warnings() {
   if [[ "$(server_proto)" == 3.1 ]] && grep -qsE '^I1 = ' "$CLIENT_DIR"/*_awg3.conf; then
     mod_trailer_fix || { [[ $? -eq 1 ]] && warn "Модуль дописывает хвост к I1-I5 — мимикрия слабее. Обнови модуль (Сервер → Модуль ядра)"; }
   fi
-  n=$(awk -F' = ' '/^I[1-5] = /{n += length($2)} END{print n+0}' "$CLIENT_DIR"/*_awg[23].conf 2>/dev/null | sort -n | tail -1)
+  # Длина цепочки — по каждому файлу отдельно, берём наибольшую.
+  n=$(awk -F' = ' 'FNR == 1 {if (NR > 1) print n; n = 0} /^I[1-5] = /{n += length($2)} END{print n+0}' \
+        "$CLIENT_DIR"/*_awg[23].conf 2>/dev/null | sort -n | tail -1)
   (( ${n:-0} > 3598 )) && warn "Цепочка I1-I5 длиннее $n симв — выше предела awg-tools (буфер 4 КБ)"
   return 0
 }

@@ -24,7 +24,7 @@ API_ARGS=()
 # ── JSON ──────────────────────────────────────────────────
 # Строка для py json-kv: «ключ[:тип]<TAB>значение». Типы: n число, b да/нет,
 # j готовый JSON, f содержимое файла; без типа — строка.
-_kv() { printf '%s\t%s\n' "$1" "${2//$'\n'/ }"; }
+_kv() { printf '%s\t%s\n' "$1" "${2//[$'\n\r']/ }"; }
 _b() { if "$@" &>/dev/null; then echo 1; else echo 0; fi; }
 api_obj() { py json-kv > "$API_DATA"; }
 api_rows() { py json-rows "$@" > "$API_DATA"; }
@@ -271,6 +271,7 @@ _api_client_opts() {
       expire) if [[ -n "$v" ]]; then
                 _O_EXPIRE=$(_api_ts "$v")
                 [[ "$_O_EXPIRE" =~ ^[0-9]+$ ]] || { err "Срок не распознан: $v"; return 1; }
+                (( _O_EXPIRE > $(date +%s) + 60 )) || { err "Срок уже прошёл: $v"; return 1; }
               fi ;;
       mimicry) _O_MIM="$v" ;;
       dns) [[ "$v" =~ ^[0-9.,[:space:]]+$ ]] || { err "dns: IPv4 через запятую"; return 1; }; _O_DNS="$v" ;;
@@ -533,7 +534,8 @@ _api_exits() {
       [[ -n "${1:-}" ]] || { _api_usage "exits add ИМЯ < конфиг"; return; }
       _api_stdin
       [[ -s "$API_IN" ]] || { err "Конфиг ноды передаётся через stdin"; return 1; }
-      exits_node_add "$1" "$API_IN" ;;
+      exits_node_add "$1" "$API_IN" || return 1
+      exits_reapply ;;
     del)
       [[ -n "${1:-}" ]] || { _api_usage "exits del ИМЯ"; return; }
       exits_node_del "$1" ;;
@@ -798,7 +800,10 @@ _api_job_start() {
 _api_job_active() {  # id → 0, если задача ещё выполняется
   local pid
   if [[ -f "$API_JOBS/$1/pid" ]]; then
-    pid=$(cat "$API_JOBS/$1/pid"); [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+    # Не просто kill -0: после перезагрузки PID может достаться чужому процессу,
+    # и задача числилась бы «идёт» вечно.
+    pid=$(cat "$API_JOBS/$1/pid")
+    [[ "$pid" =~ ^[0-9]+$ ]] && tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q "api job run $1"
   else
     unit_active "$(_api_job_unit "$1")"
   fi
@@ -827,13 +832,15 @@ _api_job() {
 # пока задача собирает модуль.
 _api_readonly() {
   case "$*" in
-    "bot proxy set"*|"bot proxy clear"*|"server params set"*) return 1 ;;
+    # Пишущие подкоманды «читающих» разделов — в очередь: bot webapp port и
+    # bot proxy set правят один /etc/awg-bot.conf, параллельно потеряли бы ключ.
+    "bot proxy set"*|"bot proxy clear"*|"bot webapp port"*|"server params set"*) return 1 ;;
     "server params"|"server params check"*) return 0 ;;
   esac
   case "$1 ${2:-}" in
     "status "|"version "|"help "|"mimicry "|"log "*|"job "*|"diag "*) return 0 ;;
     *" status"|*" info"|*" report"|*" tags"|*" backups"|*" list"|*" conf"|*" inspect") return 0 ;;
-    "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|"wgobf bundle"|\
+    "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|\
     "bot proxy"|"bot webapp"|"update check"|"update changelog"|"module check"|"cert "|"cert find") return 0 ;;
   esac
   return 1

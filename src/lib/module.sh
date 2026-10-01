@@ -384,6 +384,7 @@ tools_install_tag() {
   fi
   run_step "Сборка amneziawg-tools $tag" _tools_build_install "$tmp/tools/src" || return 1
   hash -r
+  mkdir -p "$STATE_DIR"
   echo "$tag" > "$TOOLS_TAG_FILE"
   _PROTO_PROBE=()
   ok "amneziawg-tools: $(tools_version)"
@@ -397,7 +398,7 @@ resolve_tag() {  # mod|tools
     upstream_refresh >/dev/null 2>&1 || true
     echo "$t"
   elif [[ "$1" == mod ]]; then echo "$MOD_FALLBACK_TAG"
-  else echo "v3.1.20260812"; fi
+  else echo "$TOOLS_FALLBACK_TAG"; fi
 }
 
 mod_autoload() {

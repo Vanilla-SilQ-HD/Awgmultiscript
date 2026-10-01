@@ -63,7 +63,8 @@ client_create() {
   local name="$1" expire="${2:-}" spec="${3:-server}" dns="${4:-1.1.1.1, 1.0.0.1}" mtu="${5:-}" addr
   server_exists || { err "Сервер не создан"; return 1; }
   _name_free "$name" || { err "Имя $name занято или недопустимо (латиница, цифры, _ -, до 32)"; return 1; }
-  [[ -z "$expire" || "$expire" =~ ^[0-9]+$ ]] || { err "Срок — unix-время"; return 1; }
+  [[ -z "$expire" ]] || { [[ "$expire" =~ ^[0-9]+$ ]] && (( expire > $(date +%s) + 60 )); } \
+    || { err "Срок — unix-время в будущем"; return 1; }
   [[ -n "$mtu" ]] || mtu=$(conf_iface_get MTU)
   addr=$(free_client_ip) || { err "В подсети нет свободных адресов"; return 1; }
   mimicry_from_spec "$spec" || return 1
@@ -111,6 +112,12 @@ client_expire_set() {  # имя unix-время
   [[ "$2" =~ ^[0-9]+$ ]] && (( $2 > $(date +%s) + 60 )) || { err "Срок должен быть в будущем"; return 1; }
   client_exists "$1" || { err "Клиента $1 нет"; return 1; }
   expire_install
+  # Заблокированному сначала вернуть адрес: expire-set правит только метку,
+  # и клиент остался бы на 127.0.0.2 с новым сроком — «заблокирован» без причины.
+  if [[ -n "$(peer_meta_get "$1" orig_ips)" ]]; then
+    py expire-clear "$SERVER_CONF" "$1" "$EXPIRE_SUSPEND_IP" >/dev/null || return 1
+    _expire_apply
+  fi
   py expire-set "$SERVER_CONF" "$1" "$2" || return 1
   rm -f "$EXPIRE_STATE_DIR/warn1h_$(client_pub "$1" | tr -c 'A-Za-z0-9\n' '_')"
   ok "Срок $1: $(expire_fmt "$2")"
@@ -168,7 +175,9 @@ _ask_expire() {  # → unix-время в stdout или пусто
     2) ts=$(date -d '+1 hour' +%s) ;; 3) ts=$(date -d '+1 day' +%s) ;;
     4) ts=$(date -d '+7 days' +%s) ;; 5) ts=$(date -d '+30 days' +%s) ;;
     6) read_line d "${C}  Дата (ГГГГ-ММ-ДД ЧЧ:ММ): ${N}" >&2
-       ts=$(date -d "$d" +%s 2>/dev/null) || { warn "Дата не распознана — бессрочно" >&2; ts=""; } ;;
+       ts=$(date -d "$d" +%s 2>/dev/null) || ts=""
+       [[ -n "$d" && "$ts" =~ ^[0-9]+$ ]] && (( ts > $(date +%s) + 60 )) \
+         || { warn "Дата не распознана или уже прошла — бессрочно" >&2; ts=""; } ;;
   esac
   echo "$ts"
 }
@@ -282,12 +291,12 @@ _pick_client() {
   (( ${#rows[@]} )) || { warn "Клиентов нет"; return 1; }
   echo ""
   for i in "${!rows[@]}"; do
-    IFS=$'\t' read -r name pub aip _ <<< "${rows[$i]}"
+    IFS='|' read -r name pub aip _ <<< "${rows[$i]//$'\t'/|}"
     printf "  ${G}%3d)${N} %-24s ${D}%s${N}\n" "$((i + 1))" "${name:-без имени}" "$aip"
   done
   read_choice c "${C}  Номер (0 — отмена): ${N}" 0 "${#rows[@]}" 0
   (( c == 0 )) && return 1
-  IFS=$'\t' read -r name pub _ <<< "${rows[$((c - 1))]}"
+  IFS='|' read -r name pub _ <<< "${rows[$((c - 1))]//$'\t'/|}"
   CHOSEN="$name"$'\t'"$pub"
 }
 
@@ -352,7 +361,7 @@ do_list_clients() {
   now=$(date +%s)
   echo ""
   hdr "Клиенты"
-  while IFS=$'\t' read -r name pub aip exp orig _; do
+  while IFS='|' read -r name pub aip exp orig _; do
     i=$((i + 1))
     ep="" hs=0 rx=0 tx=0
     read -r ep hs rx tx < <(awk -F'\t' -v k="$pub" '$1 == k {print $3, $5, $6, $7; exit}' <<< "$dump") || true
@@ -370,7 +379,7 @@ do_list_clients() {
       if [[ -n "$orig" ]]; then echo -e "     ${R}заблокирован: срок истёк $(expire_fmt "$exp")${N}"
       else echo -e "     ${Y}срок: $(expire_fmt "$exp")${N}"; fi
     fi
-  done < <(clients_tsv)
+  done < <(clients_psv)
   (( i )) || info "Клиентов нет"
 }
 
