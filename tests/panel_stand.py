@@ -29,7 +29,11 @@ fake_acme()
 # Канал обновлений «отвечает»: в нём v9.9.9 (проверка — первые 4 КБ файла)
 with open(os.path.join(BIN, "curl"), "w") as f:
     f.write('#!/usr/bin/env bash\nfor a in "$@"; do [[ "$a" == *http_code* ]] && { echo 204; exit 0; }\n'
-            '  [[ "$a" == 0-4095 ]] && { echo \'VERSION="v9.9.9"\'; exit 0; }; done\nexit 1\n')
+            '  [[ "$a" == 0-4095 ]] && { echo \'VERSION="v9.9.9"\'; exit 0; }\n'
+            # CHANGELOG.md канала — для экрана «Обновление»
+            '  [[ "$a" == *CHANGELOG.md* ]] && { printf \'# Изменения\\n\\n## v9.9.9 — 2027-01-01\\n\\n'
+            '- **Новое**: тестовая `сборка`\\n  со второй строкой\\n\\n---\\n\\n## v1.1.1 — 2026-10-01\\n\\n- прежнее\\n\'; exit 0; }\n'
+            'done\nexit 1\n')
 # wg умеет ключи (клиенты WG + обфускатор), wg-quick — strip
 with open(os.path.join(BIN, "wg"), "w") as f:
     f.write('#!/usr/bin/env bash\necho "wg $*" >> "$CALLS"\ncase "$1" in\n'

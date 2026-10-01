@@ -1234,6 +1234,167 @@ def cmd_api_envelope(rc, data_file, log_file):
 
 
 # ════════════════════════ архивы ════════════════════════
+# ── Готовые сертификаты сервера ───────────────────────────
+# Сертификаты, которые уже выпустили другие программы (Caddy, certbot,
+# acme.sh, Marzban, 3x-ui, nginx), — Mini App может взять их, не трогая
+# порт 80: продлевает их тот, кто выпустил. Подходит только публичный
+# сертификат (не самоподписанный), с ключом от него, не истекающий в
+# ближайшие сутки и выписанный на этот сервер — IP сервера или домен,
+# который ведёт на него.
+CERT_GLOBS = (
+    ("Caddy", "var/lib/caddy/.local/share/caddy/certificates/*/*/*.crt", "{dir}/{stem}.key"),
+    ("Caddy", "root/.local/share/caddy/certificates/*/*/*.crt", "{dir}/{stem}.key"),
+    ("Caddy", "home/*/.local/share/caddy/certificates/*/*/*.crt", "{dir}/{stem}.key"),
+    ("Caddy", "var/lib/docker/volumes/*/_data/caddy/certificates/*/*/*.crt", "{dir}/{stem}.key"),
+    ("Caddy", "var/lib/docker/volumes/*/_data/certificates/*/*/*.crt", "{dir}/{stem}.key"),
+    ("certbot", "etc/letsencrypt/live/*/fullchain.pem", "{dir}/privkey.pem"),
+    ("acme.sh", "root/.acme.sh/*/fullchain.cer", "{dir}/{dirname}.key"),
+    ("Marzban", "var/lib/marzban/certs/*/fullchain.pem", "{dir}/key.pem"),
+    ("Marzban", "var/lib/marzban/certs/fullchain.pem", "{dir}/key.pem"),
+    ("3x-ui", "root/cert/*/fullchain.pem", "{dir}/privkey.pem"),
+    ("3x-ui", "root/cert/fullchain.pem", "{dir}/privkey.pem"),
+)
+NGINX_GLOBS = ("etc/nginx/nginx.conf", "etc/nginx/conf.d/*.conf", "etc/nginx/sites-enabled/*")
+
+
+def _openssl(*args, data=None):
+    import subprocess
+    try:
+        r = subprocess.run(["openssl", *args], input=data, capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _cert_candidates(root):
+    import glob
+    seen = set()
+    for source, pat, key_tpl in CERT_GLOBS:
+        for crt in sorted(glob.glob(os.path.join(root, pat))):
+            d = os.path.dirname(crt)
+            stem = os.path.basename(crt).rsplit(".", 1)[0]
+            dirname = os.path.basename(d).removesuffix("_ecc")
+            key = key_tpl.format(dir=d, stem=stem, dirname=dirname)
+            if (crt, key) not in seen:
+                seen.add((crt, key))
+                yield source, crt, key
+    # nginx: пары ssl_certificate / ssl_certificate_key в порядке появления
+    for pat in NGINX_GLOBS:
+        for conf in sorted(glob.glob(os.path.join(root, pat))):
+            try:
+                text = read(conf)
+            except (OSError, UnicodeDecodeError):
+                continue
+            crt = None
+            for m in re.finditer(r"^\s*(ssl_certificate(?:_key)?)\s+([^;\s]+)\s*;", text, re.M):
+                path = m[2].strip("'\"")
+                if not path.startswith("/") or "$" in path:
+                    continue
+                path = os.path.join(root, path.lstrip("/"))
+                if m[1] == "ssl_certificate":
+                    crt = path
+                elif crt and (crt, path) not in seen:
+                    seen.add((crt, path))
+                    yield "nginx", crt, path
+                    crt = None
+
+
+def _cert_info(crt, key):
+    """{names, ips, expires} публичного сертификата с подходящим ключом; иначе None."""
+    try:
+        if not (os.path.isfile(crt) and os.path.isfile(key)) or os.path.getsize(crt) > 1 << 20:
+            return None
+    except OSError:
+        return None
+    out = _openssl("x509", "-in", crt, "-noout", "-enddate", "-subject", "-issuer", "-ext", "subjectAltName",
+                   "-nameopt", "RFC2253")
+    if out is None:
+        return None
+    text = out.decode("utf-8", "replace")
+    sub = re.search(r"^subject=(.*)$", text, re.M)
+    iss = re.search(r"^issuer=(.*)$", text, re.M)
+    if not sub or not iss or sub[1].strip() == iss[1].strip():
+        return None                               # самоподписанный — Telegram не примет
+    end = re.search(r"^notAfter=(.*)$", text, re.M)
+    if not end:
+        return None
+    # «Dec  3 12:00:00 2026 GMT» — месяц по-английски при любой локали сервера
+    m = re.match(r"([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})", end[1].strip())
+    months = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+    if not m or m[1] not in months:
+        return None
+    import calendar
+    expires = calendar.timegm((int(m[6]), months.index(m[1]) + 1, int(m[2]), int(m[3]), int(m[4]), int(m[5]), 0, 0, 0))
+    if expires < time.time() + 86400:
+        return None
+    pub_c = _openssl("x509", "-in", crt, "-noout", "-pubkey")
+    pub_k = _openssl("pkey", "-in", key, "-pubout")
+    if not pub_c or not pub_k or pub_c.strip() != pub_k.strip():
+        return None                               # ключ не от этого сертификата
+    names = re.findall(r"DNS:([^,\s]+)", text)
+    ips = re.findall(r"IP Address:([0-9.]+)", text)
+    return {"names": [n.lower() for n in names if not n.startswith("*.")], "ips": ips, "expires": expires}
+
+
+def _resolves_to(name, ip):
+    import socket
+    try:
+        return ip in {a[4][0] for a in socket.getaddrinfo(name, None, socket.AF_INET)}
+    except (OSError, UnicodeError):
+        return False
+
+
+def cmd_cert_find(pub_ip, root="/", *exclude):
+    """Готовые сертификаты для Mini App: строки «имя<TAB>источник<TAB>сертификат
+    <TAB>ключ<TAB>до (unix)», свежие сверху; одно имя — один, самый долгий."""
+    skip = tuple(os.path.realpath(e) for e in exclude if e)
+    best = {}
+    for source, crt, key in _cert_candidates(root):
+        if skip and os.path.realpath(crt).startswith(skip):
+            continue
+        info = _cert_info(crt, key)
+        if not info:
+            continue
+        name = pub_ip if pub_ip in info["ips"] else next(
+            (n for n in info["names"] if _resolves_to(n, pub_ip)), "")
+        if name and (name not in best or info["expires"] > best[name][4]):
+            best[name] = (name, source, crt, key, info["expires"])
+    for row in sorted(best.values(), key=lambda r: -r[4]):
+        print("\t".join(map(str, row)))
+
+
+# ── Список изменений ──────────────────────────────────────
+CL_HEAD = re.compile(r"^##\s+(v\d+(?:\.\d+){1,3})\b\s*(.*)$")
+
+
+def _ver_tuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:4])
+
+
+def cmd_changelog_json(current):
+    """CHANGELOG.md из stdin → разделы для экрана «Обновление»: новее
+    установленной версии (сверху самая новая, не больше десяти), а если
+    новее нет — раздел текущей. Заголовок раздела: «## v1.1.1 — дата (бот 3.1.0)»."""
+    sections, cur = [], None
+    for line in sys.stdin.read().replace("\r", "").split("\n"):
+        m = CL_HEAD.match(line)
+        if m:
+            cur = {"version": m[1], "title": m[2].strip(" —–-"), "lines": []}
+            sections.append(cur)
+        elif line.startswith("## "):
+            cur = None
+        elif cur is not None:
+            cur["lines"].append(line)
+    for s in sections:
+        body = "\n".join(s.pop("lines")).strip()
+        s["body"] = re.sub(r"(?:\n\s*-{3,}\s*)+$", "", body).strip()[:20000]
+    now = _ver_tuple(current)
+    newer = sorted((s for s in sections if _ver_tuple(s["version"]) > now),
+                   key=lambda s: _ver_tuple(s["version"]), reverse=True)[:10]
+    shown = newer or [s for s in sections if _ver_tuple(s["version"]) == now][:1]
+    print(json.dumps({"current": current, "newer": bool(newer), "sections": shown}, ensure_ascii=False))
+
+
 def cmd_safe_untar(archive, dest):
     """Распаковать только обычные файлы и каталоги без выхода за dest:
     архив может прийти от пользователя (бэкап, загруженный в бота)."""
@@ -1281,6 +1442,7 @@ COMMANDS = {
     "xray-balancer": cmd_xray_balancer, "xray-balancer-get": cmd_xray_balancer_get,
     "xray-ru": cmd_xray_ru, "xray-prepare": cmd_xray_prepare,
     "pcap-analyze": cmd_pcap_analyze, "safe-untar": cmd_safe_untar,
+    "cert-find": cmd_cert_find, "changelog-json": cmd_changelog_json,
     "json-kv": cmd_json_kv, "json-rows": cmd_json_rows, "json-list": cmd_json_list,
     "clients-json": cmd_clients_json, "api-envelope": cmd_api_envelope,
     "api-job-status": cmd_api_job_status, "api-jobs": cmd_api_jobs,

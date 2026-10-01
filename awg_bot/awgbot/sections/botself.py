@@ -430,7 +430,10 @@ async def app_screen(target: ui.Target, verdict: str = "") -> None:
              ""]
     if verdict:
         lines += [verdict, ""]
-    if c.get("installed"):
+    if c.get("installed") and c.get("kind") == "external":
+        lines.append(f"🔐 Сертификат: <code>{esc(c.get('name') or '')}</code> (готовый, {esc(c.get('source') or '')}) · "
+                     f"до {ui.fmt_time(c.get('expires'))} · продлевает {esc(c.get('source') or 'его программа')}")
+    elif c.get("installed"):
         lines.append(f"🔐 Сертификат: <code>{esc(c.get('name') or '')}</code> "
                      f"({'IP' if c.get('kind') == 'ip' else 'домен'}) · до {ui.fmt_time(c.get('expires'))}"
                      + (" · продлевается сам" if c.get("renew") else " · ⚠️ таймер продления не работает"))
@@ -439,13 +442,17 @@ async def app_screen(target: ui.Target, verdict: str = "") -> None:
     lines.append(f"🟢 Mini App: <code>{esc(srv.url)}</code> — и кнопка «Меню» слева от поля ввода"
                  if srv.running else f"⚪️ Mini App не запущена: {esc(srv.error or 'нет сертификата')}")
     if c.get("port80"):
-        lines.append(f"⚠️ Порт 80 занят ({esc(c['port80'])}) — Let's Encrypt не сможет проверить адрес")
+        lines.append(f"⚠️ Порт 80 занят ({esc(c['port80'])}) — выпуск только с паузой службы"
+                     + (f"; готовых сертификатов на сервере: {c['found']}" if c.get("found") else ""))
     lines += ["", f"<i>🔐 На IP — сертификат Let's Encrypt на {esc(c.get('ip') or 'IP сервера')}: живёт ~6 дней "
                   "и продлевается сам. Для проверки нужен свободный и открытый порт 80.\n"
                   "🌍 На домен — если у сервера есть домен с A-записью на этот IP.\n"
+                  "📂 Готовые — сертификат, который уже выпустили Caddy, certbot, Marzban, 3x-ui или nginx: "
+                  "порт 80 не нужен, продлевает та программа.\n"
                   "📱 Открыть панель — проверка: пустит ли Telegram Mini App по этому адресу.</i>"]
     text = "\n".join(lines)
     buttons = [("🔐 На IP", app.data("ip")), ("🌍 На домен…", app.data("dom")),
+               (f"📂 Готовые ({c['found']})", app.data("found")) if c.get("found") else None,
                ("🔢 Порт", app.data("port")),
                ("🗑 Удалить", app.data("rm")) if c.get("installed") else None,
                ui.back("botm")]
@@ -470,10 +477,81 @@ async def _app(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
         await app_screen(cb)
 
 
+async def _busy80(target: ui.Target, c: dict, kind: str) -> None:
+    """Порт 80 занят: выпуск с паузой службы или готовый сертификат сервера."""
+    unit = c.get("port80_unit") or ""
+    text = (f"<b>Порт 80 занят ({esc(c.get('port80') or '')})</b>\n\nLet's Encrypt проверяет адрес через порт 80. "
+            "Варианты:\n")
+    if unit:
+        text += (f"• ⏸ Пауза — acme.sh останавливает <code>{esc(unit)}</code> на несколько секунд выпуска "
+                 + ("и каждого продления (на IP — раз в 3 дня).\n" if kind == "ip" else "и каждого продления.\n"))
+    if c.get("found"):
+        text += f"• 📂 Готовый — сертификат, который уже есть на сервере ({c['found']}): порт 80 не нужен.\n"
+    if not unit and not c.get("found"):
+        text += "• Освободить порт 80 — служба не опознана, остановить её на время выпуска нельзя."
+    await ui.render(target, text, ui.kb(
+        ("⏸ С паузой", app.data("pause", kind)) if unit else None,
+        ("📂 Готовые", app.data("found")) if c.get("found") else None,
+        ui.back(app.data())))
+
+
 @app("ip")
 async def _app_ip(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    if await _owner(cb):
-        await jobs.start(cb, "Сертификат на IP", "cert", "issue", "ip", back_to=app.data(), done=_app_started)
+    if not await _owner(cb):
+        return
+    c = await api.data("cert", "status", default={}) or {}
+    if c.get("port80"):
+        await _busy80(cb, c, "ip")
+        return
+    await jobs.start(cb, "Сертификат на IP", "cert", "issue", "ip", back_to=app.data(), done=_app_started)
+
+
+@app("pause")
+async def _app_pause(cb: CallbackQuery, state: FSMContext, kind: str) -> None:
+    if not await _owner(cb):
+        return
+    if kind == "ip":
+        await jobs.start(cb, "Сертификат на IP", "cert", "issue", "ip", "pause", back_to=app.data(),
+                         done=_app_started)
+        return
+    dom = (await state.get_data()).get("app_domain") or ""
+    if not DOMAIN_RE.match(dom):
+        await app_screen(cb)
+        return
+    await jobs.start(cb, f"Сертификат на {dom}", "cert", "issue", "domain", dom, "pause", back_to=app.data(),
+                     done=_app_started)
+
+
+@app("found")
+async def _app_found(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    if not await _owner(cb):
+        return
+    rows = await api.data("cert", "find", default=[]) or []
+    await ui.remember(state, "certs", [r.get("cert") for r in rows])
+    if not rows:
+        await app_screen(cb, "📂 Готовых сертификатов на этот сервер не нашлось")
+        return
+    await ui.render(cb, "<b>📂 Готовые сертификаты сервера</b>\n\nВыписаны на этот сервер, ключ на месте, "
+                        "публичные. Mini App берёт файлы ссылкой — продлевает их та программа, что выпустила.\n\n"
+                        + "\n".join(f"• <code>{esc(r['name'])}</code> — {esc(r['source'])}, до "
+                                     f"{ui.fmt_time(r.get('expires'))}" for r in rows),
+                    ui.kb([(f"{r['name']} · {r['source']}", app.data("use", str(i))) for i, r in enumerate(rows)],
+                          ui.back(app.data())))
+
+
+@app("use")
+async def _app_use(cb: CallbackQuery, state: FSMContext, idx: str) -> None:
+    if not await _owner(cb):
+        return
+    path = await ui.recall(state, "certs", idx)
+    if not path:
+        await _app_found(cb, state, "")
+        return
+    r = await api.call("cert", "use", path)
+    if r.ok:
+        await webapp.SERVER.start(cb.bot)  # type: ignore[arg-type]
+    await app_screen(cb, "✅ Готовый сертификат подключён — Mini App переехала на него" if r.ok
+                     else ui.fail(r, "Готовый сертификат"))
 
 
 @app("dom")
@@ -488,6 +566,11 @@ async def _app_dom_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None
     dom = ask.text_of(msg).lower()
     if not DOMAIN_RE.match(dom):
         await ask.retry(msg, state, ctx, "Нужен домен вида panel.example.com")
+        return
+    c = await api.data("cert", "status", default={}) or {}
+    if c.get("port80"):
+        await state.update_data(app_domain=dom)        # домен в callback_data не влезет
+        await _busy80(msg, c, "domain")
         return
     await jobs.start(msg, f"Сертификат на {dom}", "cert", "issue", "domain", dom, back_to=app.data(),
                      done=_app_started)

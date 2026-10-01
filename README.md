@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-ffffff?style=flat-square&labelColor=000000)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Ubuntu%2024%20%2F%20Debian%2012%2B-E95420?style=flat-square&logo=ubuntu&logoColor=white)](https://ubuntu.com/)
 [![Protocol](https://img.shields.io/badge/AWG-2.0%20%2F%203.1-00d4ff?style=flat-square)](#)
-[![Version](https://img.shields.io/badge/version-v1.1.2-ff6b00?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v1.1.3-ff6b00?style=flat-square)](#)
 
 <br>
 
@@ -272,6 +272,10 @@ Mini App и HTTPS-сертификат** (или в боте: **Telegram-бот 
 - **На домен** — если у сервера есть домен с A-записью на его IP; 90 дней.
 - Адрес проверяется по http-01: на время выпуска и продления acme.sh сам слушает
   **порт 80** — он должен быть свободен и открыт снаружи.
+- Порт 80 занят (Caddy, nginx…) — **Готовый сертификат сервера**: Тулза находит
+  сертификаты Caddy, certbot, acme.sh, Marzban, 3x-ui и nginx, выписанные на этот
+  сервер, и подключает выбранный ссылкой — продлевает его та программа. Или выпуск
+  своего с паузой службы, держащей порт 80, на секунды выпуска и продления.
 - Сервер Mini App живёт в боте (порт `WEBAPP_PORT`, по умолчанию 8443) и пускает
   только владельцев и приглашённых админов: каждый запрос несёт данные
   пользователя, подписанные Telegram токеном бота.
@@ -297,7 +301,7 @@ Mini App и HTTPS-сертификат** (или в боте: **Telegram-бот 
 - **Бэкапы** — создать (файл сразу приходит в чат), список на сервере, прислать
   в чат, восстановить — в том числе из архива, выбранного на телефоне.
 - **Обновление** — проверка канала, обновление и переустановка awg2, обновление
-  бота, стабильный или бета-канал.
+  бота, стабильный или бета-канал; «Что нового» — список изменений канала.
 - **Обфускатор** — установка, маскировка STUN/NONE, «чистый WG», смена ключа,
   клиенты: ссылка для Keenetic, конфиг, QR чистого WireGuard, всё — в чат.
 - **Бот** — перезапуск и обновление (панель дожидается бота), прокси до
@@ -386,6 +390,6 @@ python3 tests/test_admins.py && python3 tests/test_net.py
 
 *Сообщество [AWG-Toolza](https://t.me/awgToolza)*
 
-**AWG Toolza v1.1.2** · MIT License
+**AWG Toolza v1.1.3** · MIT License
 
 </div>

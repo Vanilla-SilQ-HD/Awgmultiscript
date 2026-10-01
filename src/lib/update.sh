@@ -50,6 +50,22 @@ update_peek() {
   return 1
 }
 
+# CHANGELOG.md канала (лежит рядом с awg2.sh) → UPDATE_CHANGELOG; напрямую и
+# через зеркала, как и сам скрипт.
+UPDATE_CHANGELOG=""
+update_changelog_fetch() {
+  local mp out url="${UPDATE_URL%/*}/CHANGELOG.md"
+  UPDATE_CHANGELOG=""
+  for mp in "${GH_MIRRORS[@]}"; do
+    out=$(curl -fsSL --connect-timeout 5 --max-time 15 --max-filesize 1048576 -H 'Cache-Control: no-cache' \
+            "${mp}${url}?nocache=$(date +%s)" 2>/dev/null) || continue
+    [[ "$out" == *"## v"* ]] || continue
+    UPDATE_CHANGELOG="$out"
+    return 0
+  done
+  return 1
+}
+
 update_available() {  # → версия, если новее текущей
   local v
   v=$(awk '{print $1; exit}' "$UPDATE_CACHE" 2>/dev/null)

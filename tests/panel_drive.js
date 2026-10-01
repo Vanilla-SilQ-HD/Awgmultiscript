@@ -156,7 +156,11 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.waitForSelector("[data-name]");
     if (await page.locator("[data-name=t-001]").count()) throw new Error("t-001 остался");
   });
-  await step("мимикрия", async () => { await nav("/client/alice/mimicry", ".item"); await shot("09-mimicry"); });
+  await step("мимикрия", async () => {
+    await nav("/client/alice/mimicry", ".item");
+    await page.waitForSelector(".item:has-text('Как у сервера') .sub");
+    await shot("09-mimicry");
+  });
   await step("удалить клиента", async () => {
     await nav("/client/carol", "text=Удалить клиента");
     await page.click("text=Удалить клиента");
@@ -385,6 +389,12 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.click("button:has-text('Проверить')");
     await page.waitForSelector(".toast >> text=Доступна v9.9.9");
     await page.waitForSelector("button:has-text('Обновить до v9.9.9')");
+    // Список изменений из CHANGELOG.md канала — разметка без innerHTML
+    await page.waitForSelector(".chlog-h >> text=Что нового в v9.9.9");
+    await page.waitForSelector(".chlog b >> text=Новое");
+    await page.waitForSelector(".chlog code >> text=сборка");
+    await page.waitForSelector(".chlog li >> text=со второй строкой");
+    if (await page.locator(".chlog-v >> text=v1.1.1").count()) throw new Error("в списке изменений — уже установленная версия");
     await shot("48-update-available");
   });
   await step("бета-канал", async () => {
