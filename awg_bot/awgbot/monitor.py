@@ -79,8 +79,11 @@ async def tick(bot: Bot, state: dict[str, dict[str, Any]], primed: bool) -> bool
     # Заметки удалённых клиентов (в том числе из меню awg2) — прочь: иначе
     # новый клиент с тем же именем унаследует чужой #ping
     alive = {c["name"] for c in rows}
-    for gone in [n for n in notes if n not in alive]:
-        store.drop_note(gone)
+    # Пустой список — и когда сервера нет (сброс, восстановление из бэкапа):
+    # заметки и #ping клиентов тогда не трогаем, они вернутся вместе с ними.
+    if alive:
+        for gone in [n for n in notes if n not in alive]:
+            store.drop_note(gone)
     # Ни разу не подключавшийся клиент не «пропадал» — о нём молчим
     watched = [c for c in rows if store.MONITOR_TAG in notes.get(c["name"], "").lower()
                and not c.get("blocked") and c.get("handshake")]

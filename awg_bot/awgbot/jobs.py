@@ -16,7 +16,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup
 
 from . import api, store, ui
@@ -85,21 +85,41 @@ async def _edit(bot: Bot, chat_id: int, msg_id: int, text: str,
     """Правка сообщения задачи. False — сообщения больше нет."""
     for _ in range(3):
         try:
-            await bot.edit_message_text(ui.fit(text[:ui.TEXT_MAX], markup), chat_id=chat_id, message_id=msg_id,
+            await bot.edit_message_text(ui.fit(ui.clip(text), markup), chat_id=chat_id, message_id=msg_id,
                                         reply_markup=markup, disable_web_page_preview=True)
             return True
         except TelegramRetryAfter as e:
             await asyncio.sleep(min(int(e.retry_after) + 1, 30))
+        except TelegramNetworkError as e:
+            log.debug("правка сообщения задачи, сеть: %s", e)
+            await asyncio.sleep(2)
         except TelegramBadRequest as e:
             if "not modified" in str(e):
                 return True
             log.debug("правка сообщения задачи: %s", e)
             return False
+    # Не дождались Telegram — сообщение на месте, но не обновлено; журнал
+    # догонит на следующем проходе.
     return True
 
 
 async def _follow(bot: Bot, job_id: str, chat_id: int, msg_id: int, title: str, back_to: str,
                   done: Done | None, started: int | None = None, ok_buttons: list | None = None) -> None:
+    """Слежение за задачей. Любая неожиданная ошибка (сеть, админ заблокировал
+    бота…) не должна молча убить задачу в фоне: иначе она навсегда остаётся в
+    jobs.json, а экран чата — в ui.busy, и бот перестаёт его обновлять."""
+    try:
+        await _follow_inner(bot, job_id, chat_id, msg_id, title, back_to, done, started, ok_buttons)
+    except asyncio.CancelledError:
+        raise
+    except Exception:                                          # noqa: BLE001
+        log.exception("слежение за задачей %s прервано", job_id)
+        store.job_done(job_id)
+        ui.busy.discard((chat_id, msg_id))
+
+
+async def _follow_inner(bot: Bot, job_id: str, chat_id: int, msg_id: int, title: str, back_to: str,
+                        done: Done | None, started: int | None, ok_buttons: list | None) -> None:
     started = started or int(time.time())
     offset, text, shown, last_edit, errors = 0, "", "", 0.0, 0
     head = f"<b>{ui.esc(title)}</b>"

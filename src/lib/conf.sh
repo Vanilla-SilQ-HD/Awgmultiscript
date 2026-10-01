@@ -31,7 +31,15 @@ conf_marker_set() {
   [[ -f "$SERVER_CONF" ]] || return 1
   conf_marker_del "$key"
   [[ -n "$val" ]] || return 0
-  sed -i "1a # ${key}=${val}" "$SERVER_CONF"
+  # Метка — в шапке перед первой секцией. «1a» ставила бы её на вторую
+  # строку, а если файл начинается с [Interface] — внутрь секции, где
+  # conf_marker её не видит.
+  val="${val//\\/\\\\}"; val="${val//&/\\&}"; val="${val//|/\\|}"
+  if grep -q '^\[' "$SERVER_CONF"; then
+    sed -i "0,/^\[/s|^\[|# ${key}=${val}\n[|" "$SERVER_CONF"
+  else
+    echo "# ${key}=${val}" >> "$SERVER_CONF"
+  fi
 }
 
 conf_marker_del() { [[ -f "$SERVER_CONF" ]] && sed -i "/^# ${1}=/d" "$SERVER_CONF"; return 0; }
@@ -93,8 +101,8 @@ server_net() {
   valid_cidr "$addr" || return 1
   ip="${addr%/*}"; mask="${addr#*/}"
   IFS=. read -r a b c d <<< "$ip"
-  n=$(( (a << 24) | (b << 16) | (c << 8) | d ))
-  m=$(( mask == 0 ? 0 : (0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF ))
+  n=$(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d ))
+  m=$(( 10#$mask == 0 ? 0 : (0xFFFFFFFF << (32 - 10#$mask)) & 0xFFFFFFFF ))
   n=$(( n & m ))
   echo "$(( n >> 24 & 255 )).$(( n >> 16 & 255 )).$(( n >> 8 & 255 )).$(( n & 255 ))/$mask"
 }
@@ -151,14 +159,17 @@ client_files_sync_suffix() {
 
 # Клиенты сервера: строки «имя<TAB>ключ<TAB>AllowedIPs<TAB>expires<TAB>orig_ips<TAB>mimicry».
 clients_tsv() { server_exists || return 0; py peers "$SERVER_CONF"; }
+# То же через «|»: табуляция для read — пробельный разделитель, подряд идущие
+# табы схлопываются, и пустые колонки (срок, orig_ips) сдвигают соседние.
+clients_psv() { clients_tsv | tr '\t' '|'; }
 
 # «имя|ip» для меню туннелей — только клиенты с именем.
 clients_name_ip() {
   local name aip _
-  while IFS=$'\t' read -r name _ aip _ _ _; do
+  while IFS='|' read -r name _ aip _ _ _; do
     [[ -n "$name" && -n "$aip" ]] || continue
     echo "${name}|${aip%%/*}"
-  done < <(clients_tsv)
+  done < <(clients_psv)
 }
 
 client_exists() { clients_tsv | awk -F'\t' -v n="$1" '$1 == n {f = 1} END {exit !f}'; }

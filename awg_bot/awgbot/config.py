@@ -78,7 +78,7 @@ def load_config() -> Config:
     proxy = (os.environ.get("BOT_PROXY") or fileconf.get("BOT_PROXY", "")).strip()
     if proxy and not net.valid_proxy(proxy):
         raise SystemExit(
-            f"BOT_PROXY='{proxy}' не похож на адрес прокси. "
+            f"BOT_PROXY='{net.mask_proxy(proxy)}' не похож на адрес прокси. "
             f"Ожидается схема из {', '.join(net.PROXY_SCHEMES)}, "
             "например socks5://127.0.0.1:10808."
         )

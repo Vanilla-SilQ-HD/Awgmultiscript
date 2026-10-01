@@ -235,13 +235,20 @@ function toast(text, ms = 2000) {
   document.body.append(t);
   setTimeout(() => { t.remove(); if (toastEl === t) toastEl = null; }, ms);
 }
+// showAlert/showConfirm — это showPopup: текст длиннее 256 символов не
+// обрезается, а бросает WebAppPopupParamInvalid, и окно не появляется вовсе.
+const POPUP_MAX = 256;
+const popupText = (text) => (text.length > POPUP_MAX ? text.slice(0, POPUP_MAX - 1) + "…" : text);
 function fail(e) {
   haptic("error");
   const tail = (e.log || "").trim().split("\n").slice(-6).join("\n");
   const text = "❌ " + e.message + (tail && tail !== e.message ? "\n\n" + tail : "");
-  if (tg && tg.showAlert) tg.showAlert(text.slice(0, 1000)); else alert(text);
+  if (!tg || !tg.showAlert) return alert(text);
+  // Длинная ошибка с хвостом журнала — листом снизу, целиком
+  if (text.length <= POPUP_MAX) tg.showAlert(text); else logSheet("❌ " + (e.message || "Ошибка").slice(0, 80), text);
 }
 function confirmTg(text) {
+  text = popupText(text);
   return new Promise((ok) => (tg && tg.showConfirm ? tg.showConfirm(text, ok) : ok(window.confirm(text))));
 }
 // Выбор снизу: [{label, value, cls}] → значение или null
@@ -593,7 +600,7 @@ function clientTags(c) {
   ];
 }
 async function removeClients(btn, names, after) {
-  const list = names.slice(0, 20).join(", ") + (names.length > 20 ? "…" : "");
+  const list = names.slice(0, 5).join(", ") + (names.length > 5 ? ` и ещё ${names.length - 5}` : "");
   if (!await confirmTg(names.length === 1 ? `Удалить клиента ${names[0]}? Его конфиг перестанет работать.`
     : `Удалить клиентов: ${names.length}?\n${list}\n\nИх конфиги перестанут работать.`)) return;
   await busy(btn, async () => {
@@ -2089,8 +2096,11 @@ route(/^\/bot\/app$/, async (ctx) => {
   const w = d.webapp || {};
   const dom = h("input", { placeholder: "panel.example.com", autocapitalize: "off", autocomplete: "off" });
   const port = h("input", { type: "number", min: 1, max: 65535, placeholder: String(w.port || 8443) });
+  // После выпуска — перезапуск сервера Mini App: иначе при смене домен ↔ IP
+  // адрес панели и кнопка «Меню» остаются старыми при новом сертификате.
   const issue = (head, args, after) => runJob(ctx, head, args, () => [
-    hint(after), btn("Закрыть панель", () => (tg && tg.close ? tg.close() : null), "btn-primary btn-block")]);
+    hint(after), btn("Закрыть панель", () => (tg && tg.close ? tg.close() : null), "btn-primary btn-block")])
+    .then(() => post("/api/bot/webapp/restart").catch(() => {}));
   const setPort = async (v) => {
     if (!await confirmTg(v === "off" ? "Выключить Mini App? Панель закроется, кнопка «Меню» станет обычной."
       : `Перенести панель на порт ${v}? Её придётся открыть заново кнопкой «Меню».`)) return;
@@ -2117,7 +2127,7 @@ route(/^\/bot\/app$/, async (ctx) => {
       const v = dom.value.trim().toLowerCase();
       if (!DOMAIN_RE.test(v)) return fail(new Error("Нужен домен вида panel.example.com"));
       return issue(`Сертификат на ${v}`, ["cert", "issue", "domain", v], `Сертификат на ${v} выпущен. Панель переезжает на домен — `
-        + "закрой её и открой снова кнопкой «Меню».").then(() => post("/api/bot/webapp/restart").catch(() => {}));
+        + "закрой её и открой снова кнопкой «Меню».");
     }, "btn-block"),
     hint("На IP — сертификат живёт ~6 дней и продлевается сам; для проверки нужен свободный и открытый порт 80. На домен — 90 дней."),
     h("h2", {}, "Порт"),

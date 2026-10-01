@@ -46,13 +46,21 @@ def all_ids() -> set[int]:
 
 
 class AccessMiddleware(BaseMiddleware):
+    @staticmethod
+    def _is_start(text: str | None) -> bool:
+        """Ровно команда /start (с «@бот» или payload приглашения), а не
+        «/startfoo»: та прошла бы мимо CommandStart() в общий обработчик и
+        показала бы чужому меню со сводкой сервера."""
+        cmd = (text or "").split(maxsplit=1)[0] if text else ""
+        return cmd.partition("@")[0] == "/start"
+
     async def __call__(self, handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
                        event: TelegramObject, data: dict[str, Any]) -> Any:
         user = data.get("event_from_user")
         uid = user.id if user else 0
         if authorized(uid):
             return await handler(event, data)
-        if isinstance(event, Message) and (event.text or "").startswith("/start"):
+        if isinstance(event, Message) and self._is_start(event.text):
             return await handler(event, data)
         if isinstance(event, CallbackQuery):
             await event.answer("⛔️ Нет доступа", show_alert=True)

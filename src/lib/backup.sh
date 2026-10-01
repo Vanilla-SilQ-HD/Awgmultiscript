@@ -107,6 +107,9 @@ _restore_prepare() {
 _restore_awg_files() {  # каталог бэкапа
   local src="$1" f
   install -D -m 600 "$src/awg0.conf" "$SERVER_CONF"
+  # Конфиги клиентов, которых в бэкапе нет, иначе остаются сиротами: видны в
+  # «Показать конфиг», занимают имя и попадают в архив, хотя в awg0 их нет.
+  rm -f "$CLIENT_DIR"/*_awg[23].conf
   while IFS= read -r -d '' f; do
     rm -f "$CLIENT_DIR/$(client_name_of "$f")"_awg[23].conf
     install -m 600 "$f" "$CLIENT_DIR/${f##*/}"
