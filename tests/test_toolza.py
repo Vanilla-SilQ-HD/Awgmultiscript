@@ -140,12 +140,12 @@ with open(LOOSE, "w") as f:
             "AllowedIPs = 10.5.0.2/32\n\n  [peer]\n# dave\nPublicKey=PD=\nAllowedIPs = 10.5.0.3/32\n")
 rc, out, _ = bash(f'py peers "{LOOSE}"')
 rows = [r.split("\t") for r in out.strip("\n").split("\n")]
-chk("пиры в вольной записи видны", [r[1] for r in rows] == ["PC=", "PD="] and rows[0][2] == "10.5.0.2/32"
-    and rows[1][0] == "dave", out)
+chk("пиры в вольной записи видны, имя — и из заголовка", [r[1] for r in rows] == ["PC=", "PD="]
+    and rows[0][2] == "10.5.0.2/32" and [r[0] for r in rows] == ["carol", "dave"], out)
 # Таб для read — пробельный разделитель: пустые колонки TSV схлопывались, и пир без имени
 # получал в имя ключ, а клиент со сроком — чужое orig_ips (показывался заблокированным)
 rc, out, _ = bash(f'SERVER_CONF="{LOOSE}"; clients_name_ip')
-chk("clients_name_ip: пир без имени пропущен, колонки не съезжают", out.split() == ["dave|10.5.0.3"], out)
+chk("clients_name_ip: колонки не съезжают", out.split() == ["carol|10.5.0.2", "dave|10.5.0.3"], out)
 TSV = os.path.join(TMP, "peers.tsv")
 with open(TSV, "w") as f:
     f.write("alice\tPUBA=\t10.8.0.2/32\t1800000000\t\tnone\n")

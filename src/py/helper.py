@@ -67,7 +67,12 @@ def split_peers(text):
 
 
 def peer_name(block):
-    for line in block.splitlines()[1:]:
+    lines = block.splitlines()
+    # «[Peer] # alice» — имя в заголовке, как пишут руками и другие менеджеры
+    m = re.match(r"^[ \t]*\[[ \t]*peer[ \t]*\][ \t]*#[ \t]*(.+?)[ \t]*$", lines[0] if lines else "", re.I)
+    if m and "=" not in m.group(1):
+        return m.group(1)
+    for line in lines[1:]:
         m = re.match(r"^#\s+(.+?)\s*$", line)
         if m and "=" not in m.group(1):
             return m.group(1)
