@@ -199,14 +199,26 @@ const topEl = document.getElementById("top");
 function drawTop(compact = false) {
   const dark = document.documentElement.dataset.theme === "dark";
   const beta = S.channel === "beta";
+  // Открыли в браузере, без Telegram: разделы и настройки вида всё равно не
+  // откроются — в шапке только щит и название
+  const inTg = !!(tg && tg.initData), home = inTg ? () => go("/") : null;
   topEl.className = "top";
   topEl.replaceChildren(...[
-    h("div", { class: "logo", onclick: () => go("/") }, icon("shield-check")),
+    h("div", { class: "logo", onclick: home }, icon("shield-check")),
     // Бета — плашкой справа; не влезает (узкий экран, крупный масштаб) — «β» у версии
-    h("div", { class: "ver", onclick: () => go("/") }, h("b", {}, "AwgToolza"),
+    h("div", { class: "ver", onclick: home }, h("b", {}, "AwgToolza"),
       S.version ? h("span", {}, S.version, beta && compact ? h("span", { class: "warn" }, " β") : null) : null),
     beta && !compact ? pill("бета", "warn chan") : null,
     h("div", { class: "sp" }),
+    ...(inTg ? topButtons(dark) : []),
+  ].filter(Boolean));
+  // Запас в 1px — под масштабом ширины округляются и дают ложное «не влезает»
+  const ver = topEl.querySelector(".ver");
+  if (beta && !compact && ver && [...ver.children].some((c) => c.scrollWidth - c.clientWidth > 1)) drawTop(true);
+}
+
+function topButtons(dark) {
+  return [
     h("button", { "aria-label": "Вид", title: "Вид панели", onclick: lookSheet }, icon("a-large-small")),
     h("button", { "aria-label": "Тема", title: "Тема", onclick: () => {
       const t = dark ? "light" : "dark";
@@ -221,10 +233,7 @@ function drawTop(compact = false) {
       if (path === "chat") menuToChat();
       else if (path) go(path);
     } }, icon("menu")),
-  ].filter(Boolean));
-  // Запас в 1px — под масштабом ширины округляются и дают ложное «не влезает»
-  const ver = topEl.querySelector(".ver");
-  if (beta && !compact && ver && [...ver.children].some((c) => c.scrollWidth - c.clientWidth > 1)) drawTop(true);
+  ];
 }
 
 // Одна подсказка за раз: новая сменяет прежнюю, а не ложится поверх
