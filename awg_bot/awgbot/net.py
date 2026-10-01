@@ -251,7 +251,7 @@ def build_session(proxy: str = "") -> Any:
             # socks-схемы aiogram обслуживает через aiohttp_socks. Без него
             # трейс на пол-экрана не объясняет, что доставить.
             raise SystemExit(
-                f"BOT_PROXY={proxy} требует пакет aiohttp_socks, а его нет ({e}).\n"
+                f"BOT_PROXY={mask_proxy(proxy)} требует пакет aiohttp_socks, а его нет ({e}).\n"
                 "Поставьте его в venv бота:\n"
                 "  /opt/awg-bot/venv/bin/pip install aiohttp-socks\n"
                 "или переустановите бота: sudo awg2 → Telegram-бот → Обновить."
