@@ -58,6 +58,8 @@ do_install() {
   local why tag cur running k
   echo ""
   hdr "Установка AmneziaWG"
+  # os_supported идёт в $(…) — OS_LABEL, найденный там, до «ОС:» не дошёл бы
+  os_detect
   if ! why=$(os_supported); then
     err "$why"
     [[ -n "${AWG2_ANY_OS:-}" ]] || return 1

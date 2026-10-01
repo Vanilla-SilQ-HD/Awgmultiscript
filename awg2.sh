@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.1.8"
+VERSION="v1.1.9"
 
 # ═════ core ═════
 # Базовые примитивы: вывод, ввод, журнал, временные файлы, случайные числа,
@@ -2157,6 +2157,8 @@ do_install() {
   local why tag cur running k
   echo ""
   hdr "Установка AmneziaWG"
+  # os_supported идёт в $(…) — OS_LABEL, найденный там, до «ОС:» не дошёл бы
+  os_detect
   if ! why=$(os_supported); then
     err "$why"
     [[ -n "${AWG2_ANY_OS:-}" ]] || return 1

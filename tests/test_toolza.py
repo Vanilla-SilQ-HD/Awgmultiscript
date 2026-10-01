@@ -187,6 +187,13 @@ r = subprocess.run(["make", "-s", "-f", MK, "srctree=" + os.path.join(TMP, "ktre
 chk("Kbuild.include: прежний API — флагов нет, модуль собирается как раньше",
     r.returncode == 0 and r.stdout.split() == ["-DBASE"], r.stdout + r.stderr)
 
+# «√ ОС:» в установке: OS_LABEL, найденный внутри $(os_supported), в оболочку не возвращается
+rc, out, _ = bash('OS_ID=""; why=$(os_supported); echo "до=[$OS_LABEL]"; OS_ID=""; os_detect; echo "после=[$OS_LABEL]"')
+chk("название ОС для «√ ОС:» — после os_detect, не из подоболочки",
+    "до=[]" in out and re.search(r"после=\[\S.+\]", out), out)
+rc, out, _ = bash("declare -f do_install | sed -n '1,12p'")
+chk("do_install определяет ОС до проверки", out.find("os_detect") != -1 and out.find("os_detect") < out.find("os_supported"), out)
+
 # Мастер создания сервера: регион — выбором 1/2, Enter и Ctrl+D — Европа / мир
 picked = [bash('_choose_region; echo "R=$S_REGION"', stdin=s)[1].strip().splitlines()[-1] for s in ("2\n", "\n", "")]
 chk("регион сервера: 2 — Россия, Enter и Ctrl+D — мир", picked == ["R=ru", "R=world", "R=world"], picked)
