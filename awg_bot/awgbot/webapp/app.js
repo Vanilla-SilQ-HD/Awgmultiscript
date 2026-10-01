@@ -198,7 +198,7 @@ function menuToChat() {
 const topEl = document.getElementById("top");
 function drawTop(compact = false) {
   const dark = document.documentElement.dataset.theme === "dark";
-  const beta = S.channel === "beta";
+  const beta = S.channel === "beta", upd = !!S.update && S.update !== S.version;
   // Открыли в браузере, без Telegram: разделы и настройки вида всё равно не
   // откроются — в шапке щит, название и «Поддержать»
   const inTg = !!(tg && tg.initData), home = inTg ? () => go("/") : null;
@@ -206,8 +206,11 @@ function drawTop(compact = false) {
   topEl.replaceChildren(...[
     h("div", { class: "logo", onclick: home }, icon("shield-check")),
     // Бета — плашкой справа; не влезает (узкий экран, крупный масштаб) — «β» у версии
-    h("div", { class: "ver", onclick: home }, h("b", {}, "AwgToolza"),
-      S.version ? h("span", {}, S.version, beta && compact ? h("span", { class: "warn" }, " β") : null) : null),
+    // В канале новее — у версии стрелка ↑, и плашка ведёт на «Обновление»
+    h("div", { class: "ver", onclick: upd && inTg ? () => go("/update") : home, title: upd ? `Доступна ${S.update}` : null },
+      h("b", {}, "AwgToolza"),
+      S.version ? h("span", {}, S.version, upd ? h("i", { class: "upd" }, icon("arrow-up")) : null,
+        beta && compact ? h("span", { class: "warn" }, " β") : null) : null),
     beta && !compact ? pill("бета", "warn chan") : null,
     h("div", { class: "sp" }),
     ...(inTg ? topButtons(dark) : [supportButton()]),
@@ -546,6 +549,7 @@ route(/^\/$/, async (ctx) => {
   S.me = me;
   S.version = d.version;
   S.channel = d.channel;
+  S.update = d.update || "";
   drawTop();
   if (cl) {
     S.clients = cl;
@@ -1794,12 +1798,20 @@ function changelogView(c) {
       h("div", { class: "chlog-v" }, x.version, x.title ? h("span", {}, " · " + x.title) : null), mdBlocks(x.body)]))];
 }
 // Установлена новая версия awg2 — шапка показывает её сразу, не дожидаясь главной
-const setVersion = (v) => { if (v && v !== S.version) { S.version = v; drawTop(); } };
+const setVersion = (v) => {
+  if (!v || v === S.version) return;
+  S.version = v;
+  if (S.update === v) S.update = "";
+  drawTop();
+};
+// Версия в канале новее установленной ("" — нет): стрелка ↑ в шапке
+const setUpdate = (v) => { v = v || ""; if (v !== (S.update || "")) { S.update = v; drawTop(); } };
 
 route(/^\/update$/, async (ctx) => {
   const [d, me] = await Promise.all([call("update", "status"), post("/api/me")]);
   const beta = d.channel === "beta", latest = d.available || "";
   setVersion(d.version);
+  setUpdate(latest);
   const notes = h("div", { class: "card" }, h("div", { class: "muted small" }, "Загружаю список изменений…"));
   call("update", "changelog").then((c) => {
     if (!ctx.live()) return;
@@ -1811,6 +1823,7 @@ route(/^\/update$/, async (ctx) => {
   async function check(b) {
     await busy(b, async () => {
       const r = await call("update", "check");
+      setUpdate(r.newer ? r.latest : "");
       haptic();
       toast(r.newer ? `⬆️ Доступна ${r.latest}` : `Обновлений нет — в канале ${r.latest}`, 3000);
       render();
@@ -2281,6 +2294,6 @@ if (!tg || !tg.initData) {
   render();
   // Версия в шапке — для экранов, открытых не с главной
   call("version").then((v) => {
-    if (!S.version && v) { S.version = v.version; S.channel = v.channel || S.channel; drawTop(); }
+    if (!S.version && v) { S.version = v.version; S.channel = v.channel || S.channel; S.update = v.update || ""; drawTop(); }
   }).catch(() => {});
 }

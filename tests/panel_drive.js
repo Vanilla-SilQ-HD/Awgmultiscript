@@ -397,6 +397,15 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     if (await page.locator(".chlog-v >> text=v1.1.1").count()) throw new Error("в списке изменений — уже установленная версия");
     await shot("48-update-available");
   });
+  await step("стрелка ↑ у версии в шапке", async () => {
+    await page.waitForSelector(".top .ver .upd");
+    if ((await page.getAttribute(".top .ver", "title")) !== "Доступна v9.9.9") throw new Error("у стрелки нет подсказки с версией");
+    await nav("/", ".top .ver .upd");
+    await shot("48b-update-arrow");
+    await page.click(".top .ver");
+    await page.waitForURL(/#\/update$/);
+    await page.waitForSelector("text=Канал");
+  });
   await step("бета-канал", async () => {
     await page.click("button:has-text('Бета-канал')");
     await page.waitForSelector("text=бета — ранние сборки");
