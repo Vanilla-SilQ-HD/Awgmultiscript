@@ -554,7 +554,10 @@ def cmd_phobos_link(path, name):
 def cmd_exit_conf_fix(path):
     """Конфиг клиента к exit-ноде: Table = off обязателен (иначе awg-quick
     уведёт в туннель весь сервер вместе с SSH), DNS выбрасываем (awg-quick
-    перепишет resolv.conf сервера или упадёт без resolvconf)."""
+    перепишет resolv.conf сервера или упадёт без resolvconf). PreUp/PostUp/
+    PreDown/PostDown тоже: awg-quick выполняет их через bash от root, а конфиг
+    приходит снаружи (вставка, бот, чужой бэкап) — это данные, не скрипт.
+    SaveConfig — чтобы awg-quick не переписывал файл при остановке."""
     out, in_iface, added = [], False, False
     for line in read(path).replace("\r", "").split("\n"):
         if re.match(r"^\s*\[\s*interface\s*\]", line, re.I):
@@ -565,7 +568,7 @@ def cmd_exit_conf_fix(path):
             continue
         if re.match(r"^\s*\[", line):
             in_iface = False
-        if in_iface and re.match(r"^\s*(table|dns)\s*=", line, re.I):
+        if in_iface and re.match(r"^\s*(table|dns|preup|postup|predown|postdown|saveconfig)\s*=", line, re.I):
             continue
         out.append(line)
     if not added:
