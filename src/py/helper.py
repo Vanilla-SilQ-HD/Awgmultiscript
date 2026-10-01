@@ -1456,6 +1456,60 @@ def _ver_tuple(v):
     return tuple(int(x) for x in re.findall(r"\d+", v)[:4])
 
 
+# Модуль ядра: смена API udp_tunnel (struct socket → struct sock) пришла в
+# 7.1.5, и апстрим выбирает вызов по номеру версии. Ядра дистрибутивов
+# переносят её в старые версии частично: в Ubuntu 7.0.0-38 setup_udp_tunnel_sock
+# уже берёт struct sock, а udp_tunnel_sock_release — ещё struct socket, и
+# модуль не собирается. Для ядер < 7.1.5 вызов выбирается по заголовкам.
+MOD_UDP_OLD = """#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 1, 5)
+#include <net/udp_tunnel.h>
+#define setup_udp_tunnel_sock(net, sk, sock_cfg) setup_udp_tunnel_sock(net, sk->sk_socket, sock_cfg)
+#define udp_tunnel_sock_release(sk) udp_tunnel_sock_release(sk->sk_socket)
+#endif"""
+MOD_UDP_NEW = """#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 1, 5)
+#include <net/udp_tunnel.h>
+/* awg2: перенос смены API в старые ядра — по заголовкам (compat/Kbuild.include) */
+#ifndef COMPAT_UDP_TUNNEL_SETUP_SK
+#define setup_udp_tunnel_sock(net, sk, sock_cfg) setup_udp_tunnel_sock(net, sk->sk_socket, sock_cfg)
+#endif
+#ifndef COMPAT_UDP_TUNNEL_RELEASE_SK
+#define udp_tunnel_sock_release(sk) udp_tunnel_sock_release(sk->sk_socket)
+#endif
+#endif"""
+MOD_UDP_KBUILD = """
+# awg2: смена API udp_tunnel, перенесённая в ядро дистрибутива до 7.1.5.
+# Без запятых и скобок в шаблоне — для ifneq они разделители («.» — любой символ)
+ifneq ($(shell grep -s "setup_udp_tunnel_sock.struct net .net. struct sock .sk" "$(srctree)/include/net/udp_tunnel.h"),)
+ccflags-y += -DCOMPAT_UDP_TUNNEL_SETUP_SK
+endif
+ifneq ($(shell grep -s "udp_tunnel_sock_release.struct sock ." "$(srctree)/include/net/udp_tunnel.h"),)
+ccflags-y += -DCOMPAT_UDP_TUNNEL_RELEASE_SK
+endif
+"""
+
+
+def cmd_mod_compat_patch(src):
+    """Правка исходников модуля перед сборкой (каталог src тега). Печатает
+    patched | already | skip — skip, если в теге этого места нет (апстрим
+    поправил сам или переписал): тогда исходник не трогаем."""
+    compat, kbuild = os.path.join(src, "compat/compat.h"), os.path.join(src, "compat/Kbuild.include")
+    if not (os.path.isfile(compat) and os.path.isfile(kbuild)):
+        print("skip")
+        return
+    text = read(compat)
+    if "COMPAT_UDP_TUNNEL_SETUP_SK" in text:
+        print("already")
+        return
+    if MOD_UDP_OLD not in text:
+        print("skip")
+        return
+    with open(compat, "w", encoding="utf-8", errors="surrogateescape") as f:
+        f.write(text.replace(MOD_UDP_OLD, MOD_UDP_NEW, 1))
+    with open(kbuild, "a", encoding="utf-8") as f:
+        f.write(MOD_UDP_KBUILD)
+    print("patched")
+
+
 def cmd_changelog_json(current):
     """CHANGELOG.md из stdin → разделы для экрана «Обновление»: новее
     установленной версии (сверху самая новая, не больше десяти), а если
@@ -1520,7 +1574,7 @@ COMMANDS = {
     "net-of": cmd_net_of, "pick-net": cmd_pick_net, "net-overlaps": cmd_net_overlaps,
     "allowed-except": cmd_allowed_except,
     "rand-key": cmd_rand_key, "phobos-link": cmd_phobos_link, "exit-conf-fix": cmd_exit_conf_fix,
-    "conf-hooks": cmd_conf_hooks,
+    "conf-hooks": cmd_conf_hooks, "mod-compat-patch": cmd_mod_compat_patch,
     "xray-link": cmd_xray_link, "xray-default": cmd_xray_default, "xray-add": cmd_xray_add,
     "xray-del": cmd_xray_del, "xray-tags": cmd_xray_tags, "xray-probe": cmd_xray_probe,
     "xray-probe-tag": cmd_xray_probe_tag, "xray-tun-probe": cmd_xray_tun_probe,

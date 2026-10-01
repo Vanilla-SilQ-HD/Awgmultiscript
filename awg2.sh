@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.1.7"
+VERSION="v1.1.8"
 
 # ═════ core ═════
 # Базовые примитивы: вывод, ввод, журнал, временные файлы, случайные числа,
@@ -1339,6 +1339,15 @@ build_kernel() {
 # сборкой amneziawg.mod.c уехал бы в DKMS.
 _mod_trial_build() { cp -a "$1" "$1.trial" && make -C "$1.trial" KERNELRELEASE="$2" -j"$(nproc)"; }
 
+# Правки исходника модуля под ядра дистрибутивов (py mod-compat-patch): в
+# Ubuntu 7.0.0-38 апстрим без неё не собирается. Нет нужного места в теге —
+# исходник не трогается.
+_mod_src_patch() {  # каталог src тега или исходник в DKMS
+  [[ -d "$1" ]] || return 0
+  [[ "$(py mod-compat-patch "$1" 2>/dev/null)" == patched ]] && mod_log "исходник $1: правка udp_tunnel для ядер дистрибутивов"
+  return 0
+}
+
 # Сборка под все ядра с заголовками. Ядро, поставленное раньше регистрации
 # модуля в DKMS, автосборку не получит — после перезагрузки в него awg0 не
 # поднялся бы. Провал под работающим ядром — ошибка, под остальными —
@@ -1346,6 +1355,7 @@ _mod_trial_build() { cp -a "$1" "$1.trial" && make -C "$1.trial" KERNELRELEASE="
 _mod_dkms_install_all() {
   local k running built=0 rc=0
   running=$(uname -r)
+  _mod_src_patch "$MOD_SRC_DIR"
   dkms add -m "$MOD_NAME" -v "$MOD_DKMS_VER" >/dev/null 2>&1 || true
   for k in $(installed_kernels); do
     [[ -d "/lib/modules/$k/build" ]] || continue
@@ -1388,6 +1398,7 @@ mod_install_tag() {
   run_step "Загрузка модуля $tag" _git_clone_tag "$tag" "$tmp/mod" "$MOD_REPO" \
     || { err "Тег $tag не скачался — проверь имя тега и доступ к github.com"; return 1; }
   [[ -f "$tmp/mod/src/dkms.conf" ]] || { err "В теге нет src/dkms.conf — структура репозитория изменилась"; return 1; }
+  _mod_src_patch "$tmp/mod/src"
   kver=$(build_kernel) || { err "Нет заголовков ни для одного ядра"; kernel_headers_help; return 1; }
   run_step "Пробная сборка под $kver" _mod_trial_build "$tmp/mod/src" "$kver" || {
     mod_log "пробная сборка не прошла"
@@ -7645,6 +7656,9 @@ helpers_refresh() {
   [[ "$(cat "$mark" 2>/dev/null)" == "$VERSION" ]] && return 0
   mkdir -p "$STATE_DIR"
   server_exists && expire_install &>/dev/null
+  # Исходник модуля в DKMS поставила прежняя версия: без правки автосборка
+  # DKMS при обновлении ядра (Ubuntu 7.0.0-38) упала бы
+  _mod_src_patch "$MOD_SRC_DIR"
   if [[ -f "$WARP_AUTOSTART_SCRIPT" ]]; then
     emit_script "$WARP_AUTOSTART_SCRIPT" 'warp_wg_bringup' \
       WARP_CONF WARP_IF WARP_TABLE WARP_PEERS "${RT_FUNCS[@]}" warp_wg_bringup
@@ -12852,6 +12866,60 @@ def _ver_tuple(v):
     return tuple(int(x) for x in re.findall(r"\d+", v)[:4])
 
 
+# Модуль ядра: смена API udp_tunnel (struct socket → struct sock) пришла в
+# 7.1.5, и апстрим выбирает вызов по номеру версии. Ядра дистрибутивов
+# переносят её в старые версии частично: в Ubuntu 7.0.0-38 setup_udp_tunnel_sock
+# уже берёт struct sock, а udp_tunnel_sock_release — ещё struct socket, и
+# модуль не собирается. Для ядер < 7.1.5 вызов выбирается по заголовкам.
+MOD_UDP_OLD = """#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 1, 5)
+#include <net/udp_tunnel.h>
+#define setup_udp_tunnel_sock(net, sk, sock_cfg) setup_udp_tunnel_sock(net, sk->sk_socket, sock_cfg)
+#define udp_tunnel_sock_release(sk) udp_tunnel_sock_release(sk->sk_socket)
+#endif"""
+MOD_UDP_NEW = """#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 1, 5)
+#include <net/udp_tunnel.h>
+/* awg2: перенос смены API в старые ядра — по заголовкам (compat/Kbuild.include) */
+#ifndef COMPAT_UDP_TUNNEL_SETUP_SK
+#define setup_udp_tunnel_sock(net, sk, sock_cfg) setup_udp_tunnel_sock(net, sk->sk_socket, sock_cfg)
+#endif
+#ifndef COMPAT_UDP_TUNNEL_RELEASE_SK
+#define udp_tunnel_sock_release(sk) udp_tunnel_sock_release(sk->sk_socket)
+#endif
+#endif"""
+MOD_UDP_KBUILD = """
+# awg2: смена API udp_tunnel, перенесённая в ядро дистрибутива до 7.1.5.
+# Без запятых и скобок в шаблоне — для ifneq они разделители («.» — любой символ)
+ifneq ($(shell grep -s "setup_udp_tunnel_sock.struct net .net. struct sock .sk" "$(srctree)/include/net/udp_tunnel.h"),)
+ccflags-y += -DCOMPAT_UDP_TUNNEL_SETUP_SK
+endif
+ifneq ($(shell grep -s "udp_tunnel_sock_release.struct sock ." "$(srctree)/include/net/udp_tunnel.h"),)
+ccflags-y += -DCOMPAT_UDP_TUNNEL_RELEASE_SK
+endif
+"""
+
+
+def cmd_mod_compat_patch(src):
+    """Правка исходников модуля перед сборкой (каталог src тега). Печатает
+    patched | already | skip — skip, если в теге этого места нет (апстрим
+    поправил сам или переписал): тогда исходник не трогаем."""
+    compat, kbuild = os.path.join(src, "compat/compat.h"), os.path.join(src, "compat/Kbuild.include")
+    if not (os.path.isfile(compat) and os.path.isfile(kbuild)):
+        print("skip")
+        return
+    text = read(compat)
+    if "COMPAT_UDP_TUNNEL_SETUP_SK" in text:
+        print("already")
+        return
+    if MOD_UDP_OLD not in text:
+        print("skip")
+        return
+    with open(compat, "w", encoding="utf-8", errors="surrogateescape") as f:
+        f.write(text.replace(MOD_UDP_OLD, MOD_UDP_NEW, 1))
+    with open(kbuild, "a", encoding="utf-8") as f:
+        f.write(MOD_UDP_KBUILD)
+    print("patched")
+
+
 def cmd_changelog_json(current):
     """CHANGELOG.md из stdin → разделы для экрана «Обновление»: новее
     установленной версии (сверху самая новая, не больше десяти), а если
@@ -12916,7 +12984,7 @@ COMMANDS = {
     "net-of": cmd_net_of, "pick-net": cmd_pick_net, "net-overlaps": cmd_net_overlaps,
     "allowed-except": cmd_allowed_except,
     "rand-key": cmd_rand_key, "phobos-link": cmd_phobos_link, "exit-conf-fix": cmd_exit_conf_fix,
-    "conf-hooks": cmd_conf_hooks,
+    "conf-hooks": cmd_conf_hooks, "mod-compat-patch": cmd_mod_compat_patch,
     "xray-link": cmd_xray_link, "xray-default": cmd_xray_default, "xray-add": cmd_xray_add,
     "xray-del": cmd_xray_del, "xray-tags": cmd_xray_tags, "xray-probe": cmd_xray_probe,
     "xray-probe-tag": cmd_xray_probe_tag, "xray-tun-probe": cmd_xray_tun_probe,

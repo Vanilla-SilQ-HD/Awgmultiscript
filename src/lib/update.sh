@@ -168,6 +168,9 @@ helpers_refresh() {
   [[ "$(cat "$mark" 2>/dev/null)" == "$VERSION" ]] && return 0
   mkdir -p "$STATE_DIR"
   server_exists && expire_install &>/dev/null
+  # Исходник модуля в DKMS поставила прежняя версия: без правки автосборка
+  # DKMS при обновлении ядра (Ubuntu 7.0.0-38) упала бы
+  _mod_src_patch "$MOD_SRC_DIR"
   if [[ -f "$WARP_AUTOSTART_SCRIPT" ]]; then
     emit_script "$WARP_AUTOSTART_SCRIPT" 'warp_wg_bringup' \
       WARP_CONF WARP_IF WARP_TABLE WARP_PEERS "${RT_FUNCS[@]}" warp_wg_bringup

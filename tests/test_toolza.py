@@ -152,6 +152,41 @@ with open(TSV, "w") as f:
 rc, out, _ = bash(f'clients_tsv() {{ cat "{TSV}"; }}; clients_psv | {{ IFS="|" read -r name pub aip exp orig rest; echo "$exp|$orig|$rest"; }}')
 chk("clients_psv: пустая колонка остаётся пустой", out.strip() == "1800000000||none", out)
 
+# Модуль ядра: в Ubuntu 7.0.0-38 смена API udp_tunnel перенесена частично —
+# вызов выбирается по заголовкам ядра, а не по номеру версии
+UDP_OLD = ("#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 1, 5)\n#include <net/udp_tunnel.h>\n"
+           "#define setup_udp_tunnel_sock(net, sk, sock_cfg) setup_udp_tunnel_sock(net, sk->sk_socket, sock_cfg)\n"
+           "#define udp_tunnel_sock_release(sk) udp_tunnel_sock_release(sk->sk_socket)\n#endif\n")
+KM = os.path.join(TMP, "kmod", "src")
+os.makedirs(os.path.join(KM, "compat"))
+with open(os.path.join(KM, "compat/compat.h"), "w") as f:
+    f.write("#ifndef _WG_COMPAT_H\n" + UDP_OLD + "#endif\n")
+with open(os.path.join(KM, "compat/Kbuild.include"), "w") as f:
+    f.write("ccflags-y += -DBASE\n")
+rc, out, _ = bash(f'py mod-compat-patch "{KM}"; py mod-compat-patch "{KM}"; py mod-compat-patch "{TMP}"')
+with open(os.path.join(KM, "compat/compat.h")) as f:
+    comp = f.read()
+chk("исходник модуля: правка udp_tunnel один раз, без нужного места — не трогается",
+    out.split() == ["patched", "already", "skip"] and "#ifndef COMPAT_UDP_TUNNEL_SETUP_SK" in comp
+    and "#ifndef COMPAT_UDP_TUNNEL_RELEASE_SK" in comp and comp.count("setup_udp_tunnel_sock(net, sk->sk_socket") == 1, out + comp)
+KT = os.path.join(TMP, "ktree", "include", "net")
+os.makedirs(KT)
+with open(os.path.join(KT, "udp_tunnel.h"), "w") as f:      # как в Ubuntu 7.0.0-38
+    f.write("void setup_udp_tunnel_sock(struct net *net, struct sock *sk,\n\t\t\t   struct udp_tunnel_sock_cfg *sock_cfg);\n"
+            "void udp_tunnel_sock_release(struct socket *sock);\n")
+MK = os.path.join(TMP, "kmod", "probe.mk")
+with open(MK, "w") as f:
+    f.write(f"include {KM}/compat/Kbuild.include\nall:\n\t@echo $(ccflags-y)\n")
+r = subprocess.run(["make", "-s", "-f", MK, "srctree=" + os.path.join(TMP, "ktree")], capture_output=True, text=True)
+chk("Kbuild.include: make разбирает проверку, флаг — только у перенесённого вызова",
+    r.returncode == 0 and r.stdout.split() == ["-DBASE", "-DCOMPAT_UDP_TUNNEL_SETUP_SK"], r.stdout + r.stderr)
+with open(os.path.join(KT, "udp_tunnel.h"), "w") as f:      # прежний API (6.8, 7.0.0-34)
+    f.write("void setup_udp_tunnel_sock(struct net *net, struct socket *sock,\n\t\t\t   struct udp_tunnel_sock_cfg *cfg);\n"
+            "void udp_tunnel_sock_release(struct socket *sock);\n")
+r = subprocess.run(["make", "-s", "-f", MK, "srctree=" + os.path.join(TMP, "ktree")], capture_output=True, text=True)
+chk("Kbuild.include: прежний API — флагов нет, модуль собирается как раньше",
+    r.returncode == 0 and r.stdout.split() == ["-DBASE"], r.stdout + r.stderr)
+
 # Мастер создания сервера: регион — выбором 1/2, Enter и Ctrl+D — Европа / мир
 picked = [bash('_choose_region; echo "R=$S_REGION"', stdin=s)[1].strip().splitlines()[-1] for s in ("2\n", "\n", "")]
 chk("регион сервера: 2 — Россия, Enter и Ctrl+D — мир", picked == ["R=ru", "R=world", "R=world"], picked)

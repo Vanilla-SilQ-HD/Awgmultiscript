@@ -293,6 +293,15 @@ build_kernel() {
 # сборкой amneziawg.mod.c уехал бы в DKMS.
 _mod_trial_build() { cp -a "$1" "$1.trial" && make -C "$1.trial" KERNELRELEASE="$2" -j"$(nproc)"; }
 
+# Правки исходника модуля под ядра дистрибутивов (py mod-compat-patch): в
+# Ubuntu 7.0.0-38 апстрим без неё не собирается. Нет нужного места в теге —
+# исходник не трогается.
+_mod_src_patch() {  # каталог src тега или исходник в DKMS
+  [[ -d "$1" ]] || return 0
+  [[ "$(py mod-compat-patch "$1" 2>/dev/null)" == patched ]] && mod_log "исходник $1: правка udp_tunnel для ядер дистрибутивов"
+  return 0
+}
+
 # Сборка под все ядра с заголовками. Ядро, поставленное раньше регистрации
 # модуля в DKMS, автосборку не получит — после перезагрузки в него awg0 не
 # поднялся бы. Провал под работающим ядром — ошибка, под остальными —
@@ -300,6 +309,7 @@ _mod_trial_build() { cp -a "$1" "$1.trial" && make -C "$1.trial" KERNELRELEASE="
 _mod_dkms_install_all() {
   local k running built=0 rc=0
   running=$(uname -r)
+  _mod_src_patch "$MOD_SRC_DIR"
   dkms add -m "$MOD_NAME" -v "$MOD_DKMS_VER" >/dev/null 2>&1 || true
   for k in $(installed_kernels); do
     [[ -d "/lib/modules/$k/build" ]] || continue
@@ -342,6 +352,7 @@ mod_install_tag() {
   run_step "Загрузка модуля $tag" _git_clone_tag "$tag" "$tmp/mod" "$MOD_REPO" \
     || { err "Тег $tag не скачался — проверь имя тега и доступ к github.com"; return 1; }
   [[ -f "$tmp/mod/src/dkms.conf" ]] || { err "В теге нет src/dkms.conf — структура репозитория изменилась"; return 1; }
+  _mod_src_patch "$tmp/mod/src"
   kver=$(build_kernel) || { err "Нет заголовков ни для одного ядра"; kernel_headers_help; return 1; }
   run_step "Пробная сборка под $kver" _mod_trial_build "$tmp/mod/src" "$kver" || {
     mod_log "пробная сборка не прошла"
