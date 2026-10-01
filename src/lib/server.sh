@@ -357,6 +357,19 @@ _choose_proto() {
   fi
 }
 
+# Регион — явным выбором, как в боте и панели: «Сервер в России? [y/N]»
+# с Enter уходил дальше молча, и было непонятно, что выбрано.
+_choose_region() {
+  local c
+  echo -e "  ${W}Где сервер${N}"
+  echo -e "  ${G}1${N} Европа / мир"
+  echo -e "  ${G}2${N} Россия"
+  echo -e "  ${D}    мимикрия берёт домены, привычные для страны сервера${N}"
+  read_choice c "${C}  Выбор [1-2] (Enter = 1): ${N}" 1 2 1
+  if [[ "$c" == 2 ]]; then S_REGION=ru; else S_REGION=world; fi
+  ok "Регион: $([[ "$S_REGION" == ru ]] && echo "Россия" || echo "Европа / мир")"
+}
+
 _choose_profile() {
   local c
   echo ""
@@ -391,8 +404,13 @@ _choose_net() {
     return 0
   fi
   while true; do
-    read_line v "${C}  Подсеть вида 10.8.0.0/24: ${N}"
-    [[ -n "$v" ]] || { warn "Подсеть не выбрана"; return 1; }
+    read_line v "${C}  Подсеть вида 10.8.0.0/24 (Enter — случайная): ${N}"
+    # Пусто (Enter или Ctrl+D) — как пункт 1, а не обрыв мастера и не повтор
+    if [[ -z "$v" ]]; then
+      S_NET=$(pick_awg_net) || { err "Не нашёл свободную /24"; return 1; }
+      info "Подсеть: $S_NET"
+      return 0
+    fi
     if valid_cidr "$v" && [[ "${v#*/}" == 24 ]]; then
       v="${v%.*}.0/24"
       if taken_networks | py net-overlaps "$v" >/dev/null; then
@@ -519,7 +537,9 @@ do_create_server() {
 
   echo ""
   hdr "Создание сервера"
-  if ask_yes "  Сервер в России (пулы доменов мимикрии под РФ)? [y/N]: " n; then S_REGION=ru; else S_REGION=world; fi
+  _choose_region
+  echo ""
+  hdr "DNS клиентов"
   _choose_dns
   _choose_profile || return 0
   if [[ "$S_PROFILE" == lite ]]; then _choose_mtu 1280; else _choose_mtu 1320; fi

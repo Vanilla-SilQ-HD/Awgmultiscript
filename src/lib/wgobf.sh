@@ -579,6 +579,19 @@ wgobf_remove() {
   log_info "wgobf: удалён"
 }
 
+# Хуки wgobf0 — ровно «$WGOBF_FW up/down». Конфиг из бэкапа мог прийти
+# чужой: прочее убирается, о командах не из Тулзы — предупреждение.
+_wgobf_hooks_reset() {
+  local bad
+  bad=$(py conf-hooks "$WGOBF_WG_CONF" check "$WGOBF_FW up" "$WGOBF_FW down" 2>/dev/null) || true
+  if [[ -n "$bad" ]]; then
+    warn "В $WGOBF_IF.conf из бэкапа были чужие команды — заменены правилами Тулзы:"
+    sed 's/^/    /; s/\t/ = /' <<< "$bad"
+  fi
+  sed -i -E '/^[[:space:]]*(PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=/Id' "$WGOBF_WG_CONF"
+  sed -i "0,/^\[Interface\]/s|^\[Interface\]|[Interface]\nPostUp = $WGOBF_FW up\nPostDown = $WGOBF_FW down|" "$WGOBF_WG_CONF"
+}
+
 # Из папки бэкапа (<бэкап>/wgobf): ключи, настройки и клиенты — из бэкапа,
 # служебные файлы — заново текущим кодом.
 wgobf_restore() {
@@ -586,8 +599,13 @@ wgobf_restore() {
   _wgobf_prepare || return 1
   wgobf_installed && _wgobf_teardown drop
   mkdir -p "$WGOBF_DIR" && chmod 700 "$WGOBF_DIR"
-  cp -a "$src/etc/." "$WGOBF_DIR/" || { err "Настройки обфускатора не скопировались"; return 1; }
+  # Из каталога настроек — только state: конфиг обфускатора и скрипт
+  # файрвола wgobf_restart пишет из него заново.
+  [[ -f "$src/etc/${WGOBF_STATE##*/}" ]] || { err "В бэкапе нет настроек обфускатора"; return 1; }
+  install -m 600 "$src/etc/${WGOBF_STATE##*/}" "$WGOBF_STATE"
   install -m 600 "$src/$WGOBF_IF.conf" "$WGOBF_WG_CONF"
+  # Хуки wgobf0 пишет только Тулза: чужие команды из бэкапа — прочь, свои — на место
+  _wgobf_hooks_reset
   if [[ -d "$src/clients" ]]; then
     mkdir -p "$WGOBF_CLIENTS" && cp -a "$src/clients/." "$WGOBF_CLIENTS/" && chmod 700 "$WGOBF_CLIENTS"
   fi

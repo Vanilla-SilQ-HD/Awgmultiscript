@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.1.5"
+VERSION="v1.1.6"
 
 # ═════ core ═════
 # Базовые примитивы: вывод, ввод, журнал, временные файлы, случайные числа,
@@ -700,11 +700,12 @@ valid_ip() {
 valid_cidr() {
   [[ "$1" == */* ]] || return 1
   local mask="${1#*/}"
-  valid_ip "${1%/*}" && [[ "$mask" =~ ^[0-9]{1,2}$ ]] && (( 10#$mask <= 32 ))
+  valid_ip "${1%/*}" && [[ "$mask" =~ ^(0|[1-9][0-9]?)$ ]] && (( mask <= 32 ))
 }
 
-# 10#: «0080» — не восьмеричное и не ошибка арифметики.
-valid_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
+# Без ведущих нулей: «0080» и «/08» — не восьмеричные числа и не ошибка
+# арифметики, а отказ; иначе такое значение легло бы в конфиги как есть.
+valid_port() { [[ "$1" =~ ^[1-9][0-9]{0,4}$ ]] && (( $1 <= 65535 )); }
 
 # Имя хоста (не IP): метки из букв, цифр и дефисов, минимум одна точка.
 valid_domain() {
@@ -2444,6 +2445,19 @@ _choose_proto() {
   fi
 }
 
+# Регион — явным выбором, как в боте и панели: «Сервер в России? [y/N]»
+# с Enter уходил дальше молча, и было непонятно, что выбрано.
+_choose_region() {
+  local c
+  echo -e "  ${W}Где сервер${N}"
+  echo -e "  ${G}1${N} Европа / мир"
+  echo -e "  ${G}2${N} Россия"
+  echo -e "  ${D}    мимикрия берёт домены, привычные для страны сервера${N}"
+  read_choice c "${C}  Выбор [1-2] (Enter = 1): ${N}" 1 2 1
+  if [[ "$c" == 2 ]]; then S_REGION=ru; else S_REGION=world; fi
+  ok "Регион: $([[ "$S_REGION" == ru ]] && echo "Россия" || echo "Европа / мир")"
+}
+
 _choose_profile() {
   local c
   echo ""
@@ -2478,8 +2492,13 @@ _choose_net() {
     return 0
   fi
   while true; do
-    read_line v "${C}  Подсеть вида 10.8.0.0/24: ${N}"
-    [[ -n "$v" ]] || { warn "Подсеть не выбрана"; return 1; }
+    read_line v "${C}  Подсеть вида 10.8.0.0/24 (Enter — случайная): ${N}"
+    # Пусто (Enter или Ctrl+D) — как пункт 1, а не обрыв мастера и не повтор
+    if [[ -z "$v" ]]; then
+      S_NET=$(pick_awg_net) || { err "Не нашёл свободную /24"; return 1; }
+      info "Подсеть: $S_NET"
+      return 0
+    fi
     if valid_cidr "$v" && [[ "${v#*/}" == 24 ]]; then
       v="${v%.*}.0/24"
       if taken_networks | py net-overlaps "$v" >/dev/null; then
@@ -2606,7 +2625,9 @@ do_create_server() {
 
   echo ""
   hdr "Создание сервера"
-  if ask_yes "  Сервер в России (пулы доменов мимикрии под РФ)? [y/N]: " n; then S_REGION=ru; else S_REGION=world; fi
+  _choose_region
+  echo ""
+  hdr "DNS клиентов"
   _choose_dns
   _choose_profile || return 0
   if [[ "$S_PROFILE" == lite ]]; then _choose_mtu 1280; else _choose_mtu 1320; fi
@@ -4743,6 +4764,12 @@ dns_change_upstream() {
 
 # Резолверы dnscrypt-proxy по именам из public-resolvers.md (через пробел или запятую).
 dns_set_upstream() {
+  _dns_upstream_write "$1" || return 1
+  ok "Резолверы: ${1//,/ }"
+  dns_restart || info "Проверь имена резолверов: journalctl -u $DNS_UNIT -n 20"
+}
+
+_dns_upstream_write() {  # имена — в конфиг, без перезапуска
   local names="${1//,/ }" nofilter=true toml="" n
   [[ -f "$DNS_PROXY_CONF" ]] || { err "Шифрованный DNS не настроен"; return 1; }
   [[ "$names" =~ ^[A-Za-z0-9_\ -]+$ && -n "${names// /}" ]] || { err "Допустимы латиница, цифры, дефис и запятая"; return 1; }
@@ -4751,8 +4778,6 @@ dns_set_upstream() {
   [[ " $names " == *safe* || " $names " == *filter* || " $names " == *family* || " $names " == *adguard* ]] && nofilter=false
   for n in $names; do toml+="${toml:+, }'$n'"; done
   sed -i "s|^server_names[[:space:]]*=.*|server_names = [$toml]|; s|^require_nofilter[[:space:]]*=.*|require_nofilter = $nofilter|" "$DNS_PROXY_CONF"
-  ok "Резолверы: $names"
-  dns_restart || info "Проверь имена резолверов: journalctl -u $DNS_UNIT -n 20"
 }
 
 dns_remove() {
@@ -6833,6 +6858,19 @@ wgobf_remove() {
   log_info "wgobf: удалён"
 }
 
+# Хуки wgobf0 — ровно «$WGOBF_FW up/down». Конфиг из бэкапа мог прийти
+# чужой: прочее убирается, о командах не из Тулзы — предупреждение.
+_wgobf_hooks_reset() {
+  local bad
+  bad=$(py conf-hooks "$WGOBF_WG_CONF" check "$WGOBF_FW up" "$WGOBF_FW down" 2>/dev/null) || true
+  if [[ -n "$bad" ]]; then
+    warn "В $WGOBF_IF.conf из бэкапа были чужие команды — заменены правилами Тулзы:"
+    sed 's/^/    /; s/\t/ = /' <<< "$bad"
+  fi
+  sed -i -E '/^[[:space:]]*(PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=/Id' "$WGOBF_WG_CONF"
+  sed -i "0,/^\[Interface\]/s|^\[Interface\]|[Interface]\nPostUp = $WGOBF_FW up\nPostDown = $WGOBF_FW down|" "$WGOBF_WG_CONF"
+}
+
 # Из папки бэкапа (<бэкап>/wgobf): ключи, настройки и клиенты — из бэкапа,
 # служебные файлы — заново текущим кодом.
 wgobf_restore() {
@@ -6840,8 +6878,13 @@ wgobf_restore() {
   _wgobf_prepare || return 1
   wgobf_installed && _wgobf_teardown drop
   mkdir -p "$WGOBF_DIR" && chmod 700 "$WGOBF_DIR"
-  cp -a "$src/etc/." "$WGOBF_DIR/" || { err "Настройки обфускатора не скопировались"; return 1; }
+  # Из каталога настроек — только state: конфиг обфускатора и скрипт
+  # файрвола wgobf_restart пишет из него заново.
+  [[ -f "$src/etc/${WGOBF_STATE##*/}" ]] || { err "В бэкапе нет настроек обфускатора"; return 1; }
+  install -m 600 "$src/etc/${WGOBF_STATE##*/}" "$WGOBF_STATE"
   install -m 600 "$src/$WGOBF_IF.conf" "$WGOBF_WG_CONF"
+  # Хуки wgobf0 пишет только Тулза: чужие команды из бэкапа — прочь, свои — на место
+  _wgobf_hooks_reset
   if [[ -d "$src/clients" ]]; then
     mkdir -p "$WGOBF_CLIENTS" && cp -a "$src/clients/." "$WGOBF_CLIENTS/" && chmod 700 "$WGOBF_CLIENTS"
   fi
@@ -7279,10 +7322,15 @@ _restore_awg_files() {  # каталог бэкапа
   # Конфиги клиентов, которых нет в восстановленном awg0.conf, иначе остаются
   # сиротами: видны в «Показать конфиг», занимают имя и попадают в архив.
   # Конфиги пиров, которые в awg0 есть, не трогаем: бэкап мог прийти без них.
-  keep=" $(clients_tsv | cut -f1 | tr '\n' ' ') "
-  for f in "$CLIENT_DIR"/*_awg[23].conf; do
-    [[ -f "$f" && "$keep" != *" $(client_name_of "$f") "* ]] && rm -f "$f"
-  done
+  # awg0.conf не разобрался — не трогаем ничего: пустой список стёр бы всех.
+  if keep=$(clients_tsv | cut -f1 | tr '\n' ' '); then
+    keep=" $keep "
+    for f in "$CLIENT_DIR"/*_awg[23].conf; do
+      [[ -f "$f" && "$keep" != *" $(client_name_of "$f") "* ]] && rm -f "$f"
+    done
+  else
+    warn "awg0.conf из бэкапа не разобран — конфиги клиентов на сервере не трогаю"
+  fi
   while IFS= read -r -d '' f; do
     rm -f "$CLIENT_DIR/$(client_name_of "$f")"_awg[23].conf
     install -m 600 "$f" "$CLIENT_DIR/${f##*/}"
@@ -7290,12 +7338,18 @@ _restore_awg_files() {  # каталог бэкапа
 }
 
 _restore_warp() {  # каталог бэкапа
-  local src="$1/warp" be
+  local src="$1/warp" be f
   [[ -d "$src" ]] || return 0
   if [[ -d "$src/wgcf" ]]; then
-    mkdir -p "$WARP_DIR" && cp -a "$src/wgcf/." "$WARP_DIR/" && chmod 700 "$WARP_DIR" && ok "WARP (wg): аккаунт"
-    # Состояние «включён» из бэкапа не переносим — туннель включают руками
+    # Только данные аккаунта: в каталоге лежит и скрипт автозапуска, который
+    # служба выполняет от root, — его Тулза пишет сама, из бэкапа не берём.
+    # Состояние «включён» тоже не переносим — туннель включают руками.
+    mkdir -p "$WARP_DIR" && chmod 700 "$WARP_DIR"
+    for f in "$WARP_ACCOUNT" "$WARP_PROFILE" "$WARP_PEERS" "$WARP_DIR/account_type"; do
+      [[ -f "$src/wgcf/${f##*/}" ]] && install -D -m 600 "$src/wgcf/${f##*/}" "$f"
+    done
     rm -f "$WARP_STATE" "$WARP_STATE.failed"
+    ok "WARP (wg): аккаунт"
   fi
   [[ -f "$src/warp0.conf" ]] && install -D -m 600 "$src/warp0.conf" "$WARP_CONF"
   if [[ -f "$src/usque/config.json" ]]; then
@@ -7306,15 +7360,67 @@ _restore_warp() {  # каталог бэкапа
   info "WARP восстановлен выключенным — включи его в меню туннелей"
 }
 
+# Настройки туннелей. Бэкап мог прийти чужой (присланный в бота), поэтому
+# архив не распаковывается в / — иначе он переписал бы любой файл системы.
+# Он идёт во временный каталог, а на место ложатся только файлы, которые
+# кладёт в бэкап сама Тулза, и с проверкой: конфиги exit-нод — без хуков,
+# правила каскада и адрес tun2socks — по формату, конфиг dnscrypt-proxy —
+# шаблон Тулзы, из бэкапа берутся только имена резолверов.
 _restore_tunnels() {  # каталог бэкапа
-  local arch="$1/tunnels.tar.gz" n
+  local arch="$1/tunnels.tar.gz" x f n names
   [[ -f "$arch" ]] || return 0
-  tar -xzf "$arch" -C / || { warn "Настройки туннелей не распаковались"; return 0; }
+  mktmp x -d || return 1
+  py safe-untar "$arch" "$x" || { warn "Настройки туннелей не распаковались"; return 0; }
+  if [[ -f "$x$XRAY_CONF" ]]; then
+    if py xray-tags "$x$XRAY_CONF" >/dev/null 2>&1; then install -D -m 600 "$x$XRAY_CONF" "$XRAY_CONF"
+    else warn "Конфиг Xray из бэкапа не разобран — пропущен"; fi
+  fi
+  [[ -f "$x$XRAY_PEERS" ]] && install -D -m 600 "$x$XRAY_PEERS" "$XRAY_PEERS"
+  for f in "$EXITS_STATE" "$EXITS_PEERS"; do
+    [[ -f "$x$f" ]] && install -D -m 600 "$x$f" "$f"
+  done
+  for f in "$x$EXITS_DIR"/awg-exit-*.conf; do
+    [[ -f "$f" ]] || continue
+    n="${f##*/awg-exit-}"; n="${n%.conf}"
+    [[ "$n" =~ ^[A-Za-z0-9_]{1,6}$ ]] || { warn "Пропущен конфиг exit-ноды: ${f##*/}"; continue; }
+    py exit-conf-fix "$f" && install -m 600 "$f" "$EXITS_DIR/awg-exit-$n.conf"
+  done
+  if [[ -f "$x$CASCADE_RULES" ]]; then
+    grep -E '^(udp|tcp)\|[0-9]{1,5}\|[0-9]{1,3}(\.[0-9]{1,3}){3}\|[0-9]{1,5}\|' "$x$CASCADE_RULES" \
+      | write_file "$CASCADE_RULES" 600
+  fi
+  if [[ -f "$x$T2S_CONF" ]]; then
+    n=$(head -1 "$x$T2S_CONF" | tr -d '[:space:]')
+    [[ "$n" =~ ^[A-Za-z0-9._-]+:[0-9]{1,5}$ ]] && echo "$n" | write_file "$T2S_CONF" 600
+  fi
+  if [[ -f "$x$DNS_PROXY_CONF" ]]; then
+    names=$(sed -n 's/^server_names[[:space:]]*=[[:space:]]*//p' "$x$DNS_PROXY_CONF" | tr -d "[]'\"" | head -1)
+    _dns_write_conf
+    [[ -n "$names" ]] && { _dns_upstream_write "$names" || warn "Резолверы DNS из бэкапа не приняты — стоят по умолчанию"; }
+  fi
   rm -f "$XRAY_STATE"
   [[ -f "$EXITS_STATE" ]] && exits_state_set state inactive
   for n in $(exits_nodes); do systemctl enable --now "awg-quick@awg-exit-$n" &>/dev/null || warn "Нода $n не поднялась"; done
   (( $(cascade_count) )) && { _cascade_persist; systemctl restart awg-cascade.service &>/dev/null; }
   ok "Настройки туннелей восстановлены; маршрутизация клиентов выключена"
+}
+
+# Хуки конфига из бэкапа (PostUp и т. п.) выполняются от root при подъёме
+# интерфейса. Команды не из Тулзы (не iptables, ip_forward, MTU) в меню —
+# показать и спросить, в боте и панели — убрать с предупреждением в итоге.
+_restore_hooks() {  # конфиг [разрешённые команды…]
+  local conf="$1" bad
+  shift
+  bad=$(py conf-hooks "$conf" check "$@") || { err "${conf##*/} из бэкапа не читается"; return 1; }
+  [[ -n "$bad" ]] || return 0
+  warn "В ${conf##*/} из бэкапа — команды, которые выполнятся от root при запуске:"
+  sed 's/^/    /; s/\t/ = /' <<< "$bad"
+  if (( ! AUTO_MODE )) && ask_yes "  Оставить их? Только если ты сам их туда вписал [y/N]: " n; then
+    warn "Команды оставлены"
+    return 0
+  fi
+  py conf-hooks "$conf" fix "$@" >/dev/null || return 1
+  warn "Команды убраны из ${conf##*/}"
 }
 
 do_restore() {
@@ -7347,6 +7453,7 @@ backup_restore() {
   awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true
   [[ -f "$SERVER_CONF" ]] && cp -a "$SERVER_CONF" "$SERVER_CONF.pre_restore.$(date +%s)"
   _restore_awg_files "$src"
+  _restore_hooks "$SERVER_CONF" || return 1
   client_files_sync_suffix
   ok "Сервер и клиенты: $(client_files | wc -l) кл."
   _restore_warp "$src"
@@ -11864,6 +11971,72 @@ def cmd_exit_conf_fix(path):
     write_atomic(path, "\n".join(out))
 
 
+# Хуки awg-quick/wg-quick (PreUp/PostUp/PreDown/PostDown) выполняются через
+# eval от root. Конфиг сервера из бэкапа мог прийти чужой — пропускаем только
+# команды, какие пишет сама Тулза и её прежние версии: iptables/ip6tables,
+# включение ip_forward, MTU интерфейса, true; плюс точные команды из allow.
+HOOK_LINE = re.compile(r"^\s*(preup|postup|predown|postdown|saveconfig)\s*=\s*(.*?)\s*$", re.I)
+_HOOK_REDIR = r"(?:\s+(?:2>/dev/null|>/dev/null(?:\s+2>&1)?|2>&1))*"
+_HOOK_TOKEN = r"""(?:[A-Za-z0-9_.:/,!=+%@-]+|"[A-Za-z0-9_.:/,!=+%@ -]*"|'[A-Za-z0-9_.:/,!=+%@ -]*')"""
+HOOK_SAFE = [
+    re.compile(r"^(?:iptables|ip6tables)(?:\s+%s)+%s$" % (_HOOK_TOKEN, _HOOK_REDIR)),
+    re.compile(r"^echo\s+1\s*>\s*/proc/sys/net/ipv4/ip_forward$"),
+    re.compile(r"^sysctl\s+(?:-q\s+)?-q?w\s+net\.ipv4\.ip_forward=1%s$" % _HOOK_REDIR),
+    re.compile(r"^ip\s+link\s+set\s+(?:dev\s+)?[A-Za-z0-9_.%%-]{1,15}\s+mtu\s+\d{3,5}%s$" % _HOOK_REDIR),
+    re.compile(r"^true$"),
+]
+
+
+def _hook_cmd_safe(cmd, allow):
+    if cmd in allow:
+        return True
+    if not any(r.match(cmd) for r in HOOK_SAFE):
+        return False
+    # iptables --modprobe=ПРОГРАММА (и сокращения getopt: --mod, --modp…)
+    # запускает любую программу — такой «iptables» не пропускаем
+    for tok in cmd.split():
+        name = tok.strip("\"'").split("=", 1)[0]
+        if name == "-M" or (len(name) > 3 and "--modprobe".startswith(name)) or name.startswith("--modprobe"):
+            return False
+    return True
+
+
+def cmd_conf_hooks(path, mode, *allow):
+    """Хуки конфига сервера: check — напечатать недопустимые команды
+    («ключ<TAB>команда»), fix — убрать их из файла (допустимые остаются,
+    SaveConfig — всегда). Команды делятся по «;», «||» и «&&»: недопустима
+    хоть одна ветка — убирается вся команда."""
+    if mode not in ("check", "fix"):
+        die("режим: check | fix")
+    out, bad, in_iface = [], [], False
+    for line in read(path).split("\n"):
+        if re.match(r"^\s*\[", line):
+            in_iface = bool(re.match(r"^\s*\[\s*interface\s*\]", line, re.I))
+        m = HOOK_LINE.match(line) if in_iface else None
+        if not m:
+            out.append(line)
+            continue
+        key, value = m.group(1), m.group(2)
+        if key.lower() == "saveconfig":
+            bad.append((key, line.strip()))
+            continue
+        keep = []
+        for cmd in (c.strip() for c in value.split(";")):
+            if not cmd:
+                continue
+            if all(_hook_cmd_safe(alt.strip(), allow) for alt in re.split(r"\|\||&&", cmd)):
+                keep.append(cmd)
+            else:
+                bad.append((key, cmd))
+        if keep:
+            out.append(line if len(keep) == len([c for c in value.split(";") if c.strip()])
+                       else "%s = %s" % (key, "; ".join(keep)))
+    for key, cmd in bad:
+        print("%s\t%s" % (key, cmd))
+    if mode == "fix" and bad:
+        write_atomic(path, "\n".join(out))
+
+
 # ════════════════════════ Xray ════════════════════════
 SKIP_PROTO = ("freedom", "blackhole", "dns")
 KNOWN_IN = {"xray0", "tun-in", "tun-probe", "socks-in"}
@@ -12742,6 +12915,7 @@ COMMANDS = {
     "net-of": cmd_net_of, "pick-net": cmd_pick_net, "net-overlaps": cmd_net_overlaps,
     "allowed-except": cmd_allowed_except,
     "rand-key": cmd_rand_key, "phobos-link": cmd_phobos_link, "exit-conf-fix": cmd_exit_conf_fix,
+    "conf-hooks": cmd_conf_hooks,
     "xray-link": cmd_xray_link, "xray-default": cmd_xray_default, "xray-add": cmd_xray_add,
     "xray-del": cmd_xray_del, "xray-tags": cmd_xray_tags, "xray-probe": cmd_xray_probe,
     "xray-probe-tag": cmd_xray_probe_tag, "xray-tun-probe": cmd_xray_tun_probe,

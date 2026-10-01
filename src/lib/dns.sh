@@ -268,6 +268,12 @@ dns_change_upstream() {
 
 # Резолверы dnscrypt-proxy по именам из public-resolvers.md (через пробел или запятую).
 dns_set_upstream() {
+  _dns_upstream_write "$1" || return 1
+  ok "Резолверы: ${1//,/ }"
+  dns_restart || info "Проверь имена резолверов: journalctl -u $DNS_UNIT -n 20"
+}
+
+_dns_upstream_write() {  # имена — в конфиг, без перезапуска
   local names="${1//,/ }" nofilter=true toml="" n
   [[ -f "$DNS_PROXY_CONF" ]] || { err "Шифрованный DNS не настроен"; return 1; }
   [[ "$names" =~ ^[A-Za-z0-9_\ -]+$ && -n "${names// /}" ]] || { err "Допустимы латиница, цифры, дефис и запятая"; return 1; }
@@ -276,8 +282,6 @@ dns_set_upstream() {
   [[ " $names " == *safe* || " $names " == *filter* || " $names " == *family* || " $names " == *adguard* ]] && nofilter=false
   for n in $names; do toml+="${toml:+, }'$n'"; done
   sed -i "s|^server_names[[:space:]]*=.*|server_names = [$toml]|; s|^require_nofilter[[:space:]]*=.*|require_nofilter = $nofilter|" "$DNS_PROXY_CONF"
-  ok "Резолверы: $names"
-  dns_restart || info "Проверь имена резолверов: journalctl -u $DNS_UNIT -n 20"
 }
 
 dns_remove() {

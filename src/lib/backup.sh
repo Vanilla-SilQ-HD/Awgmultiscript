@@ -110,10 +110,15 @@ _restore_awg_files() {  # каталог бэкапа
   # Конфиги клиентов, которых нет в восстановленном awg0.conf, иначе остаются
   # сиротами: видны в «Показать конфиг», занимают имя и попадают в архив.
   # Конфиги пиров, которые в awg0 есть, не трогаем: бэкап мог прийти без них.
-  keep=" $(clients_tsv | cut -f1 | tr '\n' ' ') "
-  for f in "$CLIENT_DIR"/*_awg[23].conf; do
-    [[ -f "$f" && "$keep" != *" $(client_name_of "$f") "* ]] && rm -f "$f"
-  done
+  # awg0.conf не разобрался — не трогаем ничего: пустой список стёр бы всех.
+  if keep=$(clients_tsv | cut -f1 | tr '\n' ' '); then
+    keep=" $keep "
+    for f in "$CLIENT_DIR"/*_awg[23].conf; do
+      [[ -f "$f" && "$keep" != *" $(client_name_of "$f") "* ]] && rm -f "$f"
+    done
+  else
+    warn "awg0.conf из бэкапа не разобран — конфиги клиентов на сервере не трогаю"
+  fi
   while IFS= read -r -d '' f; do
     rm -f "$CLIENT_DIR/$(client_name_of "$f")"_awg[23].conf
     install -m 600 "$f" "$CLIENT_DIR/${f##*/}"
@@ -121,12 +126,18 @@ _restore_awg_files() {  # каталог бэкапа
 }
 
 _restore_warp() {  # каталог бэкапа
-  local src="$1/warp" be
+  local src="$1/warp" be f
   [[ -d "$src" ]] || return 0
   if [[ -d "$src/wgcf" ]]; then
-    mkdir -p "$WARP_DIR" && cp -a "$src/wgcf/." "$WARP_DIR/" && chmod 700 "$WARP_DIR" && ok "WARP (wg): аккаунт"
-    # Состояние «включён» из бэкапа не переносим — туннель включают руками
+    # Только данные аккаунта: в каталоге лежит и скрипт автозапуска, который
+    # служба выполняет от root, — его Тулза пишет сама, из бэкапа не берём.
+    # Состояние «включён» тоже не переносим — туннель включают руками.
+    mkdir -p "$WARP_DIR" && chmod 700 "$WARP_DIR"
+    for f in "$WARP_ACCOUNT" "$WARP_PROFILE" "$WARP_PEERS" "$WARP_DIR/account_type"; do
+      [[ -f "$src/wgcf/${f##*/}" ]] && install -D -m 600 "$src/wgcf/${f##*/}" "$f"
+    done
     rm -f "$WARP_STATE" "$WARP_STATE.failed"
+    ok "WARP (wg): аккаунт"
   fi
   [[ -f "$src/warp0.conf" ]] && install -D -m 600 "$src/warp0.conf" "$WARP_CONF"
   if [[ -f "$src/usque/config.json" ]]; then
@@ -137,15 +148,67 @@ _restore_warp() {  # каталог бэкапа
   info "WARP восстановлен выключенным — включи его в меню туннелей"
 }
 
+# Настройки туннелей. Бэкап мог прийти чужой (присланный в бота), поэтому
+# архив не распаковывается в / — иначе он переписал бы любой файл системы.
+# Он идёт во временный каталог, а на место ложатся только файлы, которые
+# кладёт в бэкап сама Тулза, и с проверкой: конфиги exit-нод — без хуков,
+# правила каскада и адрес tun2socks — по формату, конфиг dnscrypt-proxy —
+# шаблон Тулзы, из бэкапа берутся только имена резолверов.
 _restore_tunnels() {  # каталог бэкапа
-  local arch="$1/tunnels.tar.gz" n
+  local arch="$1/tunnels.tar.gz" x f n names
   [[ -f "$arch" ]] || return 0
-  tar -xzf "$arch" -C / || { warn "Настройки туннелей не распаковались"; return 0; }
+  mktmp x -d || return 1
+  py safe-untar "$arch" "$x" || { warn "Настройки туннелей не распаковались"; return 0; }
+  if [[ -f "$x$XRAY_CONF" ]]; then
+    if py xray-tags "$x$XRAY_CONF" >/dev/null 2>&1; then install -D -m 600 "$x$XRAY_CONF" "$XRAY_CONF"
+    else warn "Конфиг Xray из бэкапа не разобран — пропущен"; fi
+  fi
+  [[ -f "$x$XRAY_PEERS" ]] && install -D -m 600 "$x$XRAY_PEERS" "$XRAY_PEERS"
+  for f in "$EXITS_STATE" "$EXITS_PEERS"; do
+    [[ -f "$x$f" ]] && install -D -m 600 "$x$f" "$f"
+  done
+  for f in "$x$EXITS_DIR"/awg-exit-*.conf; do
+    [[ -f "$f" ]] || continue
+    n="${f##*/awg-exit-}"; n="${n%.conf}"
+    [[ "$n" =~ ^[A-Za-z0-9_]{1,6}$ ]] || { warn "Пропущен конфиг exit-ноды: ${f##*/}"; continue; }
+    py exit-conf-fix "$f" && install -m 600 "$f" "$EXITS_DIR/awg-exit-$n.conf"
+  done
+  if [[ -f "$x$CASCADE_RULES" ]]; then
+    grep -E '^(udp|tcp)\|[0-9]{1,5}\|[0-9]{1,3}(\.[0-9]{1,3}){3}\|[0-9]{1,5}\|' "$x$CASCADE_RULES" \
+      | write_file "$CASCADE_RULES" 600
+  fi
+  if [[ -f "$x$T2S_CONF" ]]; then
+    n=$(head -1 "$x$T2S_CONF" | tr -d '[:space:]')
+    [[ "$n" =~ ^[A-Za-z0-9._-]+:[0-9]{1,5}$ ]] && echo "$n" | write_file "$T2S_CONF" 600
+  fi
+  if [[ -f "$x$DNS_PROXY_CONF" ]]; then
+    names=$(sed -n 's/^server_names[[:space:]]*=[[:space:]]*//p' "$x$DNS_PROXY_CONF" | tr -d "[]'\"" | head -1)
+    _dns_write_conf
+    [[ -n "$names" ]] && { _dns_upstream_write "$names" || warn "Резолверы DNS из бэкапа не приняты — стоят по умолчанию"; }
+  fi
   rm -f "$XRAY_STATE"
   [[ -f "$EXITS_STATE" ]] && exits_state_set state inactive
   for n in $(exits_nodes); do systemctl enable --now "awg-quick@awg-exit-$n" &>/dev/null || warn "Нода $n не поднялась"; done
   (( $(cascade_count) )) && { _cascade_persist; systemctl restart awg-cascade.service &>/dev/null; }
   ok "Настройки туннелей восстановлены; маршрутизация клиентов выключена"
+}
+
+# Хуки конфига из бэкапа (PostUp и т. п.) выполняются от root при подъёме
+# интерфейса. Команды не из Тулзы (не iptables, ip_forward, MTU) в меню —
+# показать и спросить, в боте и панели — убрать с предупреждением в итоге.
+_restore_hooks() {  # конфиг [разрешённые команды…]
+  local conf="$1" bad
+  shift
+  bad=$(py conf-hooks "$conf" check "$@") || { err "${conf##*/} из бэкапа не читается"; return 1; }
+  [[ -n "$bad" ]] || return 0
+  warn "В ${conf##*/} из бэкапа — команды, которые выполнятся от root при запуске:"
+  sed 's/^/    /; s/\t/ = /' <<< "$bad"
+  if (( ! AUTO_MODE )) && ask_yes "  Оставить их? Только если ты сам их туда вписал [y/N]: " n; then
+    warn "Команды оставлены"
+    return 0
+  fi
+  py conf-hooks "$conf" fix "$@" >/dev/null || return 1
+  warn "Команды убраны из ${conf##*/}"
 }
 
 do_restore() {
@@ -178,6 +241,7 @@ backup_restore() {
   awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true
   [[ -f "$SERVER_CONF" ]] && cp -a "$SERVER_CONF" "$SERVER_CONF.pre_restore.$(date +%s)"
   _restore_awg_files "$src"
+  _restore_hooks "$SERVER_CONF" || return 1
   client_files_sync_suffix
   ok "Сервер и клиенты: $(client_files | wc -l) кл."
   _restore_warp "$src"

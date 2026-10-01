@@ -576,6 +576,72 @@ def cmd_exit_conf_fix(path):
     write_atomic(path, "\n".join(out))
 
 
+# Хуки awg-quick/wg-quick (PreUp/PostUp/PreDown/PostDown) выполняются через
+# eval от root. Конфиг сервера из бэкапа мог прийти чужой — пропускаем только
+# команды, какие пишет сама Тулза и её прежние версии: iptables/ip6tables,
+# включение ip_forward, MTU интерфейса, true; плюс точные команды из allow.
+HOOK_LINE = re.compile(r"^\s*(preup|postup|predown|postdown|saveconfig)\s*=\s*(.*?)\s*$", re.I)
+_HOOK_REDIR = r"(?:\s+(?:2>/dev/null|>/dev/null(?:\s+2>&1)?|2>&1))*"
+_HOOK_TOKEN = r"""(?:[A-Za-z0-9_.:/,!=+%@-]+|"[A-Za-z0-9_.:/,!=+%@ -]*"|'[A-Za-z0-9_.:/,!=+%@ -]*')"""
+HOOK_SAFE = [
+    re.compile(r"^(?:iptables|ip6tables)(?:\s+%s)+%s$" % (_HOOK_TOKEN, _HOOK_REDIR)),
+    re.compile(r"^echo\s+1\s*>\s*/proc/sys/net/ipv4/ip_forward$"),
+    re.compile(r"^sysctl\s+(?:-q\s+)?-q?w\s+net\.ipv4\.ip_forward=1%s$" % _HOOK_REDIR),
+    re.compile(r"^ip\s+link\s+set\s+(?:dev\s+)?[A-Za-z0-9_.%%-]{1,15}\s+mtu\s+\d{3,5}%s$" % _HOOK_REDIR),
+    re.compile(r"^true$"),
+]
+
+
+def _hook_cmd_safe(cmd, allow):
+    if cmd in allow:
+        return True
+    if not any(r.match(cmd) for r in HOOK_SAFE):
+        return False
+    # iptables --modprobe=ПРОГРАММА (и сокращения getopt: --mod, --modp…)
+    # запускает любую программу — такой «iptables» не пропускаем
+    for tok in cmd.split():
+        name = tok.strip("\"'").split("=", 1)[0]
+        if name == "-M" or (len(name) > 3 and "--modprobe".startswith(name)) or name.startswith("--modprobe"):
+            return False
+    return True
+
+
+def cmd_conf_hooks(path, mode, *allow):
+    """Хуки конфига сервера: check — напечатать недопустимые команды
+    («ключ<TAB>команда»), fix — убрать их из файла (допустимые остаются,
+    SaveConfig — всегда). Команды делятся по «;», «||» и «&&»: недопустима
+    хоть одна ветка — убирается вся команда."""
+    if mode not in ("check", "fix"):
+        die("режим: check | fix")
+    out, bad, in_iface = [], [], False
+    for line in read(path).split("\n"):
+        if re.match(r"^\s*\[", line):
+            in_iface = bool(re.match(r"^\s*\[\s*interface\s*\]", line, re.I))
+        m = HOOK_LINE.match(line) if in_iface else None
+        if not m:
+            out.append(line)
+            continue
+        key, value = m.group(1), m.group(2)
+        if key.lower() == "saveconfig":
+            bad.append((key, line.strip()))
+            continue
+        keep = []
+        for cmd in (c.strip() for c in value.split(";")):
+            if not cmd:
+                continue
+            if all(_hook_cmd_safe(alt.strip(), allow) for alt in re.split(r"\|\||&&", cmd)):
+                keep.append(cmd)
+            else:
+                bad.append((key, cmd))
+        if keep:
+            out.append(line if len(keep) == len([c for c in value.split(";") if c.strip()])
+                       else "%s = %s" % (key, "; ".join(keep)))
+    for key, cmd in bad:
+        print("%s\t%s" % (key, cmd))
+    if mode == "fix" and bad:
+        write_atomic(path, "\n".join(out))
+
+
 # ════════════════════════ Xray ════════════════════════
 SKIP_PROTO = ("freedom", "blackhole", "dns")
 KNOWN_IN = {"xray0", "tun-in", "tun-probe", "socks-in"}
@@ -1454,6 +1520,7 @@ COMMANDS = {
     "net-of": cmd_net_of, "pick-net": cmd_pick_net, "net-overlaps": cmd_net_overlaps,
     "allowed-except": cmd_allowed_except,
     "rand-key": cmd_rand_key, "phobos-link": cmd_phobos_link, "exit-conf-fix": cmd_exit_conf_fix,
+    "conf-hooks": cmd_conf_hooks,
     "xray-link": cmd_xray_link, "xray-default": cmd_xray_default, "xray-add": cmd_xray_add,
     "xray-del": cmd_xray_del, "xray-tags": cmd_xray_tags, "xray-probe": cmd_xray_probe,
     "xray-probe-tag": cmd_xray_probe_tag, "xray-tun-probe": cmd_xray_tun_probe,
