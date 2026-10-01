@@ -116,9 +116,14 @@ def setup(app: web.Application, user_of: UserOf) -> None:
         args = _args(body)
         _check(user, args)
         try:
-            timeout = min(float(body.get("timeout") or 120), TIMEOUT_MAX)
+            timeout = float(body.get("timeout") or 120)
         except (TypeError, ValueError):
-            timeout = 120
+            timeout = 120.0
+        # Отрицательное или NaN сработало бы сразу — и api.call убил бы awg2
+        # посреди изменения конфига.
+        if not timeout >= 1:
+            timeout = 120.0
+        timeout = min(timeout, TIMEOUT_MAX)
         stdin = body.get("stdin")
         return _result(await api.call(*args, stdin=stdin if isinstance(stdin, str) else None, timeout=timeout))
 
@@ -222,7 +227,7 @@ def setup(app: web.Application, user_of: UserOf) -> None:
         bot, uid, what = request.app["bot"], int(user["id"]), body.get("what")
         if what == "conf":
             ok = await cls.send_config(bot, uid, _name(body))
-            return web.json_response({"ok": ok})
+            return web.json_response({"ok": ok, "error": "" if ok else "Конфига нет — подробности в чате с ботом"})
         if what == "export":
             r = await api.call("clients", "export")
             if not r.ok or not isinstance(r.data, dict):
