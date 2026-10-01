@@ -133,7 +133,7 @@ cascade_add() {
 
 # cascade_rule_add udp|tcp|both ВХОД ЦЕЛЬ ВЫХОД [комментарий]
 cascade_rule_add() {
-  local protos=() proto in="$2" dst="$3" out="$4" comment="${5//|/ }" why added=0
+  local protos=() proto in="$2" dst="$3" out="$4" comment="${5//[|$'\n\r']/ }" why added=0
   case "$1" in udp|tcp) protos=("$1") ;; both) protos=(udp tcp) ;; *) err "Протокол: udp | tcp | both"; return 1 ;; esac
   valid_port "$in" && valid_port "$out" || { err "Порт 1-65535"; return 1; }
   valid_ip "$dst" && ! ip_is_private "$dst" || { err "Нужен публичный IPv4, например 5.6.7.8"; return 1; }
@@ -181,6 +181,9 @@ cascade_delete() {
 
 cascade_rule_del() {  # proto вход
   local p="$1" in="$2" dst out
+  # Аргументы приходят и из API: без проверки «.» и «[0-9]+» стали бы регуляркой
+  # и вычистили бы все правила из файла, оставив их в iptables.
+  [[ "$p" =~ ^(udp|tcp)$ ]] && valid_port "$in" || { err "Правило: udp|tcp ПОРТ"; return 1; }
   IFS='|' read -r _ _ dst out _ < <(grep -E "^${p}\|${in}\|" "$CASCADE_RULES" 2>/dev/null)
   [[ -n "$dst" ]] || { err "Правила ${p^^} $in нет"; return 1; }
   cascade_unapply "$p" "$in"

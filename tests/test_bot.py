@@ -235,6 +235,11 @@ async def run():
     text, _ = screen(await say("/start", STRANGER))
     chk("чужой видит отказ и свой ID", "Доступ запрещён" in text and "222" in text, text)
     chk("чужое нажатие отклонено", "⛔️ Нет доступа" in alerts(await press("cl", STRANGER)))
+    for text in ("/startfoo", "/start@otherbot", "/startinv_x"):
+        sent = await say(text, STRANGER)
+        shown = screen(sent)[0]
+        chk(f"чужому «{text}» — не меню со сводкой сервера", "AWG Toolza" not in shown and not keyboard(sent),
+            [n for n, _ in sent])
 
     group = Chat(id=-1001234, type="supergroup", title="Группа")
     mark = len(SESSION.sent)

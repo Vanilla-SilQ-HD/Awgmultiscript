@@ -30,7 +30,10 @@ fallback = Router()
 
 @fallback.message(F.text | F.document)
 async def _anything(msg: Message) -> None:
-    """Сообщение вне ввода — показать меню: кнопки удобнее команд."""
+    """Сообщение вне ввода — показать меню: кнопки удобнее команд.
+    Второй заслон после AccessMiddleware: сюда не должен попасть чужой."""
+    if msg.from_user is None or not access.authorized(msg.from_user.id):
+        return
     await main_menu.show_menu(msg)
 
 

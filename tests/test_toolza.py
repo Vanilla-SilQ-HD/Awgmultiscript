@@ -125,6 +125,13 @@ with open(EXIT, "w") as f:
     f.write("[Interface]\nPrivateKey = X\nAddress = 10.9.0.2/32\nDNS = 1.1.1.1\nTable = auto\n\n[Peer]\nEndpoint = 1.2.3.4:51820\nAllowedIPs = 0.0.0.0/0\n")
 rc, out, _ = bash(f'py exit-conf-fix "{EXIT}"; cat "{EXIT}"')
 chk("exit-нода: Table = off, без DNS", "Table = off" in out and "DNS" not in out and "Table = auto" not in out, out)
+# Хуки awg-quick выполняются bash от root — из чужого конфига (вставка, бот, бэкап) их быть не должно
+with open(EXIT, "w") as f:
+    f.write("[Interface]\nPrivateKey = X\nAddress = 10.9.0.2/32\nPostUp = touch /tmp/pwned\nPreDown = true\n"
+            "SaveConfig = true\n\n[Peer]\nEndpoint = 1.2.3.4:51820\nAllowedIPs = 0.0.0.0/0\n")
+rc, out, _ = bash(f'py exit-conf-fix "{EXIT}"; cat "{EXIT}"')
+chk("exit-нода: PostUp/PreDown/SaveConfig выброшены", "PostUp" not in out and "PreDown" not in out
+    and "SaveConfig" not in out and "Table = off" in out and "Endpoint = 1.2.3.4:51820" in out, out)
 
 # Пиры в записи wireguard-tools: «[Peer] # имя», «[peer]» с отступом, комментарий после значения
 LOOSE = os.path.join(TMP, "loose.conf")
@@ -430,6 +437,10 @@ r = api("exits", "add", "n1", stdin="")
 chk("stdin обязателен для exits add", r.get("ok") is False and "stdin" in r["error"], r)
 r = api("exits", "add", "n1", stdin="[Interface]\nPrivateKey = X\n")
 chk("конфиг ноды читается из stdin", r.get("ok") is False and "Endpoint" in r["error"], r)
+# cascade del: аргументы шли в grep -E как регулярка — «.*» вычищал весь файл правил
+r = api("cascade", "del", ".*", ".*")
+rules = api("cascade", "list").get("data") or []
+chk("api cascade del отвергает не порт", r.get("ok") is False and any(x["in"] == 4443 for x in rules), [r, rules])
 # Новый срок заблокированному клиенту возвращает адрес, а не оставляет его на 127.0.0.2
 api("client", "add", "erin", "mimicry=none")
 rc, out, _ = bash('py meta-set "$SERVER_CONF" erin expires 1; py expire-check "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$EXPIRE_STATE_DIR" >/dev/null; '
