@@ -9,6 +9,7 @@ from aiogram.types import CallbackQuery
 
 from .. import api, jobs, ui
 from ..ui import esc
+from .clients import NAME_RE
 
 router = Router()
 act = ui.Actions(router, "diag")
@@ -73,7 +74,8 @@ async def _dpi(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 @act("sniff")
 async def _sniff(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    rows = await api.data("diag", "sniff-list", default=[]) or []
+    # Имя не по правилам awg2 (старый бот, правка руками) не влезет в callback_data
+    rows = [r for r in (await api.data("diag", "sniff-list", default=[]) or []) if NAME_RE.match(r.get("name") or "")]
     if not rows:
         await ui.render(cb, "Нет клиентов, которые уже подключались. Подключись с устройства и вернись сюда.",
                         ui.kb(("🔄 Обновить", act.data("sniff")), ui.back("diag")))

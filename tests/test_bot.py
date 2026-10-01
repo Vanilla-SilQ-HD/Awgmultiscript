@@ -542,6 +542,24 @@ async def run():
     chk("заметка удалённого клиента убрана", store.note("ghost") == "", store.notes())
     chk("ни разу не подключавшийся клиент не даёт «офлайн»",
         not any(n == "SendMessage" and "офлайн" in (m.text or "") for n, m in SESSION.sent[mark:]))
+    # Пустой список клиентов: сервера нет (сброс, восстановление) — заметки остаются;
+    # сервер есть, но клиентов ноль (последнего удалили из меню awg2) — чистятся
+    conf_path = os.path.join(ROOT, "etc/amnezia/amneziawg/awg0.conf")
+    with open(conf_path) as f:
+        saved_conf = f.read()
+    store.set_note("ghost2", "#ping")
+    os.remove(conf_path)
+    await monitor.tick(BOT, {}, True)
+    chk("без сервера заметки не трогаются", store.note("ghost2") == "#ping" and store.note("alice") == "#ping",
+        store.notes())
+    with open(conf_path, "w") as f:
+        f.write(saved_conf[:saved_conf.index("[Peer]")])
+    await monitor.tick(BOT, {}, True)
+    chk("сервер без клиентов — заметки удалённых убраны", store.note("ghost2") == "" and store.note("alice") == "",
+        store.notes())
+    with open(conf_path, "w") as f:
+        f.write(saved_conf)
+    store.set_note("alice", "#ping")
 
     print("Все экраны")
     screens = ["srv", "mod", "srv:proto", "srv:par", "srv:ep", "srv:install", "srv:reset", "srv:reboot",

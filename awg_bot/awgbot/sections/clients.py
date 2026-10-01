@@ -44,6 +44,19 @@ def icon(c: dict) -> str:
 SORTS = {"activity": "по активности", "name": "по имени"}
 
 
+def usable(rows: list[dict]) -> tuple[list[dict], int]:
+    """Клиенты, чьё имя влезает в callback_data и не ломает его разбор, и
+    сколько отсеяно. awg2 даёт только [A-Za-z0-9_-]{1,32}, но конфиг старого
+    бота или правленный руками может нести любое имя: одно такое имя иначе
+    валило весь список ошибкой «callback_data длиннее 64 байт»."""
+    good = [c for c in rows if not c.get("name") or NAME_RE.match(c["name"])]
+    return good, len(rows) - len(good)
+
+
+def odd_note(n: int) -> str:
+    return f"\n\n⚠️ Ещё {n} с нестандартным именем — только через меню awg2" if n else ""
+
+
 def sort_rows(rows: list[dict], mode: str) -> list[dict]:
     if mode == "name":
         return sorted(rows, key=lambda c: c["name"].lower())
@@ -99,7 +112,8 @@ async def list_screen(target: ui.Target, page: int = 0) -> None:
         await ui.render(target, ui.fail(r, "Клиенты"), ui.kb(ui.back()))
         return
     mode = store.setting("clients_sort", "activity")
-    rows: list[dict] = sort_rows(r.data, mode)
+    good, odd = usable(r.data)
+    rows: list[dict] = sort_rows(good, mode)
     online = sum(1 for c in rows if c.get("online"))
     blocked = sum(1 for c in rows if c.get("blocked"))
     pages = max(1, (len(rows) + PAGE - 1) // PAGE)
@@ -107,7 +121,8 @@ async def list_screen(target: ui.Target, page: int = 0) -> None:
     text = (f"<b>👥 Клиенты: {len(rows)}</b> · 🟢 {online} онлайн"
             + (f" · 🚫 {blocked} заблок." if blocked else "")
             + ("\n\nКлиентов пока нет." if not rows else
-               f"\nСортировка: {SORTS.get(mode, mode)}\n\n🟢 онлайн · ⚪️ офлайн · 🚫 срок истёк · 🔔 мониторинг"))
+               f"\nСортировка: {SORTS.get(mode, mode)}\n\n🟢 онлайн · ⚪️ офлайн · 🚫 срок истёк · 🔔 мониторинг")
+            + odd_note(odd))
     notes = store.notes()
     buttons: list[ui.Button] = []
     for c in rows[page * PAGE:(page + 1) * PAGE]:
@@ -306,6 +321,7 @@ async def _pick_screen(target: ui.Target, state: FSMContext, page: int = 0) -> N
     if rows is None:
         await ui.render(target, "❌ Список клиентов не получен", ui.kb(ui.back("cl")))
         return
+    rows, odd = usable(rows)
     rows = sort_rows(rows, store.setting("clients_sort", "activity"))
     names = {c["name"] for c in rows}
     sel = [n for n in (await state.get_data()).get("del_sel") or [] if n in names]
@@ -313,7 +329,7 @@ async def _pick_screen(target: ui.Target, state: FSMContext, page: int = 0) -> N
     buttons = [(f"{'🗑' if c['name'] in sel else '⬜️'} {c['name']}", act.data("ds", f"{page}|{c['name']}"))
                for c in rows]
     await ui.render(target, "<b>🗑 Удалить клиентов</b>\nОтметь, кого удалить. Их конфиги перестанут работать.\n\n"
-                            + (f"Отмечено: {len(sel)}" if sel else "Никто не отмечен."),
+                            + (f"Отмечено: {len(sel)}" if sel else "Никто не отмечен.") + odd_note(odd),
                     ui.kb(ui.paged(buttons, page, lambda p: act.data("dsp", str(p))),
                           ("☑️ Отметить всех", act.data("dsa", "all")) if len(sel) < len(rows) else None,
                           ("⬜️ Снять все", act.data("dsa", "none")) if sel else None,
@@ -346,7 +362,7 @@ async def _dsel_toggle(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 @act("dsa")
 async def _dsel_all(cb: CallbackQuery, state: FSMContext, what: str) -> None:
-    rows = await clients() or []
+    rows, _ = usable(await clients() or [])
     await state.update_data(del_sel=[c["name"] for c in rows] if what == "all" else [])
     await _pick_screen(cb, state)
 

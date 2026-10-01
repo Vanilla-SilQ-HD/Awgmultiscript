@@ -16,7 +16,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup
 
 from . import api, store, ui
@@ -85,21 +85,61 @@ async def _edit(bot: Bot, chat_id: int, msg_id: int, text: str,
     """Правка сообщения задачи. False — сообщения больше нет."""
     for _ in range(3):
         try:
-            await bot.edit_message_text(ui.fit(text[:ui.TEXT_MAX], markup), chat_id=chat_id, message_id=msg_id,
+            await bot.edit_message_text(ui.fit(ui.clip(text), markup), chat_id=chat_id, message_id=msg_id,
                                         reply_markup=markup, disable_web_page_preview=True)
             return True
         except TelegramRetryAfter as e:
             await asyncio.sleep(min(int(e.retry_after) + 1, 30))
+        except TelegramNetworkError as e:
+            log.debug("правка сообщения задачи, сеть: %s", e)
+            await asyncio.sleep(2)
         except TelegramBadRequest as e:
             if "not modified" in str(e):
                 return True
             log.debug("правка сообщения задачи: %s", e)
             return False
-    return True
+    # Не дождались Telegram: по ходу задачи журнал догонит на следующем
+    # проходе, а итог уйдёт новым сообщением — лишь бы не потерялся.
+    return False
+
+
+DELIVER_TRIES, DELIVER_WAIT = 10, 30     # итог задачи: до ~5 минут ожидания сети
+
+
+async def _deliver(bot: Bot, chat_id: int, msg_id: int, body: str, markup: InlineKeyboardMarkup) -> None:
+    """Итог задачи обязан дойти: правим сообщение, нет его — шлём новое; сеть
+    лежит — ждём и пробуем снова. Не вышло — исключение, задача остаётся в
+    jobs.json, и resume() после перезапуска бота доставит итог."""
+    for attempt in range(1, DELIVER_TRIES + 1):
+        try:
+            if await _edit(bot, chat_id, msg_id, body, markup):
+                return
+            await ui.show_new(bot, chat_id, body, markup)
+            return
+        except TelegramNetworkError as e:
+            if attempt == DELIVER_TRIES:
+                raise
+            log.warning("итог задачи не доставлен (%s), повтор через %s с", e, DELIVER_WAIT)
+            await asyncio.sleep(DELIVER_WAIT)
 
 
 async def _follow(bot: Bot, job_id: str, chat_id: int, msg_id: int, title: str, back_to: str,
                   done: Done | None, started: int | None = None, ok_buttons: list | None = None) -> None:
+    """Слежение за задачей. Любая неожиданная ошибка (сеть, админ заблокировал
+    бота…) не должна молча убить задачу в фоне: экран чата снимается с ui.busy,
+    а сама задача остаётся в jobs.json — resume() после перезапуска доследит её
+    и доставит итог (awg2 хранит задачу три дня, дальше она станет «lost»)."""
+    try:
+        await _follow_inner(bot, job_id, chat_id, msg_id, title, back_to, done, started, ok_buttons)
+    except asyncio.CancelledError:
+        raise
+    except Exception:                                          # noqa: BLE001
+        log.exception("слежение за задачей %s прервано — доследим после перезапуска", job_id)
+        ui.busy.discard((chat_id, msg_id))
+
+
+async def _follow_inner(bot: Bot, job_id: str, chat_id: int, msg_id: int, title: str, back_to: str,
+                        done: Done | None, started: int | None, ok_buttons: list | None) -> None:
     started = started or int(time.time())
     offset, text, shown, last_edit, errors = 0, "", "", 0.0, 0
     head = f"<b>{ui.esc(title)}</b>"
@@ -127,7 +167,6 @@ async def _follow(bot: Bot, job_id: str, chat_id: int, msg_id: int, title: str, 
                 shown, last_edit = body, time.monotonic()
             continue
 
-        store.job_done(job_id)
         ui.busy.discard((chat_id, msg_id))
         if st.get("state") == "lost":
             body = (f"⚠️ {head}\nЗадача прервана: awg2 остановлен или сервер перезагружен.\n"
@@ -139,8 +178,10 @@ async def _follow(bot: Bot, job_id: str, chat_id: int, msg_id: int, title: str, 
                     + ui.pre(_tail(text, 20), 3000))
         extra = [tuple(b) for b in ok_buttons or []] if st.get("ok") else []
         markup = ui.kb(extra, ui.back(back_to))
-        if not await _edit(bot, chat_id, msg_id, body, markup):
-            await ui.show_new(bot, chat_id, body, markup)
+        await _deliver(bot, chat_id, msg_id, body, markup)
+        # Задача закрыта только после доставки итога: не дошёл — она остаётся
+        # в jobs.json, и resume() после перезапуска доставит его.
+        store.job_done(job_id)
         if done and st.get("ok"):
             try:
                 await done(bot, chat_id, st)

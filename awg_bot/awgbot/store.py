@@ -54,6 +54,8 @@ def save(path: Path, data: dict) -> bool:
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w") as f:
                 json.dump(data, f, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, path)
         except BaseException:
             Path(tmp).unlink(missing_ok=True)

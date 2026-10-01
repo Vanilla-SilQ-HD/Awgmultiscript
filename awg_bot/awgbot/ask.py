@@ -65,7 +65,7 @@ async def ask(target: ui.Target, state: FSMContext, key: str, prompt: str, back_
 
 async def retry(msg: Message, state: FSMContext, ctx: Ctx, why: str) -> None:
     """Неверный ввод: объяснить и спросить то же самое ещё раз."""
-    await ask(msg, state, ctx.key, f"⚠️ {why}\n\n{ctx.prompt}", ctx.back,
+    await ask(msg, state, ctx.key, f"⚠️ {ui.esc(why)}\n\n{ctx.prompt}", ctx.back,
               [tuple(b) for b in ctx.buttons], **ctx.data)
 
 
