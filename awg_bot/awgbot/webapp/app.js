@@ -200,7 +200,7 @@ function drawTop(compact = false) {
   const dark = document.documentElement.dataset.theme === "dark";
   const beta = S.channel === "beta";
   // Открыли в браузере, без Telegram: разделы и настройки вида всё равно не
-  // откроются — в шапке только щит и название
+  // откроются — в шапке щит, название и «Поддержать»
   const inTg = !!(tg && tg.initData), home = inTg ? () => go("/") : null;
   topEl.className = "top";
   topEl.replaceChildren(...[
@@ -210,12 +210,16 @@ function drawTop(compact = false) {
       S.version ? h("span", {}, S.version, beta && compact ? h("span", { class: "warn" }, " β") : null) : null),
     beta && !compact ? pill("бета", "warn chan") : null,
     h("div", { class: "sp" }),
-    ...(inTg ? topButtons(dark) : []),
+    ...(inTg ? topButtons(dark) : [supportButton()]),
   ].filter(Boolean));
   // Запас в 1px — под масштабом ширины округляются и дают ложное «не влезает»
   const ver = topEl.querySelector(".ver");
   if (beta && !compact && ver && [...ver.children].some((c) => c.scrollWidth - c.clientWidth > 1)) drawTop(true);
 }
+
+const supportButton = () => h("button", { "aria-label": "Поддержать", title: "Поддержать", onclick: () => {
+  if (tg && tg.initData && tg.openTelegramLink) tg.openTelegramLink(SUPPORT_URL); else window.open(SUPPORT_URL, "_blank");
+} }, icon("heart"));
 
 function topButtons(dark) {
   return [
@@ -224,9 +228,7 @@ function topButtons(dark) {
       const t = dark ? "light" : "dark";
       setPref("theme", t); applyTheme(t); drawTop();
     } }, icon(dark ? "sun" : "moon")),
-    h("button", { "aria-label": "Поддержать", title: "Поддержать", onclick: () => {
-      if (tg && tg.openTelegramLink) tg.openTelegramLink(SUPPORT_URL); else window.open(SUPPORT_URL, "_blank");
-    } }, icon("heart")),
+    supportButton(),
     h("button", { "aria-label": "Разделы", title: "Разделы", onclick: async () => {
       const path = await sheet("Разделы", [{ label: "💬 Меню бота в чат", value: "chat" },
         ...SECTIONS.filter((x) => x[2]).map(([ic, t, p]) => ({ label: `${ic} ${t}`, value: p }))]);
