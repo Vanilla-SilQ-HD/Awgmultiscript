@@ -2248,7 +2248,14 @@ if (tg) {
 window.addEventListener("hashchange", render);
 drawTop();
 if (!tg || !tg.initData) {
-  root.replaceChildren(h("div", { class: "empty" }, "Открой панель кнопкой в боте"));
+  // Адрес открыли в браузере: панель живёт в Telegram — кнопка открыть его.
+  // Имени бота здесь нет: без подписи страница о сервере не говорит ничего
+  root.replaceChildren(h("div", { class: "card open-tg" },
+    h("div", { class: "ibox" }, icon("shield-check")),
+    h("h3", {}, "Панель открывается в Telegram"),
+    h("div", { class: "muted" }, "В чате с ботом — кнопка «Меню» слева от поля ввода."),
+    h("a", { class: "btn btn-primary btn-block", href: "tg://" }, icon("send"), "Открыть Telegram"),
+    h("a", { class: "muted small", href: "https://web.telegram.org/", target: "_blank", rel: "noopener" }, "или Telegram Web")));
 } else {
   render();
   // Версия в шапке — для экранов, открытых не с главной
