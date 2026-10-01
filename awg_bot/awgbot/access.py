@@ -4,7 +4,8 @@
 admins.json. Бот — это root на сервере, поэтому проверка стоит одним слоем
 на входе диспетчера, а не в каждом обработчике: кнопка, где забыли бы
 проверку, была бы дырой. Мимо проверки проходит только /start — через него
-приходят приглашения и подсказка «твой ID».
+приходят приглашения и подсказка «твой ID». Группы и каналы бот не слушает
+вовсе, даже владельца: отвечает только в личных сообщениях.
 """
 
 from __future__ import annotations
@@ -50,6 +51,13 @@ class AccessMiddleware(BaseMiddleware):
                        event: TelegramObject, data: dict[str, Any]) -> Any:
         user = data.get("event_from_user")
         uid = user.id if user else 0
+        # Только личка: в группе конфиги, ключи и QR увидели бы все участники
+        chat = data.get("event_chat")
+        if getattr(chat, "type", None) != "private":
+            if isinstance(event, CallbackQuery):
+                await event.answer("Бот работает только в личных сообщениях", show_alert=True)
+            log.info("Не личный чат — пропущено: %s (%s)", getattr(chat, "id", "—"), getattr(chat, "type", "—"))
+            return None
         if authorized(uid):
             return await handler(event, data)
         if isinstance(event, Message) and (event.text or "").startswith("/start"):

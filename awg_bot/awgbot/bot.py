@@ -16,7 +16,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
-from aiogram.types import BotCommand, CallbackQuery, ErrorEvent, Message
+from aiogram.types import BotCommand, CallbackQuery, ChatMemberUpdated, ErrorEvent, Message
 
 from . import __version__, access, admins, api, ask, icons, jobs, monitor, net, store, ui, webapp
 from .config import load_config
@@ -39,6 +39,15 @@ async def _stale(cb: CallbackQuery) -> None:
     await cb.answer("Кнопка устарела — открой меню заново: /start", show_alert=True)
 
 
+async def _leave_groups(upd: ChatMemberUpdated) -> None:
+    """Бота добавили в группу или канал — выходит сам: работает он только в
+    личке (access), а в группе его ответы увидели бы все участники."""
+    if upd.chat.type != "private" and upd.new_chat_member.status in ("member", "administrator", "restricted"):
+        log.warning("Бота добавили в %s %s (%s) — выхожу", upd.chat.type, upd.chat.id, upd.chat.title or "—")
+        with contextlib.suppress(Exception):
+            await upd.bot.leave_chat(upd.chat.id)  # type: ignore[union-attr]
+
+
 async def _on_error(event: ErrorEvent) -> None:
     log.exception("Ошибка обработки: %s", event.exception, exc_info=event.exception)
     cb = event.update.callback_query
@@ -59,6 +68,7 @@ def build(session: BaseSession | None = None) -> tuple[Bot, Dispatcher]:
     guard = access.AccessMiddleware()
     dp.message.outer_middleware(guard)
     dp.callback_query.outer_middleware(guard)
+    dp.my_chat_member.register(_leave_groups)
     dp.errors.register(_on_error)
     dp.include_routers(main_menu.router, ask.router, server.router, clients.router, diag.router,
                        backup.router, tunnels.router, botself.router, system.router, wgobf.router, fallback)

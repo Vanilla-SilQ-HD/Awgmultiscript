@@ -22,9 +22,9 @@ from ..ui import esc
 
 router = Router()
 act = ui.Actions(router, "botm")
-adm = ui.Actions(router, "adm")
-look = ui.Actions(router, "look")
-app = ui.Actions(router, "app")
+adm = ui.Actions(router, "adm", owner="Список админов правит только владелец")
+look = ui.Actions(router, "look", owner="Оформление меняет только владелец")
+app = ui.Actions(router, "app", owner="Mini App настраивает только владелец")
 
 
 @act()
@@ -286,9 +286,6 @@ async def _look_screen(target: ui.Target, verdict: str = "") -> None:
 
 @look()
 async def look_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
-    if not access.is_owner(cb.from_user.id):
-        await cb.answer("Оформление меняет только владелец", show_alert=True)
-        return
     await _look_screen(cb)
 
 
