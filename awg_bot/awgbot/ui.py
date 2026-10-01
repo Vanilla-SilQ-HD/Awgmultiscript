@@ -21,7 +21,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
                            Message, WebAppInfo)
 
-from . import api, icons
+from . import access, api, icons
 
 log = logging.getLogger("awgbot.ui")
 
@@ -350,10 +350,12 @@ class Actions:
     """Колбэки раздела вида «префикс:действие:аргумент» → функции
     (cb, state, аргумент). Пустое действие — экран самого раздела.
     Любое нажатие отменяет незаконченный ввод текста; данные мастеров
-    (ключи FSM) при этом остаются."""
+    (ключи FSM) при этом остаются. owner — раздел только для владельцев:
+    проверка на входе раздела, а не в каждой кнопке (с текстом отказа)."""
 
-    def __init__(self, router: Router, prefix: str) -> None:
+    def __init__(self, router: Router, prefix: str, owner: str = "") -> None:
         self.prefix = prefix
+        self.owner = owner
         self.table: dict[str, Handler] = {}
         router.callback_query.register(
             self._dispatch, F.data.func(lambda d: d == prefix or d.startswith(prefix + ":")))
@@ -377,6 +379,9 @@ class Actions:
         fn = self.table.get(act)
         if fn is None:
             await cb.answer("Кнопка устарела — открой меню заново", show_alert=True)
+            return
+        if self.owner and not access.is_owner(cb.from_user.id):
+            await cb.answer(self.owner, show_alert=True)
             return
         if await state.get_state() is not None:
             await state.set_state(None)

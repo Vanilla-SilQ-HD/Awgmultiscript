@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-ffffff?style=flat-square&labelColor=000000)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Ubuntu%2024%20%2F%20Debian%2012%2B-E95420?style=flat-square&logo=ubuntu&logoColor=white)](https://ubuntu.com/)
 [![Protocol](https://img.shields.io/badge/AWG-2.0%20%2F%203.1-00d4ff?style=flat-square)](#)
-[![Version](https://img.shields.io/badge/version-v1.1.3-ff6b00?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v1.1.4-ff6b00?style=flat-square)](#)
 
 <br>
 
@@ -250,7 +250,9 @@ tun2socks, exit-ноды, каскад, шифрованный DNS, WG + обф�
   показывает живой журнал в сообщении и итог. Задача переживает перезапуск бота
   — так бот обновляет и перезапускает сам себя.
 - Доступ: владельцы (`ADMIN_ID` в `/etc/awg-bot.conf`) и приглашённые админы —
-  одноразовая ссылка на 15 минут. Списком админов управляет только владелец.
+  одноразовая ссылка на 15 минут. Списком админов, оформлением и Mini App
+  управляет только владелец. Бот работает только в личных сообщениях: в
+  группах молчит, а если его туда добавили — выходит сам.
 - Оформление: цветные кнопки — зелёные создают и включают, красные удаляют,
   синие отмечают главное действие. Монохромные иконки (custom emoji) вместо
   эмодзи включаются в **Telegram-бот → 🎨 Оформление**: набор по ссылке
@@ -390,6 +392,6 @@ python3 tests/test_admins.py && python3 tests/test_net.py
 
 *Сообщество [AWG-Toolza](https://t.me/awgToolza)*
 
-**AWG Toolza v1.1.3** · MIT License
+**AWG Toolza v1.1.4** · MIT License
 
 </div>

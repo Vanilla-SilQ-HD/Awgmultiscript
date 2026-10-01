@@ -22,9 +22,9 @@ from ..ui import esc
 
 router = Router()
 act = ui.Actions(router, "botm")
-adm = ui.Actions(router, "adm")
-look = ui.Actions(router, "look")
-app = ui.Actions(router, "app")
+adm = ui.Actions(router, "adm", owner="Список админов правит только владелец")
+look = ui.Actions(router, "look", owner="Оформление меняет только владелец")
+app = ui.Actions(router, "app", owner="Mini App настраивает только владелец")
 
 
 @act()
@@ -284,19 +284,8 @@ async def _look_screen(target: ui.Target, verdict: str = "") -> None:
         ui.back("botm")))
 
 
-async def _owner_look(cb: CallbackQuery) -> bool:
-    """Оформление — только владельцу. Проверка на каждом действии: callback_data
-    подделывается из любого клиента Telegram, экран её не заменяет."""
-    if access.is_owner(cb.from_user.id):
-        return True
-    await cb.answer("Оформление меняет только владелец", show_alert=True)
-    return False
-
-
 @look()
 async def look_screen(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
-    if not await _owner_look(cb):
-        return
     await _look_screen(cb)
 
 
@@ -321,8 +310,6 @@ async def _try_icons(target: ui.Target, pack: str, mapping: dict[str, str]) -> N
 
 @look("pack")
 async def _look_pack(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    if not await _owner_look(cb):
-        return
     await ask.ask(cb, state, "look_pack", "Ссылка на набор эмодзи: <code>t.me/addemoji/ИМЯ</code> или просто имя.\n"
                                           "<i>Иконки сопоставятся с эмодзи бота по эмодзи, привязанным к ним в "
                                           "наборе (или похожим); остальные останутся обычными.</i>", look.data(),
@@ -345,8 +332,6 @@ async def pack_icons(bot, name: str) -> tuple[str, dict[str, str]]:  # type: ign
 
 @ask.on("look_pack")
 async def _look_pack_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
-    if msg.from_user is None or not access.is_owner(msg.from_user.id):
-        return
     m = PACK_RE.search(ask.text_of(msg))
     if not m:
         await ask.retry(msg, state, ctx, "Нужна ссылка вида t.me/addemoji/ИМЯ")
@@ -360,8 +345,6 @@ async def _look_pack_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> No
 
 @look("pk")
 async def _look_pack_btn(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    if not await _owner_look(cb):
-        return
     name, mapping = await pack_icons(cb.bot, arg)
     if not mapping:
         await ui.render(cb, f"❌ {esc(name)}", ui.kb(ui.back(look.data())))
@@ -371,8 +354,6 @@ async def _look_pack_btn(cb: CallbackQuery, state: FSMContext, arg: str) -> None
 
 @look("own")
 async def _look_own(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    if not await _owner_look(cb):
-        return
     await ask.ask(cb, state, "look_own",
                   "Пришли одним сообщением иконки (custom emoji) по порядку — для этих эмодзи бота:\n\n"
                   + " ".join(icons.TEMPLATE)
@@ -382,8 +363,6 @@ async def _look_own(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 @ask.on("look_own")
 async def _look_own_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
-    if msg.from_user is None or not access.is_owner(msg.from_user.id):
-        return
     own = icons.from_message(msg.text or "", msg.entities or [])
     if not own:
         await ask.retry(msg, state, ctx, "В сообщении нет custom emoji — их отправляют с Telegram Premium")
@@ -395,8 +374,6 @@ async def _look_own_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> Non
 
 @look("on")
 async def _look_on(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    if not await _owner_look(cb):
-        return
     if icons.mapping():
         await _try_icons(cb, icons.pack(), icons.mapping())
     else:
@@ -405,8 +382,6 @@ async def _look_on(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 @look("off")
 async def _look_off(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    if not await _owner_look(cb):
-        return
     icons.disable("выключены владельцем")
     await _look_screen(cb, "Иконки выключены — снова обычные эмодзи.")
 
