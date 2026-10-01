@@ -44,10 +44,14 @@ async def _stale(cb: CallbackQuery) -> None:
 
 async def _on_error(event: ErrorEvent) -> None:
     log.exception("Ошибка обработки: %s", event.exception, exc_info=event.exception)
-    cb = event.update.callback_query
-    if cb is not None:
-        with contextlib.suppress(Exception):
+    cb, msg = event.update.callback_query, event.update.message
+    with contextlib.suppress(Exception):
+        if cb is not None:
             await cb.answer("Ошибка — подробности в журнале бота", show_alert=True)
+        elif msg is not None and msg.from_user is not None and access.authorized(msg.from_user.id):
+            # Ответ на ввод (ask.on): состояние уже снято, без сообщения
+            # пользователь остался бы перед исчезнувшим вопросом.
+            await msg.answer("❌ Ошибка — подробности в журнале бота", reply_markup=ui.kb(ui.HOME))
 
 
 def build(session: BaseSession | None = None) -> tuple[Bot, Dispatcher]:

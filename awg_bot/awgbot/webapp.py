@@ -107,10 +107,10 @@ class MiniApp:
         """Поднять сервер, если есть сертификат и порт; иначе — причина в
         error. Кнопка «Меню» админов — вслед за сервером."""
         self.bot = bot
-        was = self.url
         await self._serve(bot)
-        if self.url != was or self.running:
-            await self.menu_all(bot)
+        # Всегда: если сервер не поднялся (нет сертификата, порт занят), у
+        # админов иначе остаётся кнопка «Меню» на мёртвый адрес с прошлого раза.
+        await self.menu_all(bot)
 
     async def _serve(self, bot: Bot) -> None:
         await self.stop()
@@ -140,7 +140,8 @@ class MiniApp:
             await web.TCPSite(self.runner, "0.0.0.0", port, ssl_context=self.ctx).start()
         except (OSError, ssl.SSLError) as e:
             await self.stop()
-            self.error = f"порт {port}: {e.strerror or e}" if isinstance(e, OSError) else f"сертификат: {e}"
+            # ssl.SSLError — подкласс OSError, поэтому проверяем его первым
+            self.error = f"сертификат: {e}" if isinstance(e, ssl.SSLError) else f"порт {port}: {e.strerror or e}"
             log.warning("Mini App не запущена: %s", self.error)
             return
         self.url = f"https://{host}" + ("" if port == 443 else f":{port}") + "/"

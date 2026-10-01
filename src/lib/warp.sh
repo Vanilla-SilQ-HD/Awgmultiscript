@@ -97,7 +97,9 @@ warp_license_set() {  # ключ
     unlimited|limited|premium) ok "Warp+ активирован ($type)"; echo "$type" > "$WARP_DIR/account_type" ;;
     *) warn "Ключ применён, но Warp+ не активен (${type:-тип неизвестен})"; rm -f "$WARP_DIR/account_type" ;;
   esac
-  _wgcf_generate && warp_is_up && info "Туннель работает на старом профиле — перезапусти его"
+  _wgcf_generate || return 1
+  warp_is_up && info "Туннель работает на старом профиле — перезапусти его"
+  return 0
 }
 
 # Импорт готового wgcf-profile.conf (регистрация с сервера не проходит).
@@ -290,6 +292,7 @@ warp_up() {
     sleep 2
   done
   _warp_state_write "$be"
+  rm -f "$WARP_STATE.failed"
   [[ "$be" == wg ]] && _warp_autostart_install
   ok "WARP включён: клиентов через туннель — $(grep -c . "$WARP_PEERS" || true)"
   info "SSH и трафик самого сервера идут напрямую"
@@ -319,7 +322,10 @@ warp_health_run() {
   echo "$(date '+%F %T') FAIL $n/3" >> "$WARP_HEALTH_LOG"
   (( n >= 3 )) || exit 0
   rt_down "$WARP_IF" "$WARP_TABLE"
-  [[ "$(cat "$WARP_BACKEND_FILE" 2>/dev/null)" == usque ]] || ip link del "$WARP_IF" 2>/dev/null
+  # usque держит warp0 сам: гасим службу, иначе warp_is_up остаётся истинным,
+  # warp_up отвечает «уже включён», а хук usque при реконнекте вернёт правила.
+  if [[ "$(cat "$WARP_BACKEND_FILE" 2>/dev/null)" == usque ]]; then systemctl stop awg-usque.service 2>/dev/null
+  else ip link del "$WARP_IF" 2>/dev/null; fi
   echo failed > "$WARP_STATE.failed"
   echo "$(date '+%F %T') FAILOVER: клиенты идут напрямую" >> "$WARP_HEALTH_LOG"
 }
@@ -433,6 +439,8 @@ warp_set_backend() {  # wg|usque — с установкой, если нужн�
   if ! "warp_${target}_install"; then
     err "Установка $target не удалась — возвращаю $cur"
     echo "$cur" | write_file "$WARP_BACKEND_FILE" 644
+    (( was_up )) && warp_up
+    return 1
   fi
   (( was_up )) && warp_up
   ok "Бэкенд WARP: $(warp_backend)"

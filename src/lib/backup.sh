@@ -105,8 +105,15 @@ _restore_prepare() {
 }
 
 _restore_awg_files() {  # каталог бэкапа
-  local src="$1" f
+  local src="$1" f keep
   install -D -m 600 "$src/awg0.conf" "$SERVER_CONF"
+  # Конфиги клиентов, которых нет в восстановленном awg0.conf, иначе остаются
+  # сиротами: видны в «Показать конфиг», занимают имя и попадают в архив.
+  # Конфиги пиров, которые в awg0 есть, не трогаем: бэкап мог прийти без них.
+  keep=" $(clients_tsv | cut -f1 | tr '\n' ' ') "
+  for f in "$CLIENT_DIR"/*_awg[23].conf; do
+    [[ -f "$f" && "$keep" != *" $(client_name_of "$f") "* ]] && rm -f "$f"
+  done
   while IFS= read -r -d '' f; do
     rm -f "$CLIENT_DIR/$(client_name_of "$f")"_awg[23].conf
     install -m 600 "$f" "$CLIENT_DIR/${f##*/}"

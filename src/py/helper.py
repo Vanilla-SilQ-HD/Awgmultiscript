@@ -27,7 +27,10 @@ def die(msg, code=1):
 
 
 def read(path):
-    with open(path, encoding="utf-8") as f:
+    # surrogateescape: один не-UTF-8 байт в правленном руками конфиге иначе
+    # останавливал все команды (peers, expire-check…), а байты так проходят
+    # через чтение и запись без изменений.
+    with open(path, encoding="utf-8", errors="surrogateescape") as f:
         return f.read()
 
 
@@ -35,7 +38,7 @@ def write_atomic(path, text, mode=0o600):
     d = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".awg2.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as f:
             f.write(text)
         os.chmod(tmp, mode)
         os.replace(tmp, path)
@@ -52,7 +55,10 @@ def write_atomic(path, text, mode=0o600):
 # (mimicry, expires, orig_ips, note — последнюю пишет бот). Имя клиента —
 # первый комментарий без «=»: валидатор имён этот знак не пропускает.
 
-PEER_SPLIT = re.compile(r"(?=^\[Peer\][ \t]*$)", re.M)
+# Как парсер wireguard-tools: заголовок и ключи без учёта регистра, с
+# пробелами по краям и комментарием «# …» в конце строки — такой пир живой
+# для awg, значит и для нас.
+PEER_SPLIT = re.compile(r"(?=^[ \t]*\[[ \t]*peer[ \t]*\][ \t]*(?:#.*)?$)", re.M | re.I)
 
 
 def split_peers(text):
@@ -69,7 +75,7 @@ def peer_name(block):
 
 
 def peer_field(block, key):
-    m = re.search(r"^%s\s*=\s*(.+?)\s*$" % re.escape(key), block, re.M)
+    m = re.search(r"^[ \t]*%s[ \t]*=[ \t]*([^#\r\n]*?)[ \t]*(?:#.*)?$" % re.escape(key), block, re.M | re.I)
     return m.group(1) if m else ""
 
 
@@ -400,7 +406,7 @@ def cmd_i_replace(path):
     for line in read(path).split("\n"):
         if re.match(r"^I[1-5]\s*=", line):
             continue
-        if line.startswith("[Peer]") and not inserted:
+        if PEER_SPLIT.match(line) and not inserted:
             while out and out[-1] == "":
                 out.pop()
             out.extend(lines)
@@ -428,7 +434,7 @@ def cmd_expire_clear(conf, name, suspend):
     b = peers[i]
     orig = peer_meta(b, "orig_ips")
     if orig and peer_field(b, "AllowedIPs") == suspend:
-        b = re.sub(r"^(AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + orig, b, count=1, flags=re.M)
+        b = re.sub(r"^([ \t]*AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + orig, b, count=1, flags=re.M | re.I)
     b = set_meta(set_meta(b, "expires", ""), "orig_ips", "")
     peers[i] = b
     write_atomic(conf, head + "".join(peers))
@@ -455,7 +461,7 @@ def cmd_expire_check(conf, suspend, state_dir):
         if now >= exp and aip != suspend:
             if not peer_meta(b, "orig_ips"):
                 b = set_meta(b, "orig_ips", aip)
-            b = re.sub(r"^(AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + suspend, b, count=1, flags=re.M)
+            b = re.sub(r"^([ \t]*AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + suspend, b, count=1, flags=re.M | re.I)
             peers[i] = b
             changed = True
             events.append("EXPIRED\t%s\t%s" % (name, aip))
@@ -666,6 +672,8 @@ def cmd_xray_link(link):
     elif link.startswith("vmess://"):
         raw = link[8:]
         data = json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8"))
+        if not isinstance(data, dict):
+            die("vmess: внутри ссылки ожидался JSON-объект")
 
         def get(k):
             v = data.get(k)
@@ -1020,6 +1028,12 @@ def _typed(val, typ):
     return val
 
 
+def _stdin_lines():
+    """Строки stdin по \\n. splitlines() делил бы и по \\r, \\x1c-\\x1e, U+2028 —
+    и свободный текст (комментарий, команда задачи) распадался на две строки."""
+    return [l[:-1] if l.endswith("\r") else l for l in sys.stdin.read().split("\n")]
+
+
 def _split_key(key):
     name, _, typ = key.partition(":")
     return name, typ or "s"
@@ -1028,7 +1042,7 @@ def _split_key(key):
 def cmd_json_kv():
     """Строки «ключ[:тип]<TAB>значение» → объект; точки в ключе — вложенность."""
     out = {}
-    for line in sys.stdin.read().splitlines():
+    for line in _stdin_lines():
         if "\t" not in line:
             continue
         key, val = line.split("\t", 1)
@@ -1045,7 +1059,7 @@ def cmd_json_rows(*cols):
     """Строки TSV → список объектов по колонкам «имя[:тип]»."""
     spec = [_split_key(c) for c in cols]
     rows = []
-    for line in sys.stdin.read().splitlines():
+    for line in _stdin_lines():
         if not line:
             continue
         vals = line.split("\t")
@@ -1056,7 +1070,7 @@ def cmd_json_rows(*cols):
 
 def cmd_json_list():
     """Непустые строки stdin → JSON-массив строк."""
-    print(json.dumps([l for l in sys.stdin.read().splitlines() if l], ensure_ascii=False))
+    print(json.dumps([l for l in _stdin_lines() if l], ensure_ascii=False))
 
 
 def _peers_list(path):
@@ -1290,6 +1304,8 @@ COMMANDS = {
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
         die("команда: " + ", ".join(sorted(COMMANDS)))
+    # Байты не-UTF-8 из конфига (surrogateescape в read) печатаем как «?», а не падаем
+    sys.stdout.reconfigure(errors="replace")
     try:
         COMMANDS[sys.argv[1]](*sys.argv[2:])
     except TypeError as e:

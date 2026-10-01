@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.1.2"
+VERSION="v1.1.3"
 
 # ═════ core ═════
 # Базовые примитивы: вывод, ввод, журнал, временные файлы, случайные числа,
@@ -157,8 +157,16 @@ pause() {
 # провале показывает хвост именно этого шага.
 _RUN_STEP_PID=""
 
+# Фоновый сабшелл шага не передаёт SIGINT детям (apt-get, dkms, make):
+# убиваем дерево целиком, иначе сборка продолжается после «Прервано».
+_kill_tree() {
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do _kill_tree "$c"; done
+  kill -TERM "$1" 2>/dev/null
+}
+
 _run_step_abort() {
-  [[ -n "$_RUN_STEP_PID" ]] && kill "$_RUN_STEP_PID" 2>/dev/null
+  [[ -n "$_RUN_STEP_PID" ]] && _kill_tree "$_RUN_STEP_PID"
   printf '\r\033[K\n'
   warn "Прервано пользователем"
   exit 130
@@ -319,6 +327,7 @@ TOOLS_TAG_FILE="$STATE_DIR/tools_tag"
 MOD_BACKUP_DIR="/var/backups/awg-mod"
 MOD_LOG="/var/log/awg-mod-update.log"
 MOD_FALLBACK_TAG="v3.1.20260906"
+TOOLS_FALLBACK_TAG="v3.1.20260812"
 UPSTREAM_CACHE="$STATE_DIR/upstream_tags"
 UPSTREAM_TTL=21600
 
@@ -691,10 +700,11 @@ valid_ip() {
 valid_cidr() {
   [[ "$1" == */* ]] || return 1
   local mask="${1#*/}"
-  valid_ip "${1%/*}" && [[ "$mask" =~ ^[0-9]{1,2}$ ]] && (( mask <= 32 ))
+  valid_ip "${1%/*}" && [[ "$mask" =~ ^[0-9]{1,2}$ ]] && (( 10#$mask <= 32 ))
 }
 
-valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
+# 10#: «0080» — не восьмеричное и не ошибка арифметики.
+valid_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 
 # Имя хоста (не IP): метки из букв, цифр и дефисов, минимум одна точка.
 valid_domain() {
@@ -852,7 +862,15 @@ conf_marker_set() {
   [[ -f "$SERVER_CONF" ]] || return 1
   conf_marker_del "$key"
   [[ -n "$val" ]] || return 0
-  sed -i "1a # ${key}=${val}" "$SERVER_CONF"
+  # Метка — в шапке перед первой секцией. «1a» ставила бы её на вторую
+  # строку, а если файл начинается с [Interface] — внутрь секции, где
+  # conf_marker её не видит.
+  val="${val//\\/\\\\}"; val="${val//&/\\&}"; val="${val//|/\\|}"
+  if grep -q '^\[' "$SERVER_CONF"; then
+    sed -i "0,/^\[/s|^\[|# ${key}=${val}\n[|" "$SERVER_CONF"
+  else
+    echo "# ${key}=${val}" >> "$SERVER_CONF"
+  fi
 }
 
 conf_marker_del() { [[ -f "$SERVER_CONF" ]] && sed -i "/^# ${1}=/d" "$SERVER_CONF"; return 0; }
@@ -914,8 +932,8 @@ server_net() {
   valid_cidr "$addr" || return 1
   ip="${addr%/*}"; mask="${addr#*/}"
   IFS=. read -r a b c d <<< "$ip"
-  n=$(( (a << 24) | (b << 16) | (c << 8) | d ))
-  m=$(( mask == 0 ? 0 : (0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF ))
+  n=$(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d ))
+  m=$(( 10#$mask == 0 ? 0 : (0xFFFFFFFF << (32 - 10#$mask)) & 0xFFFFFFFF ))
   n=$(( n & m ))
   echo "$(( n >> 24 & 255 )).$(( n >> 16 & 255 )).$(( n >> 8 & 255 )).$(( n & 255 ))/$mask"
 }
@@ -972,14 +990,17 @@ client_files_sync_suffix() {
 
 # Клиенты сервера: строки «имя<TAB>ключ<TAB>AllowedIPs<TAB>expires<TAB>orig_ips<TAB>mimicry».
 clients_tsv() { server_exists || return 0; py peers "$SERVER_CONF"; }
+# То же через «|»: табуляция для read — пробельный разделитель, подряд идущие
+# табы схлопываются, и пустые колонки (срок, orig_ips) сдвигают соседние.
+clients_psv() { clients_tsv | tr '\t' '|'; }
 
 # «имя|ip» для меню туннелей — только клиенты с именем.
 clients_name_ip() {
   local name aip _
-  while IFS=$'\t' read -r name _ aip _ _ _; do
+  while IFS='|' read -r name _ aip _ _ _; do
     [[ -n "$name" && -n "$aip" ]] || continue
     echo "${name}|${aip%%/*}"
-  done < <(clients_tsv)
+  done < <(clients_psv)
 }
 
 client_exists() { clients_tsv | awk -F'\t' -v n="$1" '$1 == n {f = 1} END {exit !f}'; }
@@ -1408,6 +1429,7 @@ tools_install_tag() {
   fi
   run_step "Сборка amneziawg-tools $tag" _tools_build_install "$tmp/tools/src" || return 1
   hash -r
+  mkdir -p "$STATE_DIR"
   echo "$tag" > "$TOOLS_TAG_FILE"
   _PROTO_PROBE=()
   ok "amneziawg-tools: $(tools_version)"
@@ -1421,7 +1443,7 @@ resolve_tag() {  # mod|tools
     upstream_refresh >/dev/null 2>&1 || true
     echo "$t"
   elif [[ "$1" == mod ]]; then echo "$MOD_FALLBACK_TAG"
-  else echo "v3.1.20260812"; fi
+  else echo "$TOOLS_FALLBACK_TAG"; fi
 }
 
 mod_autoload() {
@@ -1982,7 +2004,10 @@ choose_cps_domain() {
       warn "Не похоже на домен"
     done
   fi
-  mimicry_pool_domain
+  # STUN/WebRTC без своего домена обходятся адресами ICE-провайдера — как
+  # в mimicry_from_spec; пул TLS-доменов им не подставляем.
+  _profile_needs_domain "$MIMICRY" && mimicry_pool_domain
+  return 0
 }
 
 # Случайный доступный домен из встроенного пула профиля → CPS_DOMAIN.
@@ -2362,6 +2387,7 @@ _choose_dns() {
     3) S_DNS="9.9.9.9, 149.112.112.112" ;; 4) S_DNS="77.88.8.8, 77.88.8.1" ;;
     5) while true; do
          read_line d "${C}  DNS через запятую: ${N}"
+         [[ -n "$d" ]] || { S_DNS="1.1.1.1, 1.0.0.1"; break; }
          [[ "$d" =~ ^[0-9.,[:space:]]+$ ]] && { S_DNS="$d"; break; }
          warn "Нужны IPv4-адреса через запятую"
        done ;;
@@ -2381,6 +2407,7 @@ _choose_mtu() {  # $1 — значение по умолчанию
     1) MTU=$1 ;; 2) MTU=1420 ;; 3) MTU=1380 ;; 4) MTU=1320 ;; 5) MTU=1280 ;;
     6) while true; do
          read_line v "${C}  MTU (1280-1500): ${N}"
+         [[ -n "$v" ]] || { MTU=$1; break; }
          [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1280 && v <= 1500 )) && { MTU=$v; break; }
          warn "Число 1280-1500"
        done ;;
@@ -2448,6 +2475,7 @@ _choose_net() {
   fi
   while true; do
     read_line v "${C}  Подсеть вида 10.8.0.0/24: ${N}"
+    [[ -n "$v" ]] || { warn "Подсеть не выбрана"; return 1; }
     if valid_cidr "$v" && [[ "${v#*/}" == 24 ]]; then
       v="${v%.*}.0/24"
       if taken_networks | py net-overlaps "$v" >/dev/null; then
@@ -2702,7 +2730,9 @@ mimicry_module_warnings() {
   if [[ "$(server_proto)" == 3.1 ]] && grep -qsE '^I1 = ' "$CLIENT_DIR"/*_awg3.conf; then
     mod_trailer_fix || { [[ $? -eq 1 ]] && warn "Модуль дописывает хвост к I1-I5 — мимикрия слабее. Обнови модуль (Сервер → Модуль ядра)"; }
   fi
-  n=$(awk -F' = ' '/^I[1-5] = /{n += length($2)} END{print n+0}' "$CLIENT_DIR"/*_awg[23].conf 2>/dev/null | sort -n | tail -1)
+  # Длина цепочки — по каждому файлу отдельно, берём наибольшую.
+  n=$(awk -F' = ' 'FNR == 1 {if (NR > 1) print n; n = 0} /^I[1-5] = /{n += length($2)} END{print n+0}' \
+        "$CLIENT_DIR"/*_awg[23].conf 2>/dev/null | sort -n | tail -1)
   (( ${n:-0} > 3598 )) && warn "Цепочка I1-I5 длиннее $n симв — выше предела awg-tools (буфер 4 КБ)"
   return 0
 }
@@ -3072,7 +3102,8 @@ client_create() {
   local name="$1" expire="${2:-}" spec="${3:-server}" dns="${4:-1.1.1.1, 1.0.0.1}" mtu="${5:-}" addr
   server_exists || { err "Сервер не создан"; return 1; }
   _name_free "$name" || { err "Имя $name занято или недопустимо (латиница, цифры, _ -, до 32)"; return 1; }
-  [[ -z "$expire" || "$expire" =~ ^[0-9]+$ ]] || { err "Срок — unix-время"; return 1; }
+  [[ -z "$expire" ]] || { [[ "$expire" =~ ^[0-9]+$ ]] && (( expire > $(date +%s) + 60 )); } \
+    || { err "Срок — unix-время в будущем"; return 1; }
   [[ -n "$mtu" ]] || mtu=$(conf_iface_get MTU)
   addr=$(free_client_ip) || { err "В подсети нет свободных адресов"; return 1; }
   mimicry_from_spec "$spec" || return 1
@@ -3120,6 +3151,12 @@ client_expire_set() {  # имя unix-время
   [[ "$2" =~ ^[0-9]+$ ]] && (( $2 > $(date +%s) + 60 )) || { err "Срок должен быть в будущем"; return 1; }
   client_exists "$1" || { err "Клиента $1 нет"; return 1; }
   expire_install
+  # Заблокированному сначала вернуть адрес: expire-set правит только метку,
+  # и клиент остался бы на 127.0.0.2 с новым сроком — «заблокирован» без причины.
+  if [[ -n "$(peer_meta_get "$1" orig_ips)" ]]; then
+    py expire-clear "$SERVER_CONF" "$1" "$EXPIRE_SUSPEND_IP" >/dev/null || return 1
+    _expire_apply
+  fi
   py expire-set "$SERVER_CONF" "$1" "$2" || return 1
   rm -f "$EXPIRE_STATE_DIR/warn1h_$(client_pub "$1" | tr -c 'A-Za-z0-9\n' '_')"
   ok "Срок $1: $(expire_fmt "$2")"
@@ -3177,7 +3214,9 @@ _ask_expire() {  # → unix-время в stdout или пусто
     2) ts=$(date -d '+1 hour' +%s) ;; 3) ts=$(date -d '+1 day' +%s) ;;
     4) ts=$(date -d '+7 days' +%s) ;; 5) ts=$(date -d '+30 days' +%s) ;;
     6) read_line d "${C}  Дата (ГГГГ-ММ-ДД ЧЧ:ММ): ${N}" >&2
-       ts=$(date -d "$d" +%s 2>/dev/null) || { warn "Дата не распознана — бессрочно" >&2; ts=""; } ;;
+       ts=$(date -d "$d" +%s 2>/dev/null) || ts=""
+       [[ -n "$d" && "$ts" =~ ^[0-9]+$ ]] && (( ts > $(date +%s) + 60 )) \
+         || { warn "Дата не распознана или уже прошла — бессрочно" >&2; ts=""; } ;;
   esac
   echo "$ts"
 }
@@ -3291,12 +3330,12 @@ _pick_client() {
   (( ${#rows[@]} )) || { warn "Клиентов нет"; return 1; }
   echo ""
   for i in "${!rows[@]}"; do
-    IFS=$'\t' read -r name pub aip _ <<< "${rows[$i]}"
+    IFS='|' read -r name pub aip _ <<< "${rows[$i]//$'\t'/|}"
     printf "  ${G}%3d)${N} %-24s ${D}%s${N}\n" "$((i + 1))" "${name:-без имени}" "$aip"
   done
   read_choice c "${C}  Номер (0 — отмена): ${N}" 0 "${#rows[@]}" 0
   (( c == 0 )) && return 1
-  IFS=$'\t' read -r name pub _ <<< "${rows[$((c - 1))]}"
+  IFS='|' read -r name pub _ <<< "${rows[$((c - 1))]//$'\t'/|}"
   CHOSEN="$name"$'\t'"$pub"
 }
 
@@ -3361,7 +3400,7 @@ do_list_clients() {
   now=$(date +%s)
   echo ""
   hdr "Клиенты"
-  while IFS=$'\t' read -r name pub aip exp orig _; do
+  while IFS='|' read -r name pub aip exp orig _; do
     i=$((i + 1))
     ep="" hs=0 rx=0 tx=0
     read -r ep hs rx tx < <(awk -F'\t' -v k="$pub" '$1 == k {print $3, $5, $6, $7; exit}' <<< "$dump") || true
@@ -3379,7 +3418,7 @@ do_list_clients() {
       if [[ -n "$orig" ]]; then echo -e "     ${R}заблокирован: срок истёк $(expire_fmt "$exp")${N}"
       else echo -e "     ${Y}срок: $(expire_fmt "$exp")${N}"; fi
     fi
-  done < <(clients_tsv)
+  done < <(clients_psv)
   (( i )) || info "Клиентов нет"
 }
 
@@ -3548,12 +3587,12 @@ do_expire_menu() {
     echo ""
     hdr "Срок действия клиентов"
     now=$(date +%s)
-    while IFS=$'\t' read -r name pub _ exp orig _; do
+    while IFS='|' read -r name pub _ exp orig _; do
       [[ -n "$exp" ]] || continue
       n=$((n + 1))
       if [[ -n "$orig" ]]; then echo -e "  ${R}🚫 ${name}${N} ${D}— заблокирован, $(expire_fmt "$exp")${N}"
       else echo -e "  ${Y}⏰ ${name}${N} ${D}— $(expire_fmt "$exp")${N}"; fi
-    done < <(clients_tsv)
+    done < <(clients_psv)
     (( n )) || echo -e "  ${D}Сроков нет — все клиенты бессрочные${N}"
     n=0
     echo ""
@@ -4000,7 +4039,9 @@ warp_license_set() {  # ключ
     unlimited|limited|premium) ok "Warp+ активирован ($type)"; echo "$type" > "$WARP_DIR/account_type" ;;
     *) warn "Ключ применён, но Warp+ не активен (${type:-тип неизвестен})"; rm -f "$WARP_DIR/account_type" ;;
   esac
-  _wgcf_generate && warp_is_up && info "Туннель работает на старом профиле — перезапусти его"
+  _wgcf_generate || return 1
+  warp_is_up && info "Туннель работает на старом профиле — перезапусти его"
+  return 0
 }
 
 # Импорт готового wgcf-profile.conf (регистрация с сервера не проходит).
@@ -4193,6 +4234,7 @@ warp_up() {
     sleep 2
   done
   _warp_state_write "$be"
+  rm -f "$WARP_STATE.failed"
   [[ "$be" == wg ]] && _warp_autostart_install
   ok "WARP включён: клиентов через туннель — $(grep -c . "$WARP_PEERS" || true)"
   info "SSH и трафик самого сервера идут напрямую"
@@ -4222,7 +4264,10 @@ warp_health_run() {
   echo "$(date '+%F %T') FAIL $n/3" >> "$WARP_HEALTH_LOG"
   (( n >= 3 )) || exit 0
   rt_down "$WARP_IF" "$WARP_TABLE"
-  [[ "$(cat "$WARP_BACKEND_FILE" 2>/dev/null)" == usque ]] || ip link del "$WARP_IF" 2>/dev/null
+  # usque держит warp0 сам: гасим службу, иначе warp_is_up остаётся истинным,
+  # warp_up отвечает «уже включён», а хук usque при реконнекте вернёт правила.
+  if [[ "$(cat "$WARP_BACKEND_FILE" 2>/dev/null)" == usque ]]; then systemctl stop awg-usque.service 2>/dev/null
+  else ip link del "$WARP_IF" 2>/dev/null; fi
   echo failed > "$WARP_STATE.failed"
   echo "$(date '+%F %T') FAILOVER: клиенты идут напрямую" >> "$WARP_HEALTH_LOG"
 }
@@ -4336,6 +4381,8 @@ warp_set_backend() {  # wg|usque — с установкой, если нужн�
   if ! "warp_${target}_install"; then
     err "Установка $target не удалась — возвращаю $cur"
     echo "$cur" | write_file "$WARP_BACKEND_FILE" 644
+    (( was_up )) && warp_up
+    return 1
   fi
   (( was_up )) && warp_up
   ok "Бэкенд WARP: $(warp_backend)"
@@ -5906,10 +5953,12 @@ exits_up() {  # all|peers
   mode="${mode:-all}"
   server_exists || { err "Сначала создай сервер"; return 1; }
   [[ -n "$(exits_up_nodes)" ]] || { err "Ни одна exit-нода не поднята — добавь или перезапусти ноду"; return 1; }
+  # Список клиентов режима peers — до проверки «уже включено»: иначе при
+  # переключении all → peers на ходу файла нет, и маршруты не получает никто.
+  if [[ "$mode" == peers ]]; then peers_sync "$EXITS_PEERS"; peers_seed "$EXITS_PEERS"; fi
   if exits_is_up; then exits_state_set mode "$mode"; exits_reapply; ok "Режим: $mode"; return 0; fi
   tunnel_guard exits || return 1
   exits_state_set state active mode "$mode"
-  if [[ "$mode" == peers ]]; then peers_sync "$EXITS_PEERS"; peers_seed "$EXITS_PEERS"; fi
   _exits_write_unit || return 1
   if ! systemctl enable --now "$EXITS_UNIT" &>/dev/null; then
     err "Маршрутизация не запустилась:"
@@ -6160,7 +6209,7 @@ exits_status() {
   echo -e "  Ноды      : ${W}$n${N} (поднято $(exits_up_nodes | grep -c . || true))"
   if exits_is_up; then
     mode=$(exits_state_get mode); bal=$(exits_state_get balancer)
-    echo -e "  Маршруты  : ${G}● включены${N} — $([[ "$mode" == peers ]] && echo "выборочно, $(grep -c . "$EXITS_PEERS" 2>/dev/null || echo 0) кл." || echo "все клиенты")"
+    echo -e "  Маршруты  : ${G}● включены${N} — $([[ "$mode" == peers ]] && echo "выборочно, $(n=$(grep -c . "$EXITS_PEERS" 2>/dev/null); echo "${n:-0}") кл." || echo "все клиенты")"
     if [[ "$bal" == ecmp ]]; then echo -e "  Балансир  : ECMP"
     else echo -e "  Балансир  : одна нода ($(exits_state_get single_exit))"; fi
   elif unit_enabled "$EXITS_UNIT"; then
@@ -7157,8 +7206,15 @@ _restore_prepare() {
 }
 
 _restore_awg_files() {  # каталог бэкапа
-  local src="$1" f
+  local src="$1" f keep
   install -D -m 600 "$src/awg0.conf" "$SERVER_CONF"
+  # Конфиги клиентов, которых нет в восстановленном awg0.conf, иначе остаются
+  # сиротами: видны в «Показать конфиг», занимают имя и попадают в архив.
+  # Конфиги пиров, которые в awg0 есть, не трогаем: бэкап мог прийти без них.
+  keep=" $(clients_tsv | cut -f1 | tr '\n' ' ') "
+  for f in "$CLIENT_DIR"/*_awg[23].conf; do
+    [[ -f "$f" && "$keep" != *" $(client_name_of "$f") "* ]] && rm -f "$f"
+  done
   while IFS= read -r -d '' f; do
     rm -f "$CLIENT_DIR/$(client_name_of "$f")"_awg[23].conf
     install -m 600 "$f" "$CLIENT_DIR/${f##*/}"
@@ -8256,7 +8312,7 @@ API_ARGS=()
 # ── JSON ──────────────────────────────────────────────────
 # Строка для py json-kv: «ключ[:тип]<TAB>значение». Типы: n число, b да/нет,
 # j готовый JSON, f содержимое файла; без типа — строка.
-_kv() { printf '%s\t%s\n' "$1" "${2//$'\n'/ }"; }
+_kv() { printf '%s\t%s\n' "$1" "${2//[$'\n\r']/ }"; }
 _b() { if "$@" &>/dev/null; then echo 1; else echo 0; fi; }
 api_obj() { py json-kv > "$API_DATA"; }
 api_rows() { py json-rows "$@" > "$API_DATA"; }
@@ -8503,6 +8559,7 @@ _api_client_opts() {
       expire) if [[ -n "$v" ]]; then
                 _O_EXPIRE=$(_api_ts "$v")
                 [[ "$_O_EXPIRE" =~ ^[0-9]+$ ]] || { err "Срок не распознан: $v"; return 1; }
+                (( _O_EXPIRE > $(date +%s) + 60 )) || { err "Срок уже прошёл: $v"; return 1; }
               fi ;;
       mimicry) _O_MIM="$v" ;;
       dns) [[ "$v" =~ ^[0-9.,[:space:]]+$ ]] || { err "dns: IPv4 через запятую"; return 1; }; _O_DNS="$v" ;;
@@ -8765,7 +8822,8 @@ _api_exits() {
       [[ -n "${1:-}" ]] || { _api_usage "exits add ИМЯ < конфиг"; return; }
       _api_stdin
       [[ -s "$API_IN" ]] || { err "Конфиг ноды передаётся через stdin"; return 1; }
-      exits_node_add "$1" "$API_IN" ;;
+      exits_node_add "$1" "$API_IN" || return 1
+      exits_reapply ;;
     del)
       [[ -n "${1:-}" ]] || { _api_usage "exits del ИМЯ"; return; }
       exits_node_del "$1" ;;
@@ -9021,7 +9079,10 @@ _api_job_start() {
 _api_job_active() {  # id → 0, если задача ещё выполняется
   local pid
   if [[ -f "$API_JOBS/$1/pid" ]]; then
-    pid=$(cat "$API_JOBS/$1/pid"); [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+    # Не просто kill -0: после перезагрузки PID может достаться чужому процессу,
+    # и задача числилась бы «идёт» вечно.
+    pid=$(cat "$API_JOBS/$1/pid")
+    [[ "$pid" =~ ^[0-9]+$ ]] && tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q "api job run $1"
   else
     unit_active "$(_api_job_unit "$1")"
   fi
@@ -9050,13 +9111,15 @@ _api_job() {
 # пока задача собирает модуль.
 _api_readonly() {
   case "$*" in
-    "bot proxy set"*|"bot proxy clear"*|"server params set"*) return 1 ;;
+    # Пишущие подкоманды «читающих» разделов — в очередь: bot webapp port и
+    # bot proxy set правят один /etc/awg-bot.conf, параллельно потеряли бы ключ.
+    "bot proxy set"*|"bot proxy clear"*|"bot webapp port"*|"server params set"*) return 1 ;;
     "server params"|"server params check"*) return 0 ;;
   esac
   case "$1 ${2:-}" in
     "status "|"version "|"help "|"mimicry "|"log "*|"job "*|"diag "*) return 0 ;;
     *" status"|*" info"|*" report"|*" tags"|*" backups"|*" list"|*" conf"|*" inspect") return 0 ;;
-    "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|"wgobf bundle"|\
+    "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|\
     "bot proxy"|"bot webapp"|"update check"|"module check"|"cert ") return 0 ;;
   esac
   return 1
@@ -11119,7 +11182,10 @@ def die(msg, code=1):
 
 
 def read(path):
-    with open(path, encoding="utf-8") as f:
+    # surrogateescape: один не-UTF-8 байт в правленном руками конфиге иначе
+    # останавливал все команды (peers, expire-check…), а байты так проходят
+    # через чтение и запись без изменений.
+    with open(path, encoding="utf-8", errors="surrogateescape") as f:
         return f.read()
 
 
@@ -11127,7 +11193,7 @@ def write_atomic(path, text, mode=0o600):
     d = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".awg2.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as f:
             f.write(text)
         os.chmod(tmp, mode)
         os.replace(tmp, path)
@@ -11144,7 +11210,10 @@ def write_atomic(path, text, mode=0o600):
 # (mimicry, expires, orig_ips, note — последнюю пишет бот). Имя клиента —
 # первый комментарий без «=»: валидатор имён этот знак не пропускает.
 
-PEER_SPLIT = re.compile(r"(?=^\[Peer\][ \t]*$)", re.M)
+# Как парсер wireguard-tools: заголовок и ключи без учёта регистра, с
+# пробелами по краям и комментарием «# …» в конце строки — такой пир живой
+# для awg, значит и для нас.
+PEER_SPLIT = re.compile(r"(?=^[ \t]*\[[ \t]*peer[ \t]*\][ \t]*(?:#.*)?$)", re.M | re.I)
 
 
 def split_peers(text):
@@ -11161,7 +11230,7 @@ def peer_name(block):
 
 
 def peer_field(block, key):
-    m = re.search(r"^%s\s*=\s*(.+?)\s*$" % re.escape(key), block, re.M)
+    m = re.search(r"^[ \t]*%s[ \t]*=[ \t]*([^#\r\n]*?)[ \t]*(?:#.*)?$" % re.escape(key), block, re.M | re.I)
     return m.group(1) if m else ""
 
 
@@ -11492,7 +11561,7 @@ def cmd_i_replace(path):
     for line in read(path).split("\n"):
         if re.match(r"^I[1-5]\s*=", line):
             continue
-        if line.startswith("[Peer]") and not inserted:
+        if PEER_SPLIT.match(line) and not inserted:
             while out and out[-1] == "":
                 out.pop()
             out.extend(lines)
@@ -11520,7 +11589,7 @@ def cmd_expire_clear(conf, name, suspend):
     b = peers[i]
     orig = peer_meta(b, "orig_ips")
     if orig and peer_field(b, "AllowedIPs") == suspend:
-        b = re.sub(r"^(AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + orig, b, count=1, flags=re.M)
+        b = re.sub(r"^([ \t]*AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + orig, b, count=1, flags=re.M | re.I)
     b = set_meta(set_meta(b, "expires", ""), "orig_ips", "")
     peers[i] = b
     write_atomic(conf, head + "".join(peers))
@@ -11547,7 +11616,7 @@ def cmd_expire_check(conf, suspend, state_dir):
         if now >= exp and aip != suspend:
             if not peer_meta(b, "orig_ips"):
                 b = set_meta(b, "orig_ips", aip)
-            b = re.sub(r"^(AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + suspend, b, count=1, flags=re.M)
+            b = re.sub(r"^([ \t]*AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + suspend, b, count=1, flags=re.M | re.I)
             peers[i] = b
             changed = True
             events.append("EXPIRED\t%s\t%s" % (name, aip))
@@ -11758,6 +11827,8 @@ def cmd_xray_link(link):
     elif link.startswith("vmess://"):
         raw = link[8:]
         data = json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8"))
+        if not isinstance(data, dict):
+            die("vmess: внутри ссылки ожидался JSON-объект")
 
         def get(k):
             v = data.get(k)
@@ -12112,6 +12183,12 @@ def _typed(val, typ):
     return val
 
 
+def _stdin_lines():
+    """Строки stdin по \\n. splitlines() делил бы и по \\r, \\x1c-\\x1e, U+2028 —
+    и свободный текст (комментарий, команда задачи) распадался на две строки."""
+    return [l[:-1] if l.endswith("\r") else l for l in sys.stdin.read().split("\n")]
+
+
 def _split_key(key):
     name, _, typ = key.partition(":")
     return name, typ or "s"
@@ -12120,7 +12197,7 @@ def _split_key(key):
 def cmd_json_kv():
     """Строки «ключ[:тип]<TAB>значение» → объект; точки в ключе — вложенность."""
     out = {}
-    for line in sys.stdin.read().splitlines():
+    for line in _stdin_lines():
         if "\t" not in line:
             continue
         key, val = line.split("\t", 1)
@@ -12137,7 +12214,7 @@ def cmd_json_rows(*cols):
     """Строки TSV → список объектов по колонкам «имя[:тип]»."""
     spec = [_split_key(c) for c in cols]
     rows = []
-    for line in sys.stdin.read().splitlines():
+    for line in _stdin_lines():
         if not line:
             continue
         vals = line.split("\t")
@@ -12148,7 +12225,7 @@ def cmd_json_rows(*cols):
 
 def cmd_json_list():
     """Непустые строки stdin → JSON-массив строк."""
-    print(json.dumps([l for l in sys.stdin.read().splitlines() if l], ensure_ascii=False))
+    print(json.dumps([l for l in _stdin_lines() if l], ensure_ascii=False))
 
 
 def _peers_list(path):
@@ -12382,6 +12459,8 @@ COMMANDS = {
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
         die("команда: " + ", ".join(sorted(COMMANDS)))
+    # Байты не-UTF-8 из конфига (surrogateescape в read) печатаем как «?», а не падаем
+    sys.stdout.reconfigure(errors="replace")
     try:
         COMMANDS[sys.argv[1]](*sys.argv[2:])
     except TypeError as e:

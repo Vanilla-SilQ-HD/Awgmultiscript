@@ -510,14 +510,14 @@ async def _ex_bal_set(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 @ex("cl")
 async def _ex_clients(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    rows = await api.data("clients", "list", default=[]) or []
+    rows, odd = clients.usable(await api.data("clients", "list", default=[]) or [])
     d = await api.data("exits", "status", default={}) or {}
     route = {"kind": "exits", "mode": d.get("mode") or "all"}
     label = {"off": "напрямую", "shared": "общий"}
     page = int(arg) if arg.isdigit() else 0
     text = "<b>👥 Клиенты и exit-ноды</b>\n"
     text += ("Нажми клиента, чтобы выбрать его выход." if d.get("up")
-             else "Маршруты выключены — выбор вступит в силу, когда их включишь.")
+             else "Маршруты выключены — выбор вступит в силу, когда их включишь.") + clients.odd_note(odd)
     await ui.render(cb, text, ui.kb(
         ui.paged([(f"{c['name']} → {label.get(clients.exit_of(c, route), clients.exit_of(c, route))}",
                    ex.data("pick", c["name"])) for c in rows], page, lambda p: ex.data("cl", str(p))),
