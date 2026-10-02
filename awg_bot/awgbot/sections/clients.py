@@ -220,7 +220,16 @@ async def active_route() -> dict:
     if kind == "exits":
         e = await api.data("exits", "status", default={}) or {}
         route.update(mode=e.get("mode") or "all", nodes=[n["name"] for n in e.get("nodes") or []])
+    elif kind == "xray":
+        x = await api.data("xray", "status", default={}) or {}
+        route.update(tags=list(x.get("tags") or []), main=x.get("main") or "", per_client=bool(x.get("per_client")))
     return route
+
+
+def xray_main(route: dict) -> str:
+    """«выход по умолчанию: nl» / «балансировщик»."""
+    m = route.get("main") or ""
+    return "балансировщик" if m == "balancer" else m
 
 
 def exit_of(c: dict, route: dict) -> str:
@@ -235,6 +244,8 @@ def route_of(c: dict, route: dict) -> str:
     kind = route.get("kind")
     if not kind:
         return "напрямую"
+    if kind == "xray" and c.get("xray") is not False and c.get("xray_out"):
+        return f"через Xray, выход {c['xray_out']}"
     if kind in ("warp", "xray"):
         on = c.get(kind) is not False
         return f"через {TUNNEL_NAMES[kind]}" if on else f"напрямую ({TUNNEL_NAMES[kind]} — для других)"
@@ -707,6 +718,16 @@ async def _tun(cb: CallbackQuery, state: FSMContext, name: str) -> None:
         buttons += [opt(f"Нода {n}", n, cur == n) for n in route.get("nodes") or []]
         note = ("\nВыбор для одного клиента переводит маршруты в режим «выбранные клиенты»: "
                 "остальные остаются на общем выходе." if route.get("mode") != "peers" else "")
+    elif kind == "xray" and len(route.get("tags") or []) >= 2:
+        # Свой выход клиенту: кнопка — номер выхода в списке (тег в 64 байта не всегда влезет)
+        on, out = c.get("xray") is not False, c.get("xray_out") or ""
+        buttons = [opt("По умолчанию", "on", on and not out)]
+        buttons += [opt(t, f"x{i}", on and out == t) for i, t in enumerate(route["tags"])]
+        buttons.append(opt("Напрямую", "off", not on))
+        note = (f"\nВыход Xray по умолчанию — {esc(xray_main(route))}; клиенту можно закрепить свой."
+                if route.get("per_client") else
+                "\n⚠️ Свой выход клиенту — только с inbound tun в самом Xray: обнови Xray "
+                "(Туннели → Xray → Установить / обновить).")
     else:
         on = c.get(kind) is not False
         buttons = [opt(f"Через {TUNNEL_NAMES[kind]}", "on", on), opt("Напрямую", "off", not on)]
@@ -720,6 +741,15 @@ async def _route_set(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     kind, name, value = (arg.split("|") + ["", "", ""])[:3]
     if kind == "exits":
         r = await api.call("exits", "client", name, value)
+    elif kind == "xray" and (value.startswith("x") or value == "on"):
+        tags = (await active_route()).get("tags") or []
+        i = int(value[1:]) if value[1:].isdigit() else -1
+        if value != "on" and not 0 <= i < len(tags):
+            await _tun(cb, state, name)
+            return
+        await cb.answer("Перенастраиваю Xray…")
+        r = await (api.call("xray", "client", name, tags[i] if value != "on" else "default") if len(tags) >= 2
+                   else api.call("tunnels", "client", kind, name, value))
     else:
         r = await api.call("tunnels", "client", kind, name, value)
     if not r.ok:

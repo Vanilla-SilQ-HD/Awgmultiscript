@@ -502,6 +502,9 @@ _api_xray() {
         _kv mode "$(xray_state_get tun_mode)"
         _kv tags:j "$(xray_tags | py json-list)"
         _kv balancer "$(xray_installed && py xray-balancer-get "$XRAY_CONF" 2>/dev/null || echo off)"
+        _kv main "$(xray_installed && py xray-main-get "$XRAY_CONF" 2>/dev/null)"
+        _kv per_client:b "$(xray_installed && _b xray_tun_supported || echo 0)"
+        _kv clients:j "$(xray_client_outs | py json-rows name ip out)"
         _kv ru:b "$(_b xray_ru_on)"; } | api_obj
       xray_status ;;
     install) xray_install update ;;
@@ -516,6 +519,12 @@ _api_xray() {
         || { _api_usage "xray balancer random|roundRobin|leastPing|leastLoad|off"; return; }
       xray_installed || { err "Xray не установлен"; return 1; }
       xray_balancer "$1" ;;
+    main)
+      [[ -n "${1:-}" ]] || { _api_usage "xray main ТЕГ"; return; }
+      xray_main_set "$1" ;;
+    client)
+      [[ -n "${2:-}" ]] || { _api_usage "xray client ИМЯ ТЕГ|default"; return; }
+      xray_client_out "$1" "$2" ;;
     up) xray_up ;;
     down) xray_down ;;
     restart) xray_restart ;;
@@ -526,7 +535,7 @@ _api_xray() {
     diag) xray_diagnose ;;
     fix) xray_fix ;;
     remove) xray_uninstall ;;
-    *) _api_usage "xray status|install|add ССЫЛКА|del ТЕГ|balancer СТРАТЕГИЯ|up|down|restart|ru on|off|ru-update|diag|fix|remove" ;;
+    *) _api_usage "xray status|install|add ССЫЛКА|del ТЕГ|balancer СТРАТЕГИЯ|main ТЕГ|client ИМЯ ТЕГ|default|up|down|restart|ru on|off|ru-update|diag|fix|remove" ;;
   esac
 }
 

@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 
-__all__ = ["HERE", "AWG2", "chk", "summary", "TMP", "BIN", "CALLS", "LINKS", "ACTIVE", "IPT_SAVE", "AWG_DUMP", "ROOT", "LIB",
+__all__ = ["fake_xray", "HERE", "AWG2", "chk", "summary", "TMP", "BIN", "CALLS", "LINKS", "ACTIVE", "IPT_SAVE", "AWG_DUMP", "ROOT", "LIB",
            "PRELUDE", "ENV", "bash", "run_script", "calls", "reset_calls", "kv", "OLD20", "api_wrapper", "fake_acme",
            "json", "os", "re", "shutil", "subprocess", "sys"]
 
@@ -128,6 +128,7 @@ BACKUP_DIR="{ROOT}/awg_backup"; MOD_BACKUP_DIR="{ROOT}/mod-backups"; UPDATE_CHAN
 MOD_TAG_FILE="$STATE_DIR/module_tag"; TOOLS_TAG_FILE="$STATE_DIR/tools_tag"; UPSTREAM_CACHE="$STATE_DIR/upstream_tags"
 WARP_PEERS="{ROOT}/warp.peers"; XRAY_PEERS="{ROOT}/xray.peers"; USQUE_LOG="{ROOT}/usque.log"
 XRAY_DIR="{ROOT}/etc/xray"; XRAY_CONF="$XRAY_DIR/config.json"; XRAY_STATE="$XRAY_DIR/state"
+XRAY_BIN="{ROOT}/bin/xray"; XRAY_ASSET_DIR="{ROOT}/xray-assets"
 T2S_DIR="{ROOT}/etc/tun2socks"; T2S_CONF="$T2S_DIR/proxy.txt"
 DNS_PROXY_CONF="{ROOT}/etc/dnscrypt-proxy/dnscrypt-proxy.toml"; DNS_PROXY_STATE="{ROOT}/etc/dnscrypt-proxy/awg.state"
 DNS_PROXY_BACKUP_CONF="$DNS_PROXY_CONF.awg-backup"
@@ -221,6 +222,23 @@ def api_wrapper():
     with open(stub, "w") as f:
         f.write("#!/usr/bin/env bash\nexit 1\n")
     os.chmod(stub, 0o755)
+    return path
+
+
+def fake_xray(tun=True):
+    """xray-заглушка в XRAY_BIN: version и `run -test` (конфиг принят; без
+    tun=True отвергает inbound tun — как сборка без него)."""
+    d = os.path.join(ROOT, "bin")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "xray")
+    with open(path, "w") as f:
+        f.write("#!/usr/bin/env bash\n"
+                'case "$1" in\n'
+                '  version) echo "Xray 26.3.27 (stub)" ;;\n'
+                '  run) ' + ('' if tun else 'grep -q \'"protocol": "tun"\' "$4" && { echo "failed: unknown protocol tun"; exit 1; }; ')
+                + 'echo "Configuration OK." ;;\n'
+                "esac\n")
+    os.chmod(path, 0o755)
     return path
 
 

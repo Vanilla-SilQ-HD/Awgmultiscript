@@ -297,6 +297,40 @@ rc, out, _ = bash(XRAY_ENV + "xray_add_link 'vless://11111111-2222-3333-4444-555
                   " >/dev/null; xray_add_link 'vless://11111111-2222-3333-4444-555555555555@x.example.site:443?security=tls&type=tcp#dup'")
 chk("Xray: подсказка про hysteria2 только для hysteria2", "hysteria2 есть не во всех" not in out, out)
 
+# ── Xray: свой выход клиенту ──
+XP = os.path.join(ROOT, "xray.peers")
+rc, out, _ = bash(XRAY_ENV + "xray_tags")
+XT = out.split()
+rc, out, _ = bash('client_create xc1 "" none "1.1.1.1, 1.0.0.1" "" >/dev/null 2>&1; clients_name_ip')
+CN = [line.split("|") for line in out.split()]
+chk("Xray: для выбора по клиентам — два клиента", len(CN) >= 2, out)
+(C1, IP1), (C2, IP2) = CN[0], CN[1]
+chk("Xray: для выбора по клиентам — два выхода", len(XT) >= 2, XT)
+rc, out, _ = bash(XRAY_ENV + f"xray_client_out {C1} {XT[1]} && cat \"$XRAY_PEERS\"")
+chk("свой выход клиенту — строка «IP|выход», остальные на выходе по умолчанию",
+    rc == 0 and f"{IP1}|{XT[1]}" in out.split() and IP2 in out.split(), out)
+rc, out, _ = bash(XRAY_ENV + '_xray_prepare; python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1]))[\'routing\'][\'rules\']))" "$XRAY_CONF"')
+rules = json.loads(out.strip().splitlines()[-1]) if rc == 0 and out.strip() else []
+own = [r for r in rules if r.get("ruleTag") == "client-out"]
+chk("в конфиге Xray — правило по адресу клиента перед общим",
+    own and own[0]["source"] == [IP1] and own[0]["outboundTag"] == XT[1] and own[0]["inboundTag"] == ["tun-in"]
+    and rules.index(own[0]) < next(i for i, r in enumerate(rules) if r.get("ruleTag") != "client-out" and r.get("inboundTag")), rules)
+rc, out, _ = bash(XRAY_ENV + f"tunnel_client xray all >/dev/null; tunnel_client xray {C1} on >/dev/null; cat \"$XRAY_PEERS\"")
+chk("«все клиенты» и включение клиента свой выход не сбрасывают", f"{IP1}|{XT[1]}" in out.split(), out)
+rc, out, _ = bash(XRAY_ENV + f"xray_main_set {XT[1]} && py xray-main-get \"$XRAY_CONF\"")
+chk("выход по умолчанию", rc == 0 and out.strip().splitlines()[-1] == XT[1], out)
+rc, out, _ = bash(XRAY_ENV + f"xray_client_out {C1} nosuch")
+chk("неизвестный выход — ошибка", rc != 0 and "Выхода nosuch нет" in out, out)
+rc, out, _ = bash(XRAY_ENV + f"XRAY_BIN={fake_xray(tun=False)}; xray_client_out {C2} {XT[0]}")
+chk("сборка Xray без inbound tun — свой выход не назначается, с подсказкой", rc != 0 and "обнови xray" in out.lower(), out)
+with open(XP) as f:
+    xp_saved = f.read()
+rc, out, _ = bash(XRAY_ENV + f"xray_del_tag {XT[1]} >/dev/null; cat \"$XRAY_PEERS\"")
+chk("удалён выход — его клиенты на выходе по умолчанию", IP1 in out.split() and "|" not in out, out)
+with open(XP, "w") as f:
+    f.write(xp_saved)
+bash("client_remove xc1 >/dev/null 2>&1")
+
 # ── 4. Служебные скрипты ──────────────────────────────────
 print("Служебные скрипты")
 with open(conf, "w") as f:
@@ -322,7 +356,7 @@ rc, out, err = bash(f'''
 WARP_CONF="{TMP}/warp0.conf"
 _dns_emit_helpers && _cascade_persist && _exits_write_unit && expire_install >/dev/null
 emit_script "$T2S_ROUTING_SCRIPT" 't2s_routing_run "$@"' T2S_IF T2S_TABLE T2S_ADDR "${{RT_FUNCS[@]}}" t2s_routing_run
-emit_script "$XRAY_ROUTING_SCRIPT" 'xray_routing_run "$@"' XRAY_IF XRAY_TABLE XRAY_PEERS XRAY_TUN_ADDR XRAY_SOCKS socks_probe "${{RT_FUNCS[@]}}" xray_routing_run
+_xray_emit_routing
 emit_script "$WGOBF_FW" 'wgobf_fw_run "$@"' WGOBF_STATE WGOBF_TAG WGOBF_IF ipt_del_grep ipt_del_tagged wgobf_get wgobf_fw_run
 emit_script "$WARP_AUTOSTART_SCRIPT" 'warp_wg_bringup' WARP_CONF WARP_IF WARP_TABLE WARP_PEERS "${{RT_FUNCS[@]}}" warp_wg_bringup
 emit_script "$WARP_HEALTH_SCRIPT" 'warp_health_run' WARP_IF WARP_TABLE WARP_STATE WARP_BACKEND_FILE WARP_HEALTH_LOG "${{RT_FUNCS[@]}}" warp_health_run
@@ -358,8 +392,17 @@ run_and_check("Каскад: только адреса сервера, туда 
                     r"-I FORWARD 1 -p tcp -s 5\.6\.7\.8 --sport 443 -j ACCEPT -m comment --comment awg-cascade:tcp-8443"])
 run_and_check("tun2socks: вся подсеть в таблицу 100", "T2S_ROUTING_SCRIPT", "start",
               must=[r"ip rule add from 10\.23\.45\.0/24 lookup 100 priority 100", r"MASQUERADE -m comment --comment awg2-tun-tun0"])
+os.makedirs(os.path.join(ROOT, "etc/xray"), exist_ok=True)
+with open(os.path.join(ROOT, "etc/xray/state"), "w") as f:
+    f.write("active\ntun_mode=tun2socks\n")
 run_and_check("Xray: клиенты из списка в таблицу 201", "XRAY_ROUTING_SCRIPT", "start",
-              must=[r"ip route replace default dev xray0 table 201"])
+              must=[r"ip route replace default dev xray0 table 201", r"-A POSTROUTING .* -o xray0 -j MASQUERADE"])
+with open(os.path.join(ROOT, "etc/xray/state"), "w") as f:
+    f.write("active\ntun_mode=native\n")
+run_and_check("Xray с inbound tun: без NAT — Xray видит адрес клиента", "XRAY_ROUTING_SCRIPT", "start",
+              must=[r"ip route replace default dev xray0 table 201", r"-D POSTROUTING .* -o xray0 -j MASQUERADE"],
+              must_not=[r"-A POSTROUTING .* -o xray0 -j MASQUERADE"])
+os.remove(os.path.join(ROOT, "etc/xray/state"))
 run_and_check("Exit-ноды: ECMP и персональная нода", "EXITS_SCRIPT", "start",
               must=[r"nexthop dev awg-exit-de weight 1 nexthop dev awg-exit-nl weight 1",
                     r"ip route replace default dev awg-exit-nl table 211",
@@ -1042,7 +1085,7 @@ def build(ver, key="relkey", sign=True, tamper=False):
 def fetch(extra="", auto=1):
     env = dict(ENV, PATH=SIGBIN + ":" + ENV["PATH"], SIGSRV=SIG)
     r = subprocess.run(["bash", "-c", PRELUDE + SIGNERS + extra + f"AUTO_MODE={auto}; update_channel_init; update_fetch 2>&1"],
-                       capture_output=True, text=True, env=env, timeout=120)
+                       input="", capture_output=True, text=True, env=env, timeout=120)
     return r.returncode, r.stdout
 
 build("v9.9.9")

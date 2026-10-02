@@ -102,10 +102,16 @@ rt_rules_clear() {  # таблица
 }
 
 # NAT и FORWARD между awg0 и туннелем. Правила помечены «awg2-tun-<dev>».
-rt_fw_up() {  # устройство
+rt_fw_up() {  # устройство [nonat]
   local dev="$1" net tag="awg2-tun-$1"
   net=$(server_net) || return 1
-  ipt_add -t nat POSTROUTING -s "$net" -o "$dev" -j MASQUERADE -m comment --comment "$tag"
+  # nonat — устройство должно видеть адреса клиентов (inbound tun Xray
+  # выбирает выход клиента по его адресу)
+  if [[ "${2:-}" == nonat ]]; then
+    ipt_del -t nat POSTROUTING -s "$net" -o "$dev" -j MASQUERADE -m comment --comment "$tag"
+  else
+    ipt_add -t nat POSTROUTING -s "$net" -o "$dev" -j MASQUERADE -m comment --comment "$tag"
+  fi
   ipt_ins FORWARD -i "$AWG_IF" -o "$dev" -j ACCEPT -m comment --comment "$tag"
   ipt_ins FORWARD -i "$dev" -o "$AWG_IF" -j ACCEPT -m comment --comment "$tag"
   # MSS по MTU маршрута: у туннеля MTU меньше, а ICMP «нужна фрагментация»
@@ -135,7 +141,7 @@ rt_fw_down() {  # устройство
 
 # rt_up УСТРОЙСТВО ТАБЛИЦА ФАЙЛ_КЛИЕНТОВ|- [SRC]
 # «-» вместо файла — вся подсеть клиентов (как у tun2socks).
-rt_up() {
+rt_up() {  # устройство таблица peers|- [src] [nonat]
   local dev="$1" table="$2" peers="$3" src="${4:-}" net ip line
   net=$(server_net) || return 1
   if [[ -n "$src" ]]; then
@@ -152,7 +158,7 @@ rt_up() {
       valid_ip "$ip" && ip rule add from "$ip" lookup "$table" priority "$table"
     done < "$peers"
   fi
-  rt_fw_up "$dev"
+  rt_fw_up "$dev" "${5:-}"
 }
 
 rt_down() {  # устройство таблица
@@ -243,12 +249,16 @@ tunnel_client() {
   mkdir -p "$(dirname "$file")"
   peers_sync "$file"
   case "$2" in
-    all) clients_name_ip | cut -d'|' -f2 > "$file" ;;
+    # Строки «IP|выход» (свой выход Xray) при включении всех остаются как есть
+    all) clients_name_ip | cut -d'|' -f2 | while IFS= read -r ip; do
+           grep -E "^${ip//./\\.}(\||$)" "$file" 2>/dev/null | head -1 | grep . || echo "$ip"
+         done > "$file.new"; mv -f "$file.new" "$file" ;;
     none) : > "$file" ;;
     *) ip=$(clients_name_ip | awk -F'|' -v n="$2" '$1 == n {print $2; exit}')
        [[ -n "$ip" ]] || { err "Клиента $2 нет"; return 1; }
        peers_seed "$file"
-       if [[ "${3:-on}" == on ]]; then peers_add "$file" "$ip"; else peers_del "$file" "$ip"; fi ;;
+       if [[ "${3:-on}" == on ]]; then peers_has "$file" "$ip" || peers_add "$file" "$ip"
+       else peers_del "$file" "$ip"; fi ;;
   esac
   _tunnel_rules_refresh "$file" "$dev" "$table"
   ok "Клиенты ${1^^}: $(grep -c . "$file" || true) через туннель"

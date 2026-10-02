@@ -506,6 +506,45 @@ async def run():
         any(t == "alice → n1" for t, _ in buttons) and any(t == "bob → общий" for t, _ in buttons),
         [t for t, _ in buttons][:4])
 
+    print("Xray: свой выход клиенту")
+    with open(LINKS) as f:
+        links_saved = f.read()
+    with open(ACTIVE) as f:
+        active_saved = f.read()
+    with open(LINKS, "w") as f:
+        f.write("xray0\n")
+    with open(ACTIVE, "w") as f:
+        f.write("awg-xray.service\n")
+    fake_xray()
+    vless = ('{"protocol": "vless", "tag": "%s", "settings": {"vnext": [{"address": "127.0.0.1", "port": 9, '
+             '"users": [{"id": "d342d11e-d424-4583-b36e-524ab1f0afa4", "encryption": "none"}]}]}}')
+    bash('mkdir -p "$XRAY_DIR"; py xray-default "$XRAY_CONF"; '
+         f"py xray-add \"$XRAY_CONF\" <<< '{vless % 'de'}'; py xray-add \"$XRAY_CONF\" <<< '{vless % 'nl'}'; "
+         'py xray-prepare "$XRAY_CONF" native "$XRAY_PEERS"')
+    text, buttons = screen(await press("cl:tun:alice"))
+    labels = [t for t, _ in buttons]
+    chk("маршрут через Xray: по умолчанию, каждый выход, напрямую",
+        labels[:4] == ["🔘 По умолчанию", "⚪️ de", "⚪️ nl", "⚪️ Напрямую"] and "по умолчанию — de" in text, [text, labels])
+    text, buttons = screen(await press("cl:rt:xray|alice|x1"))
+    chk("клиенту закреплён выход nl", "🔘 nl" in [t for t, _ in buttons], [t for t, _ in buttons])
+    with open(os.path.join(ROOT, "xray.peers")) as f:
+        peers = f.read().split()
+    with open(os.path.join(ROOT, "etc/xray/config.json")) as f:
+        own = [r for r in json.load(f)["routing"]["rules"] if r.get("ruleTag") == "client-out"]
+    chk("в списке «IP|выход», в конфиге Xray — правило по адресу",
+        "10.23.45.2|nl" in peers and own and own[0]["source"] == ["10.23.45.2"] and own[0]["outboundTag"] == "nl",
+        [peers, own])
+    text, _ = screen(await press("cl:v:alice"))
+    chk("карточка: маршрут через Xray, выход nl", "Маршрут: через Xray, выход nl" in text, text)
+    text, buttons = screen(await press("cl:rt:xray|alice|on"))
+    with open(os.path.join(ROOT, "xray.peers")) as f:
+        peers = f.read().split()
+    chk("обратно на выход по умолчанию", "🔘 По умолчанию" in [t for t, _ in buttons] and "10.23.45.2" in peers, peers)
+    with open(LINKS, "w") as f:
+        f.write(links_saved)
+    with open(ACTIVE, "w") as f:
+        f.write(active_saved)
+
     print("Прокси и перезапуск бота")
     with open(os.path.join(ROOT, "bot.conf"), "w") as f:
         f.write("BOT_TOKEN=1:A\nADMIN_ID=111\n")

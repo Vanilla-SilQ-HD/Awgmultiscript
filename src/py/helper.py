@@ -1150,9 +1150,11 @@ def cmd_xray_add(path):
         die("outbound %s уже есть" % ob.get("tag"), 3)
     at = next((i for i, o in enumerate(outs) if o.get("protocol") == "freedom"), len(outs))
     outs.insert(at, ob)
-    # Новая ссылка становится активным выходом, если балансировщик не включён
+    # Новая ссылка становится выходом по умолчанию, если балансировщик не
+    # включён; клиенты со своим выходом остаются на нём
     for r in conf.get("routing", {}).get("rules", []):
-        if set(r.get("inboundTag") or []) & KNOWN_IN and not r.get("balancerTag"):
+        if set(r.get("inboundTag") or []) & KNOWN_IN and not r.get("balancerTag") \
+                and r.get("ruleTag") != XRAY_CLIENT_RULE:
             r["outboundTag"] = ob["tag"]
     jsave(path, conf)
 
@@ -1214,8 +1216,7 @@ def cmd_xray_balancer(path, strategy):
     tags = proxy_tags(conf)
     routing = conf.setdefault("routing", {})
     rules = routing.setdefault("rules", [])
-    rule = next((r for r in rules if r.get("balancerTag") == "balancer"), None) \
-        or next((r for r in rules if set(r.get("inboundTag") or []) & KNOWN_IN), None)
+    rule = next((r for r in rules if r.get("balancerTag") == "balancer"), None) or _xray_main_rule(rules)
     if strategy == "off":
         routing.pop("balancers", None)
         conf.pop("observatory", None)
@@ -1273,12 +1274,51 @@ def cmd_xray_ru(path, mode):
     jsave(path, conf)
 
 
-def cmd_xray_prepare(path, mode):
+XRAY_CLIENT_RULE = "client-out"
+
+
+def _xray_main_rule(rules):
+    """Правило, ведущее весь вход туннеля в выход по умолчанию или балансировщик."""
+    return next((r for r in rules if set(r.get("inboundTag") or []) & KNOWN_IN
+                 and r.get("ruleTag") != XRAY_CLIENT_RULE), None)
+
+
+def cmd_xray_main(path, tag):
+    """Выход по умолчанию для клиентов без своего выхода; балансировщик выключается."""
+    conf = jload(path)
+    if tag not in proxy_tags(conf):
+        die("выхода %s нет" % tag, 2)
+    routing = conf.setdefault("routing", {})
+    rules = routing.setdefault("rules", [])
+    routing.pop("balancers", None)
+    conf.pop("observatory", None)
+    rule = _xray_main_rule(rules)
+    if rule is None:
+        rule = {"type": "field", "inboundTag": ["socks-in"]}
+        rules.append(rule)
+    rule.pop("balancerTag", None)
+    rule["outboundTag"] = tag
+    jsave(path, conf)
+
+
+def cmd_xray_main_get(path):
+    rule = _xray_main_rule(jload(path).get("routing", {}).get("rules", []))
+    print("balancer" if rule and rule.get("balancerTag") else (rule or {}).get("outboundTag", ""))
+
+
+def cmd_xray_prepare(path, mode, peers=""):
     """Привести конфиг к режиму входа: native (inbound tun в самом Xray) или
     tun2socks (только SOCKS на 127.0.0.1:10808, xray0 поднимает tun2socks).
     Заодно чинит висячие ссылки на удалённые outbounds и балансировщик —
-    с ними Xray отвергает конфиг целиком."""
+    с ними Xray отвергает конфиг целиком.
+
+    peers — список клиентов Xray («IP» или «IP|выход»): клиентам со своим
+    выходом — правила по адресу (source) перед общим правилом. Только для
+    native: inbound tun видит адрес клиента (перед xray0 нет NAT), а через
+    tun2socks все соединения приходят с 127.0.0.1."""
     conf = jload(path)
+    conf.setdefault("routing", {})["rules"] = [r for r in conf["routing"].get("rules") or []
+                                               if r.get("ruleTag") != XRAY_CLIENT_RULE]
     inb = [i for i in conf.get("inbounds") or []
            if not (i.get("tag") == "xray0" and i.get("protocol") == "dokodemo-door")]
     socks = next((i for i in inb if i.get("tag") == "socks-in"), None)
@@ -1341,7 +1381,19 @@ def cmd_xray_prepare(path, mode):
                 r["outboundTag"] = ptags[0]
             else:
                 r.pop("outboundTag", None)
-    routing["rules"] = [r for r in rules if r.get("outboundTag") or r.get("balancerTag")]
+    rules = [r for r in rules if r.get("outboundTag") or r.get("balancerTag")]
+    lst = _peers_list(peers) if peers and mode == "native" else None
+    if lst:
+        by_tag = {}
+        for ip, tag in lst.items():
+            if tag in existing and tag in ptags:
+                by_tag.setdefault(tag, []).append(ip)
+        main = _xray_main_rule(rules)
+        at = rules.index(main) if main in rules else len(rules)
+        rules[at:at] = [{"type": "field", "ruleTag": XRAY_CLIENT_RULE, "inboundTag": [want],
+                         "source": sorted(ips, key=lambda x: [int(p) for p in x.split(".")] if x.count(".") == 3 else [0]),
+                         "outboundTag": tag} for tag, ips in by_tag.items()]
+    routing["rules"] = rules
     jsave(path, conf)
 
 
@@ -1571,6 +1623,8 @@ def cmd_clients_json(conf, dump, client_dir, warp, xray, exits, db=""):
                 row[t] = (lst[ip] or "shared") if ip in lst else "off"
             else:
                 row[t] = ip in lst
+        # Свой выход Xray клиента (пусто — выход по умолчанию)
+        row["xray_out"] = (tunnels["xray"] or {}).get(ip) or ""
         rows.append(row)
     print(json.dumps(rows, ensure_ascii=False))
 
@@ -1946,6 +2000,7 @@ COMMANDS = {
     "xray-probe-tag": cmd_xray_probe_tag, "xray-tun-probe": cmd_xray_tun_probe,
     "xray-test-copy": cmd_xray_test_copy,
     "xray-balancer": cmd_xray_balancer, "xray-balancer-get": cmd_xray_balancer_get,
+    "xray-main": cmd_xray_main, "xray-main-get": cmd_xray_main_get,
     "xray-ru": cmd_xray_ru, "xray-prepare": cmd_xray_prepare,
     "pcap-analyze": cmd_pcap_analyze, "safe-untar": cmd_safe_untar,
     "cert-find": cmd_cert_find, "changelog-json": cmd_changelog_json,

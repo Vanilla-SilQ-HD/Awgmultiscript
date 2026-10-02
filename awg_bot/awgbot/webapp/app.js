@@ -659,6 +659,7 @@ function statusPill(c) {
 }
 function routeTag(c, r) {
   const t = { warp: "WARP", xray: "Xray" }[r.kind];
+  if (t && r.kind === "xray" && c.xray !== false && c.xray_out) return tag("Xray: " + c.xray_out, "ok", "network");
   if (t) return c[r.kind] !== false ? tag(t, "ok", "network") : tag("мимо " + t, "", "network");
   if (r.kind === "tun2socks") return tag("tun2socks", "ok", "network");
   if (r.kind !== "exits") return null;
@@ -812,6 +813,13 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
       const cur = c.exit_choice;
       opts = [["off", "Напрямую"], ["shared", "Общий выход"], ...(r.nodes || []).map((n) => [n, "Нода " + n])]
         .map(([v, l]) => ({ label: (cur === v ? "🔘 " : "⚪️ ") + l, value: v }));
+    } else if (kind === "xray" && r.per_client && (r.tags || []).length >= 2) {
+      // Свой выход Xray клиенту; «по умолчанию» — общий выход или балансировщик
+      const on = c.xray !== false, out = c.xray_out || "";
+      const main = r.main === "balancer" ? "балансировщик" : r.main;
+      opts = [{ label: (on && !out ? "🔘 " : "⚪️ ") + "Xray: по умолчанию" + (main ? ` (${main})` : ""), value: "on" },
+        ...r.tags.map((t) => ({ label: (on && out === t ? "🔘 " : "⚪️ ") + "Xray: " + t, value: "x:" + t })),
+        { label: (on ? "⚪️ " : "🔘 ") + "Напрямую", value: "off" }];
     } else {
       const on = c[kind] !== false, t = kind === "warp" ? "WARP" : "Xray";
       opts = [{ label: (on ? "🔘 " : "⚪️ ") + "Через " + t, value: "on" }, { label: (on ? "⚪️ " : "🔘 ") + "Напрямую", value: "off" }];
@@ -819,7 +827,11 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
     const v = await sheet("Маршрут " + name, opts);
     if (!v) return;
     await busy(btn, async () => {
-      await (kind === "exits" ? call("exits", "client", name, v) : call("tunnels", "client", kind, name, v));
+      const own = kind === "xray" && r.per_client && (r.tags || []).length >= 2 && v !== "off";
+      if (own) toast("Перенастраиваю Xray…", 4000);
+      await (kind === "exits" ? call("exits", "client", name, v)
+        : own ? call("xray", "client", name, v === "on" ? "default" : v.slice(2))
+          : call("tunnels", "client", kind, name, v));
       haptic(); toast("Маршрут изменён"); render();
     });
   }
@@ -1477,6 +1489,13 @@ const BALANCERS = [["random", "случайный выход"], ["roundRobin", "
 route(/^\/tunnels\/xray$/, async (ctx) => {
   const r = await callR(["xray", "status"]);
   const d = r.data || {}, inst = d.installed, tags = d.tags || [];
+  async function outbound(t) {
+    const v = await sheet("Выход " + t, [
+      ...(d.main !== t ? [{ label: "⭐ Сделать выходом по умолчанию", value: "main" }] : []),
+      { label: "🗑 Удалить выход", value: "del" }]);
+    if (v === "main") await quick(null, "Выход по умолчанию: " + t, ["xray", "main", t]);
+    if (v === "del") await quickAsk(null, `Удалить выход ${t}?`, "Выход удалён", ["xray", "del", t]);
+  }
   async function balancer(b) {
     const v = await sheet("⚖️ Как делить трафик между выходами", BALANCERS.map(([k, l]) =>
       ({ label: `${d.balancer === k ? "🔘" : "⚪️"} ${k} — ${l}`, value: k })));
@@ -1486,10 +1505,16 @@ route(/^\/tunnels\/xray$/, async (ctx) => {
     inst ? switchRow("🇷🇺 РФ напрямую", "российские сайты мимо Xray", d.ru,
       (on) => runJob(ctx, `РФ-сайты напрямую: ${on ? "вкл" : "выкл"}`, ["xray", "ru", on ? "on" : "off"])) : null,
     inst ? [h("h2", {}, "Выходы"),
-      h("div", { class: "card list" }, tags.length ? tags.map((t) => h("div", { class: "item", onclick: () =>
-        quickAsk(null, `Удалить выход ${t}?`, "Выход удалён", ["xray", "del", t]) },
-      h("div", { class: "main" }, h("div", { class: "title" }, t)), h("div", { class: "side bad" }, icon("trash-2"))))
-        : h("div", { class: "empty" }, "Выходов нет — добавь ссылкой")),
+      h("div", { class: "card list" }, tags.length ? tags.map((t) => {
+        const own = (d.clients || []).filter((c) => c.out === t).map((c) => c.name);
+        return h("div", { class: "item", "data-name": "xo-" + t, onclick: () => outbound(t) },
+          h("div", { class: "main" }, h("div", { class: "title" }, t, d.main === t ? " " : null, d.main === t ? pill("по умолчанию", "ok") : null),
+            own.length ? h("div", { class: "sub" }, "свой выход: " + own.join(", ")) : null),
+          h("div", { class: "side" }, icon("chevron-right")));
+      }) : h("div", { class: "empty" }, "Выходов нет — добавь ссылкой")),
+      tags.length > 1 ? hint(d.per_client ? "Клиенту можно закрепить свой выход: Клиенты → клиент → Маршрут. "
+        + "Остальные идут через выход по умолчанию или балансировщик."
+        : "Свой выход клиенту — только с inbound tun в самом Xray: обнови Xray.") : null,
       btn("➕ Добавить выход", () => go("/tunnels/xray/add"), "btn-block" + (tags.length ? "" : " btn-primary")),
       tags.length > 1 ? btn(`⚖️ Балансировщик: ${d.balancer || "off"}`, balancer, "btn-block") : null,
       h("h2", {}, "Управление")] : null,
