@@ -615,6 +615,10 @@ do_repair() {
     else err "Не удалось — Сервер → Модуль ядра"; fi
   fi
   mod_stale && _issue "В памяти прежняя сборка модуля — Сервер → Модуль ядра → перезагрузить модуль"
+  if [[ -n "$(kernel_gap)" ]]; then
+    _issue "Ядро $(kernel_gap_line) без модуля AWG — после перезагрузки awg0 не поднимется"
+    mod_rebuild_all && _fixed "Модуль собран под все ядра"
+  fi
   if grep -qs "^$MOD_NAME" "$MODULES_LOAD_FILE"; then ok "Автозагрузка модуля"
   else _issue "Нет автозагрузки модуля"; mod_autoload && _fixed "Автозагрузка настроена"; fi
 
@@ -967,6 +971,7 @@ server_reset() {
   tunnels_panic_reset quiet
   awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true
   rm -f "$SERVER_CONF" "$SERVER_CONF".bak.* "$SERVER_CONF".pre_* "$CLIENT_DIR"/*_awg[23].conf
+  rm -f "$TRAFFIC_DB" "$TRAFFIC_DB.lock"
   ufw_delete_matching AmneziaWG
   : > "$WARP_PEERS" 2>/dev/null || true
   : > "$XRAY_PEERS" 2>/dev/null || true

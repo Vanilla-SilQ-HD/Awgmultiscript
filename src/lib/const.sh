@@ -35,6 +35,14 @@ UPDATE_REPO_STABLE="pumbaX/awg-multi-script"
 UPDATE_REPO_BETA="genaRijoff/awg-multi-script"
 UPDATE_CHANNEL_FILE="$STATE_DIR/channel"
 UPDATE_CHECK_TTL=21600
+# Подпись сборок: awg2.sh.sig рядом с awg2.sh (ssh-keygen -Y sign, ставит
+# GitHub Actions). Ключ релизов вшит сюда — подменить сборку на зеркале
+# или по пути без закрытого ключа нельзя. Сборки старше UPDATE_SIG_SINCE
+# выходили без подписи.
+UPDATE_SIG_NS="awg-toolza"
+UPDATE_SIGNER="awg-toolza-release"
+UPDATE_SIG_SINCE="v1.2.0"
+UPDATE_SIGNERS=()
 
 # ── Бэкапы ────────────────────────────────────────────────
 # В домашнем каталоге того, кто запустил sudo: так было всегда, и уже
@@ -133,6 +141,7 @@ EXPIRE_TIMER="/etc/systemd/system/awg2-expire.timer"
 EXPIRE_STATE_DIR="/var/lib/awg2-expire"
 EXPIRE_LOG="/var/log/awg2-expire.log"
 EXPIRE_SUSPEND_IP="127.0.0.2/32"
+TRAFFIC_DB="$STATE_DIR/traffic.json"          # трафик клиентов по дням (таймер сроков)
 
 # ── WG + обфускатор ───────────────────────────────────────
 WGOBF_VERSION="v1.6"

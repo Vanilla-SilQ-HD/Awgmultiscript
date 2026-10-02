@@ -85,6 +85,63 @@ _update_download() {  # файл
   return 1
 }
 
+# Подпись awg2.sh.sig — напрямую и через зеркала: подделать её зеркало не может.
+_update_download_sig() {  # файл
+  local mp url
+  url="${UPDATE_URL%/*}/awg2.sh.sig?nocache=$(date +%s)"
+  for mp in "${GH_MIRRORS[@]}"; do
+    curl -fsSL --connect-timeout 10 --max-time 30 --max-filesize 16384 -H 'Cache-Control: no-cache' \
+      "${mp}${url}" -o "$1" 2>/dev/null || continue
+    grep -q 'BEGIN SSH SIGNATURE' "$1" && return 0
+  done
+  return 1
+}
+
+# Проверка подписи файла $1 подписью $2 ключом релизов. 0 — верна.
+update_sig_ok() {
+  local allowed s
+  (( ${#UPDATE_SIGNERS[@]} )) || return 1
+  command -v ssh-keygen &>/dev/null || need_cmds ssh-keygen:openssh-client >/dev/null || return 1
+  mktmp allowed || return 1
+  for s in "${UPDATE_SIGNERS[@]}"; do
+    printf '%s namespaces="%s" %s\n' "$UPDATE_SIGNER" "$UPDATE_SIG_NS" "$s"
+  done > "$allowed"
+  ssh-keygen -Y verify -f "$allowed" -I "$UPDATE_SIGNER" -n "$UPDATE_SIG_NS" -s "$2" < "$1" &>/dev/null
+}
+
+# Подпись скачанной сборки. Без подписи ставится только сборка старше
+# UPDATE_SIG_SINCE (откат на старую версию) и только из меню, после «yes»:
+# новая сборка без подписи — это подмена или сбой, а не выпуск.
+update_verify() {  # файл
+  local sig
+  # Ключ вшивается в каждую выпущенную сборку (тест сборки это проверяет);
+  # без него — только локальная тестовая сборка, ей проверять нечем
+  if (( ${#UPDATE_SIGNERS[@]} == 0 )); then
+    warn "Тестовая сборка без ключа релизов — подпись обновления не проверяется"
+    return 0
+  fi
+  mktmp sig || return 1
+  if ! _update_download_sig "$sig"; then
+    if (( 10#$(ver_num "$UPDATE_NEW") >= 10#$(ver_num "$UPDATE_SIG_SINCE") )); then
+      err "У сборки $UPDATE_NEW нет подписи (awg2.sh.sig) — не ставлю. Повтори через пару минут"
+      return 1
+    fi
+    warn "Сборка $UPDATE_NEW вышла до подписей ($UPDATE_SIG_SINCE) — подлинность не проверить"
+    if ! read_confirm "${Y}  Поставить без проверки подписи? (введи yes): ${N}"; then
+      (( AUTO_MODE )) && err "Сборку без подписи ставлю только из меню awg2 — Обновление"
+      return 1
+    fi
+    return 0
+  fi
+  if ! update_sig_ok "$1" "$sig"; then
+    err "Подпись сборки $UPDATE_NEW не сходится — файл изменён по пути (зеркало?) или только что выложен."
+    info "Повтори через пару минут; не помогло — напиши в t.me/awgToolza"
+    log_info "обновление $UPDATE_NEW отклонено: подпись не сходится"
+    return 1
+  fi
+  ok "Подпись сборки верна"
+}
+
 # Скачать сборку из канала и проверить её → UPDATE_FILE, UPDATE_NEW.
 UPDATE_FILE="" UPDATE_NEW=""
 update_fetch() {
@@ -97,9 +154,10 @@ update_fetch() {
     return 1
   fi
   UPDATE_NEW=$(head -c 4096 "$UPDATE_FILE" | grep -m1 '^VERSION=' | cut -d'"' -f2)
-  [[ -n "$UPDATE_NEW" ]] || { err "В скачанном файле нет VERSION"; return 1; }
-  printf '%s %s\n' "$UPDATE_NEW" "$(date +%s)" > "$UPDATE_CACHE" 2>/dev/null || true
+  [[ "$UPDATE_NEW" =~ ^v?[0-9]+\.[0-9]+ ]] || { err "В скачанном файле нет VERSION"; return 1; }
   echo "Текущая: $VERSION, в канале: $UPDATE_NEW"
+  update_verify "$UPDATE_FILE" || return 1
+  printf '%s %s\n' "$UPDATE_NEW" "$(date +%s)" > "$UPDATE_CACHE" 2>/dev/null || true
 }
 
 # Поставить скачанное. Замена через rename: работающие копии awg2 дочитывают

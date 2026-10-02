@@ -86,6 +86,7 @@ _api_status() {
     _kv components.module_update "$(mod_update_available)"
     _kv components.tools_update "$(tools_update_available)"
     _kv components.reboot "$(reboot_reason)"
+    _kv components.kernel_gap "$(kernel_gap_line)"
     _kv server.exists:b "$(_b server_exists)"
     if server_exists; then
       _kv server.up:b "$(_b iface_up)"
@@ -189,6 +190,7 @@ _api_module() {
         _kv module_update "$(mod_update_available)"; _kv tools_update "$(tools_update_available)"
         _kv module_latest "$(upstream_latest mod)"; _kv tools_latest "$(upstream_latest tools)"
         _kv reboot "$(reboot_reason)"; _kv secure_boot:b "$(_b secure_boot_on)"
+        _kv kernel_gap "$(kernel_gap_line)"
         _kv backups:n "$(mod_backups | grep -c . || true)"
       } | api_obj
       components_report ;;
@@ -227,7 +229,7 @@ _api_clients() {
       server_exists || { echo '[]' > "$API_DATA"; return 0; }
       mktmp dump || return 1
       awg show "$AWG_IF" dump > "$dump" 2>/dev/null || true
-      py clients-json "$SERVER_CONF" "$dump" "$CLIENT_DIR" "$WARP_PEERS" "$XRAY_PEERS" "$EXITS_PEERS" > "$API_DATA" ;;
+      py clients-json "$SERVER_CONF" "$dump" "$CLIENT_DIR" "$WARP_PEERS" "$XRAY_PEERS" "$EXITS_PEERS" "$TRAFFIC_DB" > "$API_DATA" ;;
     bulk) _api_clients_bulk "$@" ;;
     del) _api_clients_del "$@" ;;
     export)
@@ -323,7 +325,7 @@ _api_clients_bulk() {
 
 _api_client() {
   local a="${1:-}" name="${2:-}" f
-  [[ -n "$name" ]] || { _api_usage "client add|del|rename|conf|mimicry|expire|unexpire ИМЯ ..."; return; }
+  [[ -n "$name" ]] || { _api_usage "client add|del|rename|conf|mimicry|expire|unexpire|limit|limit-reset ИМЯ ..."; return; }
   shift 2
   case "$a" in
     add)
@@ -348,7 +350,11 @@ _api_client() {
       [[ -n "${1:-}" ]] || { _api_usage "client expire ИМЯ unix-время|+30d|+12h|дата"; return; }
       client_expire_set "$name" "$(_api_ts "$1")" ;;
     unexpire) client_expire_clear "$name" ;;
-    *) _api_usage "client add|del|rename|conf|mimicry|expire|unexpire ИМЯ ..." ;;
+    limit)
+      [[ -n "${1:-}" ]] || { _api_usage "client limit ИМЯ 50G|500M|off [month|total]"; return; }
+      client_limit_set "$name" "$1" "${2:-month}" ;;
+    limit-reset) client_limit_reset "$name" ;;
+    *) _api_usage "client add|del|rename|conf|mimicry|expire|unexpire|limit|limit-reset ИМЯ ..." ;;
   esac
 }
 
@@ -358,6 +364,21 @@ _api_mimicry() {
     IFS='|' read -r id label hint <<< "$i"
     printf '%s\t%s\t%s\t%s\n' "$id" "$label" "$hint" "$(_profile_needs_domain "$id" && echo 1 || echo 0)"
   done | api_rows id label hint domain:b
+}
+
+# ── Трафик по дням ────────────────────────────────────────
+_api_traffic() {
+  local tr name="" days=30
+  case "${1:-}" in
+    daily)
+      [[ "${2:-}" =~ ^[0-9]+$ ]] && days="$2" || { name="${2:-}"; [[ "${3:-}" =~ ^[0-9]+$ ]] && days="$3"; }
+      [[ "$name" == all ]] && name=""
+      server_exists || { err "Сервер не создан"; return 1; }
+      mktmp tr || return 1
+      awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || true
+      py traffic-daily "$SERVER_CONF" "$TRAFFIC_DB" "$tr" "$name" "$days" > "$API_DATA" ;;
+    *) _api_usage "traffic daily [ИМЯ|all] [ДНЕЙ]" ;;
+  esac
 }
 
 # ── Диагностика ───────────────────────────────────────────
@@ -380,7 +401,7 @@ _api_backup() {
   shift || true
   case "$a" in
     create)
-      backup_create archive || return 1
+      backup_create archive "${1:-}" "${2:-}" || return 1
       { _kv path "$BACKUP_PATH"; _kv size:n "$(stat -c %s "$BACKUP_PATH")"; } | api_obj ;;
     list)
       while IFS= read -r p; do
@@ -398,7 +419,7 @@ _api_backup() {
     restore)
       [[ -n "${1:-}" ]] || { _api_usage "backup restore ПУТЬ [wgobf] [tunnels]"; return; }
       backup_restore "$@" ;;
-    *) _api_usage "backup create|list|inspect ПУТЬ|restore ПУТЬ [wgobf] [tunnels]" ;;
+    *) _api_usage "backup create [auto [ХРАНИТЬ]]|list|inspect ПУТЬ|restore ПУТЬ [wgobf] [tunnels]" ;;
   esac
 }
 
@@ -841,7 +862,8 @@ _api_readonly() {
     "status "|"version "|"help "|"mimicry "|"log "*|"job "*|"diag "*) return 0 ;;
     *" status"|*" info"|*" report"|*" tags"|*" backups"|*" list"|*" conf"|*" inspect") return 0 ;;
     "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|\
-    "bot proxy"|"bot webapp"|"update check"|"update changelog"|"module check"|"cert "|"cert find") return 0 ;;
+    "bot proxy"|"bot webapp"|"update check"|"update changelog"|"module check"|"cert "|"cert find"|\
+    "traffic daily") return 0 ;;
   esac
   return 1
 }
@@ -870,6 +892,7 @@ api_dispatch() {
     clients) _api_clients "$@" ;;
     client) _api_client "$@" ;;
     mimicry) _api_mimicry ;;
+    traffic) _api_traffic "$@" ;;
     diag) _api_diag "$@" ;;
     backup) _api_backup "$@" ;;
     tunnels) _api_tunnels "$@" ;;
@@ -887,7 +910,7 @@ api_dispatch() {
     log) _api_log "$@" ;;
     job) _api_job "$@" ;;
     help)
-      echo "Разделы: status server module clients client mimicry diag backup tunnels warp xray t2s"
+      echo "Разделы: status server module clients client mimicry traffic diag backup tunnels warp xray t2s"
       echo "         exits cascade dns wgobf update bot uninstall log job version"
       echo "Подсказка по разделу: awg2 api РАЗДЕЛ" ;;
     *) err "Неизвестная команда: $cmd — awg2 api help"; return 2 ;;

@@ -20,7 +20,7 @@ from typing import Any, Callable
 from aiogram.types import BufferedInputFile, FSInputFile
 from aiohttp import web
 
-from . import __version__, access, admins, api, icons, media, store
+from . import __version__, access, admins, alerts, api, icons, media, store
 from .sections import backup as bk
 from .sections import botself
 from .sections import clients as cls
@@ -30,7 +30,7 @@ from .sections import wgobf
 # Команды awg2 api, открытые панели; первое слово — раздел
 ALLOWED = {"status", "version", "server", "module", "clients", "client", "mimicry", "diag", "backup",
            "tunnels", "warp", "xray", "t2s", "exits", "cascade", "dns", "wgobf", "update", "log", "bot",
-           "cert", "uninstall"}
+           "cert", "uninstall", "traffic"}
 OWNER_ONLY = (("uninstall",), ("bot", "uninstall"), ("bot", "webapp", "port"), ("cert", "issue"),
               ("cert", "use"), ("cert", "remove"))
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
@@ -220,6 +220,25 @@ def setup(app: web.Application, user_of: UserOf) -> None:
         if body.get("sort") in cls.SORTS:
             store.set_setting("clients_sort", body["sort"])
         return web.json_response({"ok": True})
+
+    # ── Уведомления о сервере и автобэкап ──
+    @route("/api/alerts")
+    async def _alerts(request: web.Request, user: dict, body: dict) -> web.Response:
+        """Без полей — прочитать; kind+on, backup_mode, backup_keep — изменить
+        (только владелец: автобэкап уходит владельцам, уведомления — всем)."""
+        if any(k in body for k in ("kind", "backup_mode", "backup_keep", "backup_now")):
+            _owner(user)
+            if body.get("kind") in alerts.KIND_IDS:
+                alerts.set_enabled(body["kind"], bool(body.get("on")))
+            mode, keep = body.get("backup_mode"), body.get("backup_keep")
+            if mode is not None and mode not in alerts.BACKUP_MODES:
+                raise _bad("backup_mode: off | day | week")
+            if keep is not None and keep not in alerts.BACKUP_KEEP:
+                raise _bad("backup_keep: 3 | 7 | 14 | 30")
+            alerts.set_backup(mode=mode, keep=keep)
+            if body.get("backup_now"):
+                await alerts.backup_due(request.app["bot"], force=True)
+        return web.json_response({"ok": True, "owner": access.is_owner(int(user["id"])), **alerts.overview()})
 
     # ── Файлы — в чат с ботом ──
     @route("/api/send")

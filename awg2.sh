@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.1.9"
+VERSION="v1.2.0"
 
 # ═════ core ═════
 # Базовые примитивы: вывод, ввод, журнал, временные файлы, случайные числа,
@@ -336,6 +336,14 @@ UPDATE_REPO_STABLE="pumbaX/awg-multi-script"
 UPDATE_REPO_BETA="genaRijoff/awg-multi-script"
 UPDATE_CHANNEL_FILE="$STATE_DIR/channel"
 UPDATE_CHECK_TTL=21600
+# Подпись сборок: awg2.sh.sig рядом с awg2.sh (ssh-keygen -Y sign, ставит
+# GitHub Actions). Ключ релизов вшит сюда — подменить сборку на зеркале
+# или по пути без закрытого ключа нельзя. Сборки старше UPDATE_SIG_SINCE
+# выходили без подписи.
+UPDATE_SIG_NS="awg-toolza"
+UPDATE_SIGNER="awg-toolza-release"
+UPDATE_SIG_SINCE="v1.2.0"
+UPDATE_SIGNERS=()
 
 # ── Бэкапы ────────────────────────────────────────────────
 # В домашнем каталоге того, кто запустил sudo: так было всегда, и уже
@@ -434,6 +442,7 @@ EXPIRE_TIMER="/etc/systemd/system/awg2-expire.timer"
 EXPIRE_STATE_DIR="/var/lib/awg2-expire"
 EXPIRE_LOG="/var/log/awg2-expire.log"
 EXPIRE_SUSPEND_IP="127.0.0.2/32"
+TRAFFIC_DB="$STATE_DIR/traffic.json"          # трафик клиентов по дням (таймер сроков)
 
 # ── WG + обфускатор ───────────────────────────────────────
 WGOBF_VERSION="v1.6"
@@ -989,7 +998,8 @@ client_files_sync_suffix() {
   done < <(client_files)
 }
 
-# Клиенты сервера: строки «имя<TAB>ключ<TAB>AllowedIPs<TAB>expires<TAB>orig_ips<TAB>mimicry».
+# Клиенты сервера: строки «имя<TAB>ключ<TAB>AllowedIPs<TAB>expires<TAB>orig_ips<TAB>mimicry
+# <TAB>limit<TAB>blocked_by».
 clients_tsv() { server_exists || return 0; py peers "$SERVER_CONF"; }
 # То же через «|»: табуляция для read — пробельный разделитель, подряд идущие
 # табы схлопываются, и пустые колонки (срок, orig_ips) сдвигают соседние.
@@ -1008,7 +1018,7 @@ client_exists() { clients_tsv | awk -F'\t' -v n="$1" '$1 == n {f = 1} END {exit 
 
 peer_meta_get() {  # имя ключ
   clients_tsv | awk -F'\t' -v n="$1" -v k="$2" '
-    BEGIN { col["expires"] = 4; col["orig_ips"] = 5; col["mimicry"] = 6 }
+    BEGIN { col["expires"] = 4; col["orig_ips"] = 5; col["mimicry"] = 6; col["limit"] = 7; col["blocked_by"] = 8 }
     $1 == n { print $(col[k]); exit }'
 }
 
@@ -1125,6 +1135,28 @@ mod_stale() {
   (( newest > 0 && kt > 0 && newest > kt ))
 }
 
+# Ядра, в которые сервер может загрузиться (работающее и новее), без
+# собранного модуля — после перезагрузки в такое ядро awg0 не поднимется.
+# Так бывает, когда apt поставил новое ядро, а DKMS не смог собрать под него
+# модуль (Ubuntu 7.0.0-38) или заголовков к нему нет. Строки «ядро» или
+# «ядро нет-заголовков»; пусто — всё в порядке.
+kernel_gap() {
+  local k running
+  command -v dkms &>/dev/null && [[ -d "$MOD_SRC_DIR" ]] || return 0
+  running=$(uname -r)
+  for k in $(installed_kernels); do
+    [[ "$(printf '%s\n%s\n' "$running" "$k" | sort -V | head -1)" == "$running" ]] || continue
+    mod_built_for "$k" && continue
+    [[ "$k" == "$running" ]] && mod_loaded && continue
+    if [[ -d "/lib/modules/$k/build" ]]; then echo "$k"; else echo "$k нет-заголовков"; fi
+  done
+}
+
+# Одной строкой для сводок: «6.8.0-150» или «6.8.0-150 (нет заголовков)».
+kernel_gap_line() {
+  kernel_gap | sed 's/ нет-заголовков$/ (нет заголовков)/' | paste -sd, - | sed 's/,/, /g'
+}
+
 # Почему нужна перезагрузка (сервера или модуля). Пусто — не нужна.
 reboot_reason() {
   local running newest
@@ -1236,12 +1268,16 @@ tools_update_available() {
 
 # Строка состояния для шапки меню.
 components_summary() {
-  local tag upd reason
+  local tag upd reason gap
   command -v awg &>/dev/null || { echo -e "${R}не установлены${N} ${D}— Сервер → Установить компоненты${N}"; return; }
   tag=$(mod_tag)
   reason=$(reboot_reason)
   upd=$(mod_update_available)
-  if [[ -n "$reason" ]]; then
+  gap=$(kernel_gap_line)
+  if [[ -n "$gap" && "$gap" != "$(uname -r)"* ]]; then
+    echo -e "${R}${tag:-?} ▲ ядро $gap без модуля AWG${N} ${D}— после перезагрузки VPN не поднимется:${N}"
+    echo -e "               ${D}Сервер → Модуль ядра → 5) Пересобрать${N}"
+  elif [[ -n "$reason" ]]; then
     echo -e "${Y}${tag:-?} ▲ ${reason}${N}"
   elif [[ -n "$upd" ]]; then
     echo -e "${W}${tag}${N} ${G}⬆ есть $upd${N} ${D}— Сервер → Модуль ядра${N}"
@@ -1282,6 +1318,7 @@ components_report() {
 
   for k in $(installed_kernels); do
     s="${R}✗ не собран${N}"
+    [[ -n "$(kernel_gap | awk -v k="$k" '$1 == k')" ]] && s="${R}✗ не собран — пункт 5${N}"
     mod_built_for "$k" && s="${G}✓ собран${N}"
     [[ -d "/lib/modules/$k/build" ]] || s+=" ${D}(нет заголовков)${N}"
     [[ "$k" == "$running" ]] && s+=" ${D}← работает${N}"
@@ -1542,8 +1579,22 @@ tools_update_flow() {  # [force]
   tools_install_tag "$tag"
 }
 
+# Сборка под все ядра. Ядрам, в которые сервер может загрузиться, сначала
+# ставятся недостающие заголовки — иначе их сборка молча пропускается.
 mod_rebuild_all() {
-  components_deps && run_step "Сборка DKMS под все ядра" _mod_dkms_install_all
+  local k _
+  components_deps || return 1
+  while read -r k _; do
+    [[ -n "$k" && ! -d "/lib/modules/$k/build" ]] || continue
+    run_step "Заголовки ядра $k" ensure_headers "$k" || warn "Заголовков для $k в репозитории нет"
+  done < <(kernel_gap)
+  run_step "Сборка DKMS под все ядра" _mod_dkms_install_all || return 1
+  if [[ -n "$(kernel_gap)" ]]; then
+    warn "Модуль не собран под: $(kernel_gap_line) — после перезагрузки в это ядро awg0 не поднимется"
+    info "Журнал сборки: $MOD_LOG и /var/lib/dkms/$MOD_NAME/$MOD_DKMS_VER/build/make.log"
+    return 1
+  fi
+  ok "Модуль собран под все ядра"
 }
 
 mod_backups() { ls -1t "$MOD_BACKUP_DIR"/src-*.tar.gz 2>/dev/null || true; }
@@ -1602,7 +1653,7 @@ do_components_menu() {
     echo -e "  ${C}2)${N} Выбрать версию модуля из списка"
     echo -e "  ${C}3)${N} Обновить amneziawg-tools ${D}${tupd:+до $tupd}${N}"
     echo -e "  ${C}4)${N} Перезагрузить модуль ${D}— без ребута${N}"
-    echo -e "  ${C}5)${N} Пересобрать под все установленные ядра"
+    echo -e "  $([[ -n "$(kernel_gap)" ]] && echo "${Y}" || echo "${C}")5)${N} Пересобрать под все установленные ядра"
     echo -e "  ${C}6)${N} Откат модуля из резервной копии"
     echo -e "  ${C}7)${N} Проверить обновления сейчас"
     echo -e "  ${W}0)${N} ← Назад"
@@ -2714,6 +2765,10 @@ do_repair() {
     else err "Не удалось — Сервер → Модуль ядра"; fi
   fi
   mod_stale && _issue "В памяти прежняя сборка модуля — Сервер → Модуль ядра → перезагрузить модуль"
+  if [[ -n "$(kernel_gap)" ]]; then
+    _issue "Ядро $(kernel_gap_line) без модуля AWG — после перезагрузки awg0 не поднимется"
+    mod_rebuild_all && _fixed "Модуль собран под все ядра"
+  fi
   if grep -qs "^$MOD_NAME" "$MODULES_LOAD_FILE"; then ok "Автозагрузка модуля"
   else _issue "Нет автозагрузки модуля"; mod_autoload && _fixed "Автозагрузка настроена"; fi
 
@@ -3066,6 +3121,7 @@ server_reset() {
   tunnels_panic_reset quiet
   awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true
   rm -f "$SERVER_CONF" "$SERVER_CONF".bak.* "$SERVER_CONF".pre_* "$CLIENT_DIR"/*_awg[23].conf
+  rm -f "$TRAFFIC_DB" "$TRAFFIC_DB.lock"
   ufw_delete_matching AmneziaWG
   : > "$WARP_PEERS" 2>/dev/null || true
   : > "$XRAY_PEERS" 2>/dev/null || true
@@ -3191,7 +3247,8 @@ client_expire_set() {  # имя unix-время
   expire_install
   # Заблокированному сначала вернуть адрес: expire-set правит только метку,
   # и клиент остался бы на 127.0.0.2 с новым сроком — «заблокирован» без причины.
-  if [[ -n "$(peer_meta_get "$1" orig_ips)" ]]; then
+  # Блокировку за трафик новый срок не снимает — её снимает лимит.
+  if [[ -n "$(peer_meta_get "$1" orig_ips)" && "$(peer_meta_get "$1" blocked_by)" != traffic ]]; then
     py expire-clear "$SERVER_CONF" "$1" "$EXPIRE_SUSPEND_IP" >/dev/null || return 1
     _expire_apply
   fi
@@ -3206,6 +3263,32 @@ client_expire_clear() {
   py expire-clear "$SERVER_CONF" "$1" "$EXPIRE_SUSPEND_IP" >/dev/null || return 1
   _expire_apply
   ok "$1 — бессрочный"
+}
+
+# Лимит трафика: РАЗМЕР (50G, 500M) за месяц или всего; off — снять.
+# Применяется сразу: превысивший блокируется, уложившийся — разблокируется.
+client_limit_set() {  # имя размер|off [month|total]
+  local name="$1" size="$2" period="${3:-month}" v
+  client_exists "$name" || { err "Клиента $name нет"; return 1; }
+  [[ "$period" == month || "$period" == total ]] || { err "Период: month или total"; return 1; }
+  expire_install
+  v=$(py limit-set "$SERVER_CONF" "$TRAFFIC_DB" "$name" "$size" "$period") || return 1
+  traffic_tick 1
+  if [[ "$size" == off ]]; then ok "$name — без лимита трафика"
+  else ok "Лимит $name: $v $([[ "$period" == month ]] && echo "в месяц" || echo "всего")"; fi
+}
+
+client_limit_reset() {  # имя
+  client_exists "$1" || { err "Клиента $1 нет"; return 1; }
+  py limit-reset "$SERVER_CONF" "$TRAFFIC_DB" "$1" || return 1
+  traffic_tick 1
+  ok "Счётчик лимита $1 обнулён"
+}
+
+# «12.3 ГБ из 50.0 ГБ за месяц» для меню.
+limit_fmt() {  # метка limit (БАЙТ/период) использовано
+  local n="${1%/*}" p="${1#*/}"
+  echo "$(fmt_bytes "${2:-0}") из $(fmt_bytes "$n") $([[ "$p" == month ]] && echo "за месяц" || echo "всего")"
 }
 
 clients_purge_blocked() {
@@ -3433,9 +3516,13 @@ do_show_client_qr() { _pick_client_file && share_config "$CHOSEN" qr; }
 
 do_list_clients() {
   server_exists || { err "Сервер не создан"; return 1; }
-  local dump now name pub aip exp orig _ hs rx tx ep st i=0 age
+  local dump now name pub aip exp orig _ hs rx tx ep st i=0 age lim per used month today by
+  local -A tl=()
   dump=$(awg show "$AWG_IF" dump 2>/dev/null | tail -n +2)
   now=$(date +%s)
+  while IFS='|' read -r name lim per used month today by; do
+    [[ -n "$name" ]] && tl[x$name]="$lim|$per|$used|$month|$today|$by"
+  done < <(traffic_rows)
   echo ""
   hdr "Клиенты"
   while IFS='|' read -r name pub aip exp orig _; do
@@ -3452,9 +3539,13 @@ do_list_clients() {
     fi
     echo -e "  ${W}$i) ${name:-без имени}${N}  ${D}$aip${N}"
     echo -e "     $st  ↑ $(fmt_bytes "${tx:-0}")  ↓ $(fmt_bytes "${rx:-0}")${ep:+  ${D}${ep%:*}${N}}"
+    IFS='|' read -r lim per used month today by <<< "${tl[x$name]:-0|||0|0|}"
+    (( ${month:-0} )) && echo -e "     ${D}за месяц $(fmt_bytes "$month"), сегодня $(fmt_bytes "${today:-0}")${N}"
+    if [[ "$by" == traffic ]]; then echo -e "     ${R}заблокирован: исчерпан лимит — $(limit_fmt "$lim/$per" "$used")${N}"
+    elif [[ "${lim:-0}" != 0 ]]; then echo -e "     ${D}лимит: $(limit_fmt "$lim/$per" "$used")${N}"; fi
     if [[ -n "$exp" ]]; then
-      if [[ -n "$orig" ]]; then echo -e "     ${R}заблокирован: срок истёк $(expire_fmt "$exp")${N}"
-      else echo -e "     ${Y}срок: $(expire_fmt "$exp")${N}"; fi
+      if [[ -n "$orig" && "$by" != traffic ]]; then echo -e "     ${R}заблокирован: срок истёк $(expire_fmt "$exp")${N}"
+      elif [[ -z "$orig" ]]; then echo -e "     ${Y}срок: $(expire_fmt "$exp")${N}"; fi
     fi
   done < <(clients_psv)
   (( i )) || info "Клиентов нет"
@@ -3494,7 +3585,7 @@ do_clients_menu() {
     echo -e "  ${C}4)${N} Показать QR"
     echo -e "  ${C}5)${N} Переименовать"
     echo -e "  ${G}6)${N} Создать несколько"
-    echo -e "  ${C}7)${N} Срок действия"
+    echo -e "  ${C}7)${N} Сроки и лимиты трафика"
     echo -e "  ${C}8)${N} Экспорт всех (zip)"
     echo -e "  ${C}9)${N} Сменить мимикрию"
     echo -e "  ${R}10)${N} Удалить"
@@ -3541,36 +3632,72 @@ EOF
   done
 }
 
+# Имя клиента в HTML-сообщении Telegram: конфиг, правленный руками, может
+# нести в имени что угодно.
+_expire_esc() { local s="${1//&/&amp;}"; s="${s//</&lt;}"; printf '%s' "${s//>/&gt;}"; }
+
+_expire_sync() {
+  local stripped
+  stripped=$(awg-quick strip "$AWG_IF" 2>/dev/null) \
+    && awg syncconf "$AWG_IF" <(printf '%s\n' "$stripped") 2>>"$EXPIRE_LOG"
+}
+
+# Трафик клиентов: прирост счётчиков — в базу по дням, превысившие лимит
+# блокируются, в новом месяце (или после смены лимита) — разблокируются.
+traffic_tick() {  # [1 — записать базу сейчас]
+  local out ev name arg text tr="$EXPIRE_STATE_DIR/transfer" ifx=""
+  [[ -f "$SERVER_CONF" ]] || return 0
+  mkdir -p "$EXPIRE_STATE_DIR"
+  awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || : > "$tr"
+  ifx=$(cat "/sys/class/net/$AWG_IF/ifindex" 2>/dev/null || true)
+  out=$(py traffic-tick "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$TRAFFIC_DB" "$tr" "$ifx" "${1:-0}" 2>>"$EXPIRE_LOG") || return 0
+  while IFS=$'\t' read -r ev name arg text; do
+    case "$ev" in
+      CHANGED) _expire_sync ;;
+      LIMIT)
+        echo "$(date '+%F %T') limit: $name ($text)" >> "$EXPIRE_LOG"
+        command -v conntrack >/dev/null && conntrack -D -s "${arg%%/*}" >/dev/null 2>&1
+        _expire_notify "🚫 Клиент <b>$(_expire_esc "$name")</b> заблокирован: исчерпан лимит трафика — ${text}." ;;
+      WARN90)
+        echo "$(date '+%F %T') limit90: $name ($arg)" >> "$EXPIRE_LOG"
+        _expire_notify "⚠️ Клиент <b>$(_expire_esc "$name")</b> израсходовал 90% лимита трафика: ${arg}." ;;
+      UNLIMIT)
+        echo "$(date '+%F %T') unlimit: $name ($arg)" >> "$EXPIRE_LOG"
+        _expire_notify "✅ Клиент <b>$(_expire_esc "$name")</b> разблокирован — трафик в пределах лимита: ${arg}." ;;
+    esac
+  done <<< "$out"
+  return 0
+}
+
 # Точка входа таймера (awg2-expire-check).
 expire_check_run() {
-  local out ev name arg stripped
+  local out ev name arg
   [[ -f "$SERVER_CONF" ]] || return 0
-  out=$(py expire-check "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$EXPIRE_STATE_DIR" 2>>"$EXPIRE_LOG") || return 0
+  out=$(py expire-check "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$EXPIRE_STATE_DIR" 2>>"$EXPIRE_LOG") || out=""
   while IFS=$'\t' read -r ev name arg; do
     case "$ev" in
-      CHANGED)
-        stripped=$(awg-quick strip "$AWG_IF" 2>/dev/null) \
-          && awg syncconf "$AWG_IF" <(printf '%s\n' "$stripped") 2>>"$EXPIRE_LOG" ;;
+      CHANGED) _expire_sync ;;
       EXPIRED)
         echo "$(date '+%F %T') expired: $name (было $arg)" >> "$EXPIRE_LOG"
         command -v conntrack >/dev/null && conntrack -D -s "${arg%%/*}" >/dev/null 2>&1
-        _expire_notify "🚫 Клиент <b>${name}</b> заблокирован: срок действия истёк." ;;
+        _expire_notify "🚫 Клиент <b>$(_expire_esc "$name")</b> заблокирован: срок действия истёк." ;;
       WARN1H)
         echo "$(date '+%F %T') warn1h: $name ($arg мин)" >> "$EXPIRE_LOG"
-        _expire_notify "⚠️ Клиент <b>${name}</b> истекает через ${arg} мин." ;;
+        _expire_notify "⚠️ Клиент <b>$(_expire_esc "$name")</b> истекает через ${arg} мин." ;;
     esac
   done <<< "$out"
+  traffic_tick
   return 0
 }
 
 expire_install() {
   mkdir -p "$EXPIRE_STATE_DIR"
   emit_script "$EXPIRE_BIN" 'expire_check_run' \
-    SERVER_CONF AWG_IF EXPIRE_SUSPEND_IP EXPIRE_STATE_DIR EXPIRE_LOG BOT_CONF BOT_ADMINS _PY_HELPER \
-    py _expire_notify expire_check_run || return 1
+    SERVER_CONF AWG_IF EXPIRE_SUSPEND_IP EXPIRE_STATE_DIR EXPIRE_LOG BOT_CONF BOT_ADMINS TRAFFIC_DB _PY_HELPER \
+    py _expire_notify _expire_esc _expire_sync traffic_tick expire_check_run || return 1
   write_file "$EXPIRE_SERVICE" 644 <<EOF
 [Unit]
-Description=AWG Toolza — проверка сроков клиентов
+Description=AWG Toolza — сроки и трафик клиентов
 After=awg-quick@awg0.service network-online.target
 
 [Service]
@@ -3579,7 +3706,7 @@ ExecStart=$EXPIRE_BIN
 EOF
   write_file "$EXPIRE_TIMER" 644 <<'EOF'
 [Unit]
-Description=AWG Toolza — таймер проверки сроков
+Description=AWG Toolza — таймер сроков и трафика клиентов
 
 [Timer]
 OnBootSec=30s
@@ -3596,7 +3723,7 @@ EOF
 
 expire_remove() {
   remove_unit awg2-expire.timer awg2-expire.service
-  rm -f "$EXPIRE_BIN"
+  rm -f "$EXPIRE_BIN" "$TRAFFIC_DB" "$TRAFFIC_DB.lock"
   rm -rf "$EXPIRE_STATE_DIR"
 }
 
@@ -3617,28 +3744,75 @@ _expire_apply() {
   stripped=$(awg-quick strip "$AWG_IF" 2>/dev/null) && awg syncconf "$AWG_IF" <(printf '%s\n' "$stripped")
 }
 
+# Строки трафика для меню: «имя|лимит|период|по лимиту|за месяц|сегодня|причина».
+traffic_rows() {
+  local tr
+  server_exists || return 0
+  mktmp tr || return 1
+  awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || true
+  py traffic-rows "$SERVER_CONF" "$TRAFFIC_DB" "$tr" | tr '\t' '|'
+}
+
+_ask_limit() {  # → «РАЗМЕР ПЕРИОД» в stdout или пусто
+  local v p
+  echo -e "  ${D}Размер: 50G, 500M, 1.5T; число без буквы — гигабайты${N}" >&2
+  read -rp "  Лимит: " v
+  [[ -n "$v" ]] || return 0
+  py size-parse "$v" >/dev/null 2>&1 || { warn "Размер не распознан: $v" >&2; return 0; }
+  echo -e "  ${C}1)${N} В месяц ${D}— счётчик обнуляется 1-го числа, клиент разблокируется сам${N}" >&2
+  echo -e "  ${C}2)${N} Всего ${D}— без сброса, с этой минуты${N}" >&2
+  read_choice p "${C}  Период [1-2]: ${N}" 1 2 1
+  echo "$v $([[ "$p" == 2 ]] && echo total || echo month)"
+}
+
+do_traffic_days() {
+  local tr
+  server_exists || { err "Сервер не создан"; return 1; }
+  mktmp tr || return 1
+  awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || true
+  echo ""
+  hdr "Трафик по дням"
+  py traffic-report "$SERVER_CONF" "$TRAFFIC_DB" "$tr" 14 | sed 's/^/  /'
+  [[ -f "$TRAFFIC_DB" ]] || info "Учёт идёт с момента установки $VERSION — данные копятся раз в минуту"
+}
+
 do_expire_menu() {
   server_exists || { err "Сервер не создан"; return 1; }
   expire_install
-  local c name pub ts now rows=() n=0 exp orig
+  local c name pub ts rows=() n=0 exp orig lim per used month _ by ans
+  local -A tl=()
   while true; do
     echo ""
-    hdr "Срок действия клиентов"
-    now=$(date +%s)
+    hdr "Сроки и лимиты трафика"
+    tl=()
+    while IFS='|' read -r name lim per used month _ by; do
+      [[ -n "$name" && "$lim" != 0 ]] && tl[x$name]="$lim/$per|$used|$by"
+    done < <(traffic_rows)
     while IFS='|' read -r name pub _ exp orig _; do
-      [[ -n "$exp" ]] || continue
+      [[ -n "$exp" || -n "${tl[x$name]:-}" ]] || continue
       n=$((n + 1))
-      if [[ -n "$orig" ]]; then echo -e "  ${R}🚫 ${name}${N} ${D}— заблокирован, $(expire_fmt "$exp")${N}"
-      else echo -e "  ${Y}⏰ ${name}${N} ${D}— $(expire_fmt "$exp")${N}"; fi
+      by="${tl[x$name]:-}"; by="${by##*|}"
+      if [[ -n "$orig" && "$by" == traffic ]]; then echo -e "  ${R}🚫 ${name}${N} ${D}— заблокирован: исчерпан лимит${N}"
+      elif [[ -n "$orig" ]]; then echo -e "  ${R}🚫 ${name}${N} ${D}— заблокирован, $(expire_fmt "$exp")${N}"
+      elif [[ -n "$exp" ]]; then echo -e "  ${Y}⏰ ${name}${N} ${D}— $(expire_fmt "$exp")${N}"
+      else echo -e "  ${C}📶 ${name}${N}"; fi
+      if [[ -n "${tl[x$name]:-}" ]]; then
+        IFS='|' read -r lim used _ <<< "${tl[x$name]}"
+        echo -e "     ${D}трафик: $(limit_fmt "$lim" "$used")${N}"
+      fi
     done < <(clients_psv)
-    (( n )) || echo -e "  ${D}Сроков нет — все клиенты бессрочные${N}"
+    (( n )) || echo -e "  ${D}Сроков и лимитов нет — все клиенты бессрочные и без лимита${N}"
     n=0
     echo ""
     echo -e "  ${C}1)${N} Поставить срок"
     echo -e "  ${C}2)${N} Снять срок / разблокировать"
-    echo -e "  ${R}3)${N} Удалить заблокированных"
+    echo -e "  ${C}3)${N} Лимит трафика"
+    echo -e "  ${C}4)${N} Снять лимит трафика"
+    echo -e "  ${C}5)${N} Обнулить счётчик лимита"
+    echo -e "  ${C}6)${N} Трафик по дням"
+    echo -e "  ${R}7)${N} Удалить заблокированных"
     echo -e "  ${W}0)${N} ← Назад"
-    read_choice c "${C}  Выбор [0-3]: ${N}" 0 3 0
+    read_choice c "${C}  Выбор [0-7]: ${N}" 0 7 0
     case "$c" in
       1) _pick_client || continue
          name="${CHOSEN%%$'\t'*}"
@@ -3647,7 +3821,17 @@ do_expire_menu() {
          [[ -n "$ts" ]] && { client_expire_set "$name" "$ts" || true; } ;;
       2) _pick_client || continue
          client_expire_clear "${CHOSEN%%$'\t'*}" || true ;;
-      3) mapfile -t rows < <(clients_tsv | awk -F'\t' '$5 != "" {print $1}')
+      3) _pick_client || continue
+         name="${CHOSEN%%$'\t'*}"
+         [[ -n "$name" ]] || { warn "У клиента нет имени"; continue; }
+         ans=$(_ask_limit)
+         [[ -n "$ans" ]] && { client_limit_set "$name" "${ans% *}" "${ans#* }" || true; } ;;
+      4) _pick_client || continue
+         client_limit_set "${CHOSEN%%$'\t'*}" off || true ;;
+      5) _pick_client || continue
+         client_limit_reset "${CHOSEN%%$'\t'*}" || true ;;
+      6) do_traffic_days || true; pause ;;
+      7) mapfile -t rows < <(clients_tsv | awk -F'\t' '$5 != "" {print $1}')
          (( ${#rows[@]} )) || { info "Заблокированных нет"; continue; }
          warn "Будут удалены навсегда: ${rows[*]}"
          read_confirm "${R}  Подтверди (введи yes): ${N}" && clients_purge_blocked ;;
@@ -7255,11 +7439,18 @@ auto_backup() {  # причина
 do_backup() { backup_create; }
 
 # Полный бэкап → каталог в BACKUP_PATH; с «archive» ещё и .tar.gz рядом (для бота).
+# «archive auto [N]» — автобэкап бота по расписанию: только архив
+# awg2_backup_<время>_auto.tar.gz, из таких хранятся N последних (по умолчанию 7).
 BACKUP_PATH=""
 backup_create() {
-  local ts dir n=0 f
+  local ts dir n=0 f auto=0 keep=7
+  if [[ "${2:-}" == auto ]]; then
+    auto=1
+    [[ "${3:-}" =~ ^[0-9]{1,3}$ ]] && (( 10#$3 >= 1 )) && keep=$((10#$3))
+  fi
   ts=$(date +%Y%m%d_%H%M%S)
   dir="$BACKUP_DIR/awg2_backup_$ts"
+  (( auto )) && dir+="_auto"
   mkdir -p "$dir" && chmod 700 "$BACKUP_DIR" "$dir"
   if [[ -f "$SERVER_CONF" ]]; then cp -a "$SERVER_CONF" "$dir/awg0.conf"; n=$((n + 1)); ok "Сервер: awg0.conf"
   else warn "Серверного конфига нет"; fi
@@ -7297,6 +7488,11 @@ backup_create() {
   BACKUP_PATH="$dir"
   if [[ "${1:-}" == archive ]]; then
     tar -czf "$dir.tar.gz" -C "$BACKUP_DIR" "${dir##*/}" && chmod 600 "$dir.tar.gz" && BACKUP_PATH="$dir.tar.gz"
+  fi
+  if (( auto )) && [[ "$BACKUP_PATH" == *.tar.gz ]]; then
+    rm -rf "$dir"
+    find "$BACKUP_DIR" -maxdepth 1 -type f -name 'awg2_backup_*_auto.tar.gz' -printf '%f\n' 2>/dev/null \
+      | sort -r | tail -n +$((keep + 1)) | while IFS= read -r f; do rm -f "${BACKUP_DIR:?}/$f"; done
   fi
   success_box "Бэкап: $BACKUP_PATH"
   log_info "бэкап: $BACKUP_PATH"
@@ -7575,6 +7771,63 @@ _update_download() {  # файл
   return 1
 }
 
+# Подпись awg2.sh.sig — напрямую и через зеркала: подделать её зеркало не может.
+_update_download_sig() {  # файл
+  local mp url
+  url="${UPDATE_URL%/*}/awg2.sh.sig?nocache=$(date +%s)"
+  for mp in "${GH_MIRRORS[@]}"; do
+    curl -fsSL --connect-timeout 10 --max-time 30 --max-filesize 16384 -H 'Cache-Control: no-cache' \
+      "${mp}${url}" -o "$1" 2>/dev/null || continue
+    grep -q 'BEGIN SSH SIGNATURE' "$1" && return 0
+  done
+  return 1
+}
+
+# Проверка подписи файла $1 подписью $2 ключом релизов. 0 — верна.
+update_sig_ok() {
+  local allowed s
+  (( ${#UPDATE_SIGNERS[@]} )) || return 1
+  command -v ssh-keygen &>/dev/null || need_cmds ssh-keygen:openssh-client >/dev/null || return 1
+  mktmp allowed || return 1
+  for s in "${UPDATE_SIGNERS[@]}"; do
+    printf '%s namespaces="%s" %s\n' "$UPDATE_SIGNER" "$UPDATE_SIG_NS" "$s"
+  done > "$allowed"
+  ssh-keygen -Y verify -f "$allowed" -I "$UPDATE_SIGNER" -n "$UPDATE_SIG_NS" -s "$2" < "$1" &>/dev/null
+}
+
+# Подпись скачанной сборки. Без подписи ставится только сборка старше
+# UPDATE_SIG_SINCE (откат на старую версию) и только из меню, после «yes»:
+# новая сборка без подписи — это подмена или сбой, а не выпуск.
+update_verify() {  # файл
+  local sig
+  # Ключ вшивается в каждую выпущенную сборку (тест сборки это проверяет);
+  # без него — только локальная тестовая сборка, ей проверять нечем
+  if (( ${#UPDATE_SIGNERS[@]} == 0 )); then
+    warn "Тестовая сборка без ключа релизов — подпись обновления не проверяется"
+    return 0
+  fi
+  mktmp sig || return 1
+  if ! _update_download_sig "$sig"; then
+    if (( 10#$(ver_num "$UPDATE_NEW") >= 10#$(ver_num "$UPDATE_SIG_SINCE") )); then
+      err "У сборки $UPDATE_NEW нет подписи (awg2.sh.sig) — не ставлю. Повтори через пару минут"
+      return 1
+    fi
+    warn "Сборка $UPDATE_NEW вышла до подписей ($UPDATE_SIG_SINCE) — подлинность не проверить"
+    if ! read_confirm "${Y}  Поставить без проверки подписи? (введи yes): ${N}"; then
+      (( AUTO_MODE )) && err "Сборку без подписи ставлю только из меню awg2 — Обновление"
+      return 1
+    fi
+    return 0
+  fi
+  if ! update_sig_ok "$1" "$sig"; then
+    err "Подпись сборки $UPDATE_NEW не сходится — файл изменён по пути (зеркало?) или только что выложен."
+    info "Повтори через пару минут; не помогло — напиши в t.me/awgToolza"
+    log_info "обновление $UPDATE_NEW отклонено: подпись не сходится"
+    return 1
+  fi
+  ok "Подпись сборки верна"
+}
+
 # Скачать сборку из канала и проверить её → UPDATE_FILE, UPDATE_NEW.
 UPDATE_FILE="" UPDATE_NEW=""
 update_fetch() {
@@ -7587,9 +7840,10 @@ update_fetch() {
     return 1
   fi
   UPDATE_NEW=$(head -c 4096 "$UPDATE_FILE" | grep -m1 '^VERSION=' | cut -d'"' -f2)
-  [[ -n "$UPDATE_NEW" ]] || { err "В скачанном файле нет VERSION"; return 1; }
-  printf '%s %s\n' "$UPDATE_NEW" "$(date +%s)" > "$UPDATE_CACHE" 2>/dev/null || true
+  [[ "$UPDATE_NEW" =~ ^v?[0-9]+\.[0-9]+ ]] || { err "В скачанном файле нет VERSION"; return 1; }
   echo "Текущая: $VERSION, в канале: $UPDATE_NEW"
+  update_verify "$UPDATE_FILE" || return 1
+  printf '%s %s\n' "$UPDATE_NEW" "$(date +%s)" > "$UPDATE_CACHE" 2>/dev/null || true
 }
 
 # Поставить скачанное. Замена через rename: работающие копии awg2 дочитывают
@@ -8621,6 +8875,7 @@ _api_status() {
     _kv components.module_update "$(mod_update_available)"
     _kv components.tools_update "$(tools_update_available)"
     _kv components.reboot "$(reboot_reason)"
+    _kv components.kernel_gap "$(kernel_gap_line)"
     _kv server.exists:b "$(_b server_exists)"
     if server_exists; then
       _kv server.up:b "$(_b iface_up)"
@@ -8724,6 +8979,7 @@ _api_module() {
         _kv module_update "$(mod_update_available)"; _kv tools_update "$(tools_update_available)"
         _kv module_latest "$(upstream_latest mod)"; _kv tools_latest "$(upstream_latest tools)"
         _kv reboot "$(reboot_reason)"; _kv secure_boot:b "$(_b secure_boot_on)"
+        _kv kernel_gap "$(kernel_gap_line)"
         _kv backups:n "$(mod_backups | grep -c . || true)"
       } | api_obj
       components_report ;;
@@ -8762,7 +9018,7 @@ _api_clients() {
       server_exists || { echo '[]' > "$API_DATA"; return 0; }
       mktmp dump || return 1
       awg show "$AWG_IF" dump > "$dump" 2>/dev/null || true
-      py clients-json "$SERVER_CONF" "$dump" "$CLIENT_DIR" "$WARP_PEERS" "$XRAY_PEERS" "$EXITS_PEERS" > "$API_DATA" ;;
+      py clients-json "$SERVER_CONF" "$dump" "$CLIENT_DIR" "$WARP_PEERS" "$XRAY_PEERS" "$EXITS_PEERS" "$TRAFFIC_DB" > "$API_DATA" ;;
     bulk) _api_clients_bulk "$@" ;;
     del) _api_clients_del "$@" ;;
     export)
@@ -8858,7 +9114,7 @@ _api_clients_bulk() {
 
 _api_client() {
   local a="${1:-}" name="${2:-}" f
-  [[ -n "$name" ]] || { _api_usage "client add|del|rename|conf|mimicry|expire|unexpire ИМЯ ..."; return; }
+  [[ -n "$name" ]] || { _api_usage "client add|del|rename|conf|mimicry|expire|unexpire|limit|limit-reset ИМЯ ..."; return; }
   shift 2
   case "$a" in
     add)
@@ -8883,7 +9139,11 @@ _api_client() {
       [[ -n "${1:-}" ]] || { _api_usage "client expire ИМЯ unix-время|+30d|+12h|дата"; return; }
       client_expire_set "$name" "$(_api_ts "$1")" ;;
     unexpire) client_expire_clear "$name" ;;
-    *) _api_usage "client add|del|rename|conf|mimicry|expire|unexpire ИМЯ ..." ;;
+    limit)
+      [[ -n "${1:-}" ]] || { _api_usage "client limit ИМЯ 50G|500M|off [month|total]"; return; }
+      client_limit_set "$name" "$1" "${2:-month}" ;;
+    limit-reset) client_limit_reset "$name" ;;
+    *) _api_usage "client add|del|rename|conf|mimicry|expire|unexpire|limit|limit-reset ИМЯ ..." ;;
   esac
 }
 
@@ -8893,6 +9153,21 @@ _api_mimicry() {
     IFS='|' read -r id label hint <<< "$i"
     printf '%s\t%s\t%s\t%s\n' "$id" "$label" "$hint" "$(_profile_needs_domain "$id" && echo 1 || echo 0)"
   done | api_rows id label hint domain:b
+}
+
+# ── Трафик по дням ────────────────────────────────────────
+_api_traffic() {
+  local tr name="" days=30
+  case "${1:-}" in
+    daily)
+      [[ "${2:-}" =~ ^[0-9]+$ ]] && days="$2" || { name="${2:-}"; [[ "${3:-}" =~ ^[0-9]+$ ]] && days="$3"; }
+      [[ "$name" == all ]] && name=""
+      server_exists || { err "Сервер не создан"; return 1; }
+      mktmp tr || return 1
+      awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || true
+      py traffic-daily "$SERVER_CONF" "$TRAFFIC_DB" "$tr" "$name" "$days" > "$API_DATA" ;;
+    *) _api_usage "traffic daily [ИМЯ|all] [ДНЕЙ]" ;;
+  esac
 }
 
 # ── Диагностика ───────────────────────────────────────────
@@ -8915,7 +9190,7 @@ _api_backup() {
   shift || true
   case "$a" in
     create)
-      backup_create archive || return 1
+      backup_create archive "${1:-}" "${2:-}" || return 1
       { _kv path "$BACKUP_PATH"; _kv size:n "$(stat -c %s "$BACKUP_PATH")"; } | api_obj ;;
     list)
       while IFS= read -r p; do
@@ -8933,7 +9208,7 @@ _api_backup() {
     restore)
       [[ -n "${1:-}" ]] || { _api_usage "backup restore ПУТЬ [wgobf] [tunnels]"; return; }
       backup_restore "$@" ;;
-    *) _api_usage "backup create|list|inspect ПУТЬ|restore ПУТЬ [wgobf] [tunnels]" ;;
+    *) _api_usage "backup create [auto [ХРАНИТЬ]]|list|inspect ПУТЬ|restore ПУТЬ [wgobf] [tunnels]" ;;
   esac
 }
 
@@ -9376,7 +9651,8 @@ _api_readonly() {
     "status "|"version "|"help "|"mimicry "|"log "*|"job "*|"diag "*) return 0 ;;
     *" status"|*" info"|*" report"|*" tags"|*" backups"|*" list"|*" conf"|*" inspect") return 0 ;;
     "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|\
-    "bot proxy"|"bot webapp"|"update check"|"update changelog"|"module check"|"cert "|"cert find") return 0 ;;
+    "bot proxy"|"bot webapp"|"update check"|"update changelog"|"module check"|"cert "|"cert find"|\
+    "traffic daily") return 0 ;;
   esac
   return 1
 }
@@ -9405,6 +9681,7 @@ api_dispatch() {
     clients) _api_clients "$@" ;;
     client) _api_client "$@" ;;
     mimicry) _api_mimicry ;;
+    traffic) _api_traffic "$@" ;;
     diag) _api_diag "$@" ;;
     backup) _api_backup "$@" ;;
     tunnels) _api_tunnels "$@" ;;
@@ -9422,7 +9699,7 @@ api_dispatch() {
     log) _api_log "$@" ;;
     job) _api_job "$@" ;;
     help)
-      echo "Разделы: status server module clients client mimicry diag backup tunnels warp xray t2s"
+      echo "Разделы: status server module clients client mimicry traffic diag backup tunnels warp xray t2s"
       echo "         exits cascade dns wgobf update bot uninstall log job version"
       echo "Подсказка по разделу: awg2 api РАЗДЕЛ" ;;
     *) err "Неизвестная команда: $cmd — awg2 api help"; return 2 ;;
@@ -11534,7 +11811,7 @@ def cmd_peers(conf):
             continue
         print("\t".join([peer_name(b), pub, peer_field(b, "AllowedIPs"),
                          peer_meta(b, "expires"), peer_meta(b, "orig_ips"),
-                         peer_meta(b, "mimicry")]))
+                         peer_meta(b, "mimicry"), peer_meta(b, "limit"), peer_meta(b, "blocked_by")]))
 
 
 def cmd_meta_set(conf, name, key, value):
@@ -11852,7 +12129,7 @@ def cmd_expire_clear(conf, name, suspend):
     orig = peer_meta(b, "orig_ips")
     if orig and peer_field(b, "AllowedIPs") == suspend:
         b = re.sub(r"^([ \t]*AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + orig, b, count=1, flags=re.M | re.I)
-    b = set_meta(set_meta(b, "expires", ""), "orig_ips", "")
+    b = set_meta(set_meta(set_meta(b, "expires", ""), "orig_ips", ""), "blocked_by", "")
     peers[i] = b
     write_atomic(conf, head + "".join(peers))
     print(orig)
@@ -11897,6 +12174,357 @@ def cmd_expire_check(conf, suspend, state_dir):
         print("CHANGED")
     for e in events:
         print(e)
+
+
+# ── Трафик клиентов и лимиты ──
+# Счётчики `awg show transfer` живут, пока поднят интерфейс, поэтому таймер
+# раз в минуту складывает их прирост в базу: по дням (DAYS_KEEP дней) и за
+# всё время. Ключ — публичный ключ: переименование историю не теряет.
+# Лимит — метка пира «# limit=БАЙТ/month|total»; превысивший блокируется
+# как истёкший (AllowedIPs → suspend), с меткой «# blocked_by=traffic» — по
+# ней таймер разблокирует его в новом месяце или после смены лимита.
+DAYS_KEEP = 92
+TRAFFIC_SAVE_EVERY = 300
+SIZE_UNITS = {"": 1024 ** 3, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+
+
+def fmt_bytes(n):
+    n = float(n or 0)
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if n < 1024:
+            return "%d %s" % (n, unit) if unit == "Б" else "%.1f %s" % (n, unit)
+        n /= 1024
+    return "%.1f ТБ" % n
+
+
+def parse_size(text):
+    """«50G», «500M», «1.5T», «50» (гигабайты) → байты; None — не размер."""
+    m = re.match(r"^\s*(\d{1,7}(?:[.,]\d{1,3})?)\s*([KMGT]?)(?:i?B)?\s*$", text or "", re.I)
+    if not m:
+        return None
+    n = int(float(m.group(1).replace(",", ".")) * SIZE_UNITS[m.group(2).upper()])
+    return n if n > 0 else None
+
+
+def parse_limit(value):
+    """Метка «БАЙТ/период» → (байт, период) или (0, "")."""
+    m = re.match(r"^(\d+)/(month|total)$", value or "")
+    return (int(m.group(1)), m.group(2)) if m else (0, "")
+
+
+def _read_transfer(path):
+    out = {}
+    try:
+        for line in read(path).splitlines():
+            f = line.split("\t")
+            if len(f) >= 3 and f[1].isdigit() and f[2].isdigit():
+                out[f[0]] = (int(f[1]), int(f[2]))
+    except OSError:
+        pass
+    return out
+
+
+class Traffic:
+    """База трафика: {"v", "ifindex", "saved", "last": {pub: [rx, tx]},
+    "total": {pub: n}, "days": {"ГГГГ-ММ-ДД": {pub: [rx, tx]}},
+    "reset": {pub: {"p": период, "b": байт}}, "warned": {pub: "период:лимит"}}."""
+
+    def __init__(self, path):
+        self.path = path
+        try:
+            data = json.loads(read(path))
+        except (OSError, ValueError):
+            data = {}
+        self.fresh = not isinstance(data, dict) or "last" not in data
+        if not isinstance(data, dict):
+            data = {}
+        self.d = {k: data.get(k) if isinstance(data.get(k), dict) else {}
+                  for k in ("last", "total", "days", "reset", "warned")}
+        self.ifindex = str(data.get("ifindex") or "")
+        self.saved = int(data.get("saved") or 0)
+
+    def apply(self, counters, ifindex=""):
+        """Прирост счётчиков с прошлого раза — в сегодняшний день. Новый
+        интерфейс (другой ifindex — awg0 пересоздан) или счётчик меньше
+        прежнего — отсчёт с нуля. Самый первый проход только запоминает
+        счётчики: накопленное до учёта к сегодняшнему дню не относится."""
+        today = time.strftime("%Y-%m-%d")
+        last, total = self.d["last"], self.d["total"]
+        reborn = bool(ifindex) and bool(self.ifindex) and ifindex != self.ifindex
+        day = self.d["days"].setdefault(today, {})
+        for pub, (rx, tx) in counters.items():
+            prev = last.get(pub)
+            if self.fresh:
+                drx = dtx = 0
+            elif reborn or not isinstance(prev, list) or len(prev) != 2 or rx < prev[0] or tx < prev[1]:
+                drx, dtx = rx, tx
+            else:
+                drx, dtx = rx - prev[0], tx - prev[1]
+            last[pub] = [rx, tx]
+            if drx or dtx:
+                cur = day.get(pub) or [0, 0]
+                day[pub] = [cur[0] + drx, cur[1] + dtx]
+                total[pub] = int(total.get(pub) or 0) + drx + dtx
+        if ifindex:
+            self.ifindex = ifindex
+        self.fresh = False
+
+    @staticmethod
+    def period_key(period):
+        return time.strftime("%Y-%m") if period == "month" else "total"
+
+    def raw_used(self, pub, period):
+        if period == "month":
+            month = time.strftime("%Y-%m")
+            return sum(sum(v.get(pub) or [0, 0]) for d, v in self.d["days"].items() if d.startswith(month))
+        return int(self.d["total"].get(pub) or 0)
+
+    def used(self, pub, period):
+        raw = self.raw_used(pub, period)
+        r = self.d["reset"].get(pub)
+        if isinstance(r, dict) and r.get("p") == self.period_key(period):
+            return max(0, raw - int(r.get("b") or 0))
+        return raw
+
+    def reset(self, pub, period):
+        self.d["reset"][pub] = {"p": self.period_key(period), "b": self.raw_used(pub, period)}
+        self.d["warned"].pop(pub, None)
+
+    def series(self, pubs, days):
+        """Последние days дней (от старых к новым): даты, rx и tx по списку ключей."""
+        dates = [time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400 * i)) for i in range(days - 1, -1, -1)]
+        rx, tx = [], []
+        for d in dates:
+            v = self.d["days"].get(d) or {}
+            rx.append(sum((v.get(p) or [0, 0])[0] for p in pubs))
+            tx.append(sum((v.get(p) or [0, 0])[1] for p in pubs))
+        return dates, rx, tx
+
+    def save(self, alive=None):
+        """Старше DAYS_KEEP дней — прочь; у удалённых клиентов остаётся
+        только история по дням (она входит в общий трафик сервера)."""
+        cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400 * DAYS_KEEP))
+        self.d["days"] = {k: v for k, v in self.d["days"].items() if k >= cutoff and v}
+        if alive is not None:
+            for k in ("last", "total", "reset", "warned"):
+                self.d[k] = {p: v for p, v in self.d[k].items() if p in alive}
+        self.saved = int(time.time())
+        data = dict(self.d, v=1, ifindex=self.ifindex, saved=self.saved)
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        write_atomic(self.path, json.dumps(data, separators=(",", ":")))
+
+
+def _block(b, suspend, aip, reason):
+    if not peer_meta(b, "orig_ips"):
+        b = set_meta(b, "orig_ips", aip)
+    b = re.sub(r"^([ \t]*AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + suspend, b, count=1, flags=re.M | re.I)
+    return set_meta(b, "blocked_by", reason)
+
+
+def _unblock(b, suspend):
+    orig = peer_meta(b, "orig_ips")
+    if orig and peer_field(b, "AllowedIPs") == suspend:
+        b = re.sub(r"^([ \t]*AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + orig, b, count=1, flags=re.M | re.I)
+    return set_meta(set_meta(b, "orig_ips", ""), "blocked_by", "")
+
+
+PERIOD_WORD = {"month": "за месяц", "total": "всего"}
+
+
+def cmd_traffic_tick(conf, suspend, db, transfer, ifindex="", force_save="0"):
+    """Проход таймера: прирост трафика в базу и проверка лимитов. События:
+    CHANGED; LIMIT<TAB>имя<TAB>адрес<TAB>текст; WARN90<TAB>имя<TAB>текст;
+    UNLIMIT<TAB>имя<TAB>текст."""
+    try:
+        text = read(conf)
+    except OSError:
+        return
+    lock = _traffic_lock(db)
+    t = Traffic(db)
+    t.apply(_read_transfer(transfer), ifindex)
+    now = int(time.time())
+    head, peers = split_peers(text)
+    events, changed, alive = [], False, set()
+    for i, b in enumerate(peers):
+        pub, aip = peer_field(b, "PublicKey"), peer_field(b, "AllowedIPs")
+        if not (pub and aip):
+            continue
+        alive.add(pub)
+        name = peer_name(b) or pub[:8]
+        limit, period = parse_limit(peer_meta(b, "limit"))
+        by_traffic = peer_meta(b, "blocked_by") == "traffic"
+        exp = peer_meta(b, "expires")
+        expired = exp.isdigit() and now >= int(exp)
+        used = t.used(pub, period) if limit else 0
+        word = "%s из %s %s" % (fmt_bytes(used), fmt_bytes(limit), PERIOD_WORD.get(period, "")) if limit else ""
+        if by_traffic and expired:
+            # Истёк и срок: блокировку держит уже он, и снимается она сроком
+            peers[i] = set_meta(b, "blocked_by", "")
+            changed = True
+        elif by_traffic and (not limit or used < limit):
+            peers[i] = _unblock(b, suspend)
+            changed = True
+            events.append("UNLIMIT\t%s\t%s" % (name, word or "лимит снят"))
+        elif limit and used >= limit and aip != suspend:
+            peers[i] = _block(b, suspend, aip, "traffic")
+            changed = True
+            events.append("LIMIT\t%s\t%s\t%s" % (name, aip, word))
+        elif limit and used >= limit * 0.9 and aip != suspend:
+            mark = "%s:%d" % (t.period_key(period), limit)
+            if t.d["warned"].get(pub) != mark:
+                t.d["warned"][pub] = mark
+                events.append("WARN90\t%s\t%s" % (name, word))
+    if changed:
+        write_atomic(conf, head + "".join(peers))
+        print("CHANGED")
+    day_changed = time.strftime("%Y-%m-%d", time.localtime(t.saved)) != time.strftime("%Y-%m-%d")
+    if events or changed or day_changed or force_save == "1" or now - t.saved >= TRAFFIC_SAVE_EVERY:
+        t.save(alive)
+    del lock
+    for e in events:
+        print(e)
+
+
+def _traffic_lock(db):
+    """Таймер и вызовы API правят базу по очереди."""
+    import fcntl
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(db)), exist_ok=True)
+        f = open(db + ".lock", "a")
+        fcntl.flock(f, fcntl.LOCK_EX)
+        return f
+    except OSError:
+        return None
+
+
+def cmd_limit_set(conf, db, name, size, period="month"):
+    """Лимит клиенту: размер («50G»), off — снять. Лимит «всего» считается
+    с этой минуты; «за месяц» — с начала месяца."""
+    head, peers = split_peers(read(conf))
+    i = find_peer(peers, name=name)
+    if i < 0:
+        die("клиент %s не найден" % name, 2)
+    if size == "off":
+        peers[i] = set_meta(peers[i], "limit", "")
+        write_atomic(conf, head + "".join(peers))
+        return
+    n = parse_size(size)
+    if n is None:
+        die("размер не распознан: %s (пример: 50G, 500M)" % size)
+    if period not in PERIOD_WORD:
+        die("период: month или total")
+    pub = peer_field(peers[i], "PublicKey")
+    lock = _traffic_lock(db)
+    t = Traffic(db)
+    old, old_period = parse_limit(peer_meta(peers[i], "limit"))
+    if period == "total" and old_period != "total":
+        t.reset(pub, "total")
+    t.d["warned"].pop(pub, None)
+    t.save()
+    del lock
+    peers[i] = set_meta(peers[i], "limit", "%d/%s" % (n, period))
+    write_atomic(conf, head + "".join(peers))
+    print(fmt_bytes(n))
+
+
+def cmd_limit_reset(conf, db, name):
+    """Обнулить счётчик лимита (до конца периода)."""
+    _, peers = split_peers(read(conf))
+    i = find_peer(peers, name=name)
+    if i < 0:
+        die("клиент %s не найден" % name, 2)
+    limit, period = parse_limit(peer_meta(peers[i], "limit"))
+    if not limit:
+        die("у клиента %s нет лимита" % name)
+    lock = _traffic_lock(db)
+    t = Traffic(db)
+    t.reset(peer_field(peers[i], "PublicKey"), period)
+    t.save()
+    del lock
+
+
+def cmd_traffic_daily(conf, db, transfer, name="", days="30"):
+    """Трафик по дням: сервер целиком (с разбивкой по клиентам) или один
+    клиент. Несохранённый прирост счётчиков учитывается, база не пишется."""
+    try:
+        days = max(1, min(DAYS_KEEP, int(days)))
+    except ValueError:
+        days = 30
+    _, peers = split_peers(read(conf))
+    names = {peer_field(b, "PublicKey"): peer_name(b) for b in peers if peer_field(b, "PublicKey")}
+    t = Traffic(db)
+    t.apply(_read_transfer(transfer))
+    if name:
+        pubs = [p for p, n in names.items() if n == name]
+        if not pubs:
+            die("клиент %s не найден" % name, 2)
+    else:
+        pubs = sorted({p for v in t.d["days"].values() for p in v} | set(names))
+    dates, rx, tx = t.series(pubs, days)
+    out = {"name": name, "days": dates, "rx": rx, "tx": tx, "total": sum(rx) + sum(tx)}
+    if not name:
+        rows = []
+        for p, n in names.items():
+            _, r, s = t.series([p], days)
+            if sum(r) + sum(s):
+                rows.append({"name": n or p[:8], "rx": sum(r), "tx": sum(s)})
+        out["clients"] = sorted(rows, key=lambda c: -(c["rx"] + c["tx"]))
+    print(json.dumps(out, ensure_ascii=False))
+
+
+def cmd_traffic_rows(conf, db, transfer):
+    """Для меню: имя, лимит (байт), период, использовано по лимиту, за
+    месяц, сегодня, причина блокировки — построчно через табуляцию."""
+    _, peers = split_peers(read(conf))
+    t = Traffic(db)
+    t.apply(_read_transfer(transfer))
+    today = time.strftime("%Y-%m-%d")
+    for b in peers:
+        pub = peer_field(b, "PublicKey")
+        if not pub:
+            continue
+        limit, period = parse_limit(peer_meta(b, "limit"))
+        by = peer_meta(b, "blocked_by") or ("expire" if peer_meta(b, "orig_ips") else "")
+        print("\t".join(str(x) for x in (
+            peer_name(b), limit, period, t.used(pub, period) if limit else 0, t.raw_used(pub, "month"),
+            sum((t.d["days"].get(today) or {}).get(pub) or [0, 0]), by)))
+
+
+def cmd_traffic_report(conf, db, transfer, days="14"):
+    """Трафик сервера по дням столбиками и клиенты за 30 дней — для меню."""
+    try:
+        days = max(1, min(DAYS_KEEP, int(days)))
+    except ValueError:
+        days = 14
+    _, peers = split_peers(read(conf))
+    names = {peer_field(b, "PublicKey"): peer_name(b) for b in peers if peer_field(b, "PublicKey")}
+    t = Traffic(db)
+    t.apply(_read_transfer(transfer))
+    pubs = sorted({p for v in t.d["days"].values() for p in v} | set(names))
+    dates, rx, tx = t.series(pubs, days)
+    top = max([a + b for a, b in zip(rx, tx)] + [1])
+    print("По дням (↓ от клиентов + ↑ к клиентам):")
+    for d, a, b in zip(dates, rx, tx):
+        bar = "▇" * int(round(28 * (a + b) / top)) if a + b else ""
+        print("  %s.%s  %-28s %s" % (d[8:], d[5:7], bar, fmt_bytes(a + b) if a + b else "—"))
+    print("  Итого за %d дн.: %s" % (days, fmt_bytes(sum(rx) + sum(tx))))
+    rows = []
+    for p, n in names.items():
+        _, r, s = t.series([p], 30)
+        if sum(r) + sum(s):
+            rows.append((sum(r) + sum(s), n or p[:8]))
+    if rows:
+        print("")
+        print("Клиенты за 30 дней:")
+        for total, n in sorted(rows, reverse=True)[:15]:
+            print("  %-24s %s" % (n, fmt_bytes(total)))
+
+
+def cmd_size_parse(text):
+    n = parse_size(text)
+    if n is None:
+        die("размер не распознан: %s" % text)
+    print(n)
 
 
 # ════════════════════════ сети ════════════════════════
@@ -12574,8 +13202,9 @@ def _first_ip(value):
     return value.split(",")[0].split("/")[0].strip()
 
 
-def cmd_clients_json(conf, dump, client_dir, warp, xray, exits):
-    """Клиенты awg0 со статистикой `awg show dump` и туннелями — для бота."""
+def cmd_clients_json(conf, dump, client_dir, warp, xray, exits, db=""):
+    """Клиенты awg0 со статистикой `awg show dump`, туннелями и трафиком за
+    месяц и по лимиту — для бота."""
     _, peers = split_peers(read(conf))
     stats = {}
     try:
@@ -12585,6 +13214,10 @@ def cmd_clients_json(conf, dump, client_dir, warp, xray, exits):
                 stats[f[0]] = f
     except OSError:
         pass
+    traffic = Traffic(db) if db else None
+    if traffic:
+        traffic.apply({k: (int(f[5]), int(f[6])) for k, f in stats.items() if f[5].isdigit() and f[6].isdigit()})
+    today = time.strftime("%Y-%m-%d")
     now = int(time.time())
     tunnels = {"warp": _peers_list(warp), "xray": _peers_list(xray), "exit": _peers_list(exits)}
     rows = []
@@ -12613,6 +13246,13 @@ def cmd_clients_json(conf, dump, client_dir, warp, xray, exits):
             "rx": int(s[5]) if s[5].isdigit() else 0, "tx": int(s[6]) if s[6].isdigit() else 0,
             "endpoint": "" if s[2] in ("", "(none)") else s[2], "file": path,
         }
+        limit, period = parse_limit(peer_meta(b, "limit"))
+        by = peer_meta(b, "blocked_by")
+        row.update(limit=limit or None, period=period or None,
+                   blocked_by=(by or "expire") if orig else None,
+                   used=traffic.used(pub, period) if traffic and limit else None,
+                   month=traffic.raw_used(pub, "month") if traffic else None,
+                   today=sum((traffic.d["days"].get(today) or {}).get(pub) or [0, 0]) if traffic else None)
         for t, lst in tunnels.items():
             if lst is None:
                 row[t] = None
@@ -12983,6 +13623,9 @@ COMMANDS = {
     "i-replace": cmd_i_replace,
     "expire-set": cmd_expire_set, "expire-clear": cmd_expire_clear,
     "expire-check": cmd_expire_check,
+    "traffic-tick": cmd_traffic_tick, "traffic-daily": cmd_traffic_daily,
+    "traffic-rows": cmd_traffic_rows, "traffic-report": cmd_traffic_report,
+    "limit-set": cmd_limit_set, "limit-reset": cmd_limit_reset, "size-parse": cmd_size_parse,
     "net-of": cmd_net_of, "pick-net": cmd_pick_net, "net-overlaps": cmd_net_overlaps,
     "allowed-except": cmd_allowed_except,
     "rand-key": cmd_rand_key, "phobos-link": cmd_phobos_link, "exit-conf-fix": cmd_exit_conf_fix,

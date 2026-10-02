@@ -66,6 +66,17 @@ if PROFILE != "none":
         f.write(f"PRIV\tPUB\t51820\toff\n"
                 f"PUBALICE=\t(none)\t5.6.7.8:4242\t10.23.45.2/32\t{now - 20}\t12345678\t987654\toff\n"
                 f"PUBBOB=\t(none)\t(none)\t10.23.45.3/32\t{now - 7200}\t1024\t2048\toff\n")
+    # Трафик за две недели: alice — каждый день, bob — через день
+    db = {"v": 1, "saved": now, "ifindex": "", "last": {"PUBALICE=": [12345678, 987654], "PUBBOB=": [1024, 2048]},
+          "total": {}, "reset": {}, "warned": {}, "days": {}}
+    for i in range(14):
+        day = time.strftime("%Y-%m-%d", time.localtime(now - 86400 * i))
+        db["days"][day] = {"PUBALICE=": [(i % 5 + 1) * 300 * 2**20, (i % 3 + 1) * 40 * 2**20]}
+        if i % 2:
+            db["days"][day]["PUBBOB="] = [50 * 2**20, 10 * 2**20]
+    os.makedirs(os.path.join(ROOT, "var/lib/awg2"), exist_ok=True)
+    with open(os.path.join(ROOT, "var/lib/awg2/traffic.json"), "w") as f:
+        json.dump(db, f)
     # Работают exit-ноды: нода n1 поднята, маршруты — «все клиенты»
     with open(os.path.join(AWG_DIR, "awg-exit-n1.conf"), "w") as f:
         f.write("[Interface]\nPrivateKey = X\nTable = off\n\n[Peer]\nEndpoint = 1.2.3.4:51820\n")

@@ -17,7 +17,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from .. import __version__, access, admins, api, ask, icons, jobs, store, ui, webapp
+from .. import __version__, access, admins, alerts, api, ask, icons, jobs, store, ui, webapp
 from ..ui import esc
 
 router = Router()
@@ -25,6 +25,7 @@ act = ui.Actions(router, "botm")
 adm = ui.Actions(router, "adm", owner="Список админов правит только владелец")
 look = ui.Actions(router, "look", owner="Оформление меняет только владелец")
 app = ui.Actions(router, "app", owner="Mini App настраивает только владелец")
+ntf = ui.Actions(router, "ntf", owner="Уведомления настраивает только владелец")
 
 
 @act()
@@ -42,8 +43,30 @@ async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
                           ("👮 Админы", adm.data()) if owner else None,
                           ("🎨 Оформление", look.data()) if owner else None,
                           ("📱 Mini App", app.data()) if owner else None,
+                          ("🔔 Уведомления", ntf.data()) if owner else None,
                           ("🗑 Удалить бота", act.data("rm")) if owner else None,
                           ui.back()))
+
+
+# ── Уведомления о сервере ─────────────────────────────────
+@ntf()
+async def _ntf(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
+    o = alerts.overview()
+    lines = "\n".join(f"{'✅' if k['on'] else '⬜️'} {esc(k['label'])}" for k in o["kinds"])
+    await ui.render(cb, "<b>🔔 Уведомления</b>\n\nБот пишет владельцам и админам, когда с сервером что-то "
+                        f"случилось; проверка — раз в {max(1, o['interval'] // 60)} мин. Каждое событие — один раз.\n\n"
+                        f"{lines}\n\n"
+                        "Сроки и лимиты трафика клиентов сообщает таймер awg2 — они приходят всегда, "
+                        "даже когда бот остановлен.",
+                    ui.kb([(f"{'✅' if k['on'] else '⬜️'} {k['short']}", ntf.data("t", k["id"])) for k in o["kinds"]],
+                          ui.back("botm")))
+
+
+@ntf("t")
+async def _ntf_toggle(cb: CallbackQuery, state: FSMContext, kind: str) -> None:
+    if kind in alerts.KIND_IDS:
+        alerts.set_enabled(kind, not alerts.enabled(kind))
+    await _ntf(cb, state)
 
 
 @act("update")

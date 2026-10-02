@@ -74,6 +74,7 @@ exit 0''',
   show) echo "awg $*" >> "$CALLS"
         [[ -f "$AWG_DUMP" ]] || exit 0
         [[ "${3:-}" == dump ]] && cat "$AWG_DUMP"
+        [[ "${3:-}" == transfer ]] && awk -F'\t' 'NR > 1 {print $1 "\t" $6 "\t" $7}' "$AWG_DUMP"
         [[ "${3:-}" == endpoints ]] && awk -F'\t' 'NR > 1 {print $1 "\t" $3}' "$AWG_DUMP" ;;
   *) echo "awg $*" >> "$CALLS" ;;
 esac
@@ -122,7 +123,7 @@ CERT_DIR="{ROOT}/etc/awg2/cert"; CERT_FULL="$CERT_DIR/fullchain.pem"; CERT_KEY="
 CERT_STATE="{ROOT}/var/lib/awg2/cert"; ACME_DIR="{ROOT}/acme.sh"; ACME_HOME="{ROOT}/var/lib/awg2/acme"
 CERT_FIND_ROOT="{ROOT}"
 EXPIRE_STATE_DIR="{ROOT}/var/lib/awg2-expire"; EXPIRE_LOG="{ROOT}/expire.log"; BOT_CONF="{ROOT}/bot.conf"
-BOT_ADMINS="{ROOT}/admins.json"
+BOT_ADMINS="{ROOT}/admins.json"; TRAFFIC_DB="$STATE_DIR/traffic.json"
 BACKUP_DIR="{ROOT}/awg_backup"; MOD_BACKUP_DIR="{ROOT}/mod-backups"; UPDATE_CHANNEL_FILE="$STATE_DIR/channel"
 MOD_TAG_FILE="$STATE_DIR/module_tag"; TOOLS_TAG_FILE="$STATE_DIR/tools_tag"; UPSTREAM_CACHE="$STATE_DIR/upstream_tags"
 WARP_PEERS="{ROOT}/warp.peers"; XRAY_PEERS="{ROOT}/xray.peers"; USQUE_LOG="{ROOT}/usque.log"

@@ -30,11 +30,18 @@ auto_backup() {  # причина
 do_backup() { backup_create; }
 
 # Полный бэкап → каталог в BACKUP_PATH; с «archive» ещё и .tar.gz рядом (для бота).
+# «archive auto [N]» — автобэкап бота по расписанию: только архив
+# awg2_backup_<время>_auto.tar.gz, из таких хранятся N последних (по умолчанию 7).
 BACKUP_PATH=""
 backup_create() {
-  local ts dir n=0 f
+  local ts dir n=0 f auto=0 keep=7
+  if [[ "${2:-}" == auto ]]; then
+    auto=1
+    [[ "${3:-}" =~ ^[0-9]{1,3}$ ]] && (( 10#$3 >= 1 )) && keep=$((10#$3))
+  fi
   ts=$(date +%Y%m%d_%H%M%S)
   dir="$BACKUP_DIR/awg2_backup_$ts"
+  (( auto )) && dir+="_auto"
   mkdir -p "$dir" && chmod 700 "$BACKUP_DIR" "$dir"
   if [[ -f "$SERVER_CONF" ]]; then cp -a "$SERVER_CONF" "$dir/awg0.conf"; n=$((n + 1)); ok "Сервер: awg0.conf"
   else warn "Серверного конфига нет"; fi
@@ -72,6 +79,11 @@ backup_create() {
   BACKUP_PATH="$dir"
   if [[ "${1:-}" == archive ]]; then
     tar -czf "$dir.tar.gz" -C "$BACKUP_DIR" "${dir##*/}" && chmod 600 "$dir.tar.gz" && BACKUP_PATH="$dir.tar.gz"
+  fi
+  if (( auto )) && [[ "$BACKUP_PATH" == *.tar.gz ]]; then
+    rm -rf "$dir"
+    find "$BACKUP_DIR" -maxdepth 1 -type f -name 'awg2_backup_*_auto.tar.gz' -printf '%f\n' 2>/dev/null \
+      | sort -r | tail -n +$((keep + 1)) | while IFS= read -r f; do rm -f "${BACKUP_DIR:?}/$f"; done
   fi
   success_box "Бэкап: $BACKUP_PATH"
   log_info "бэкап: $BACKUP_PATH"

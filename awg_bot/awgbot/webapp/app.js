@@ -70,6 +70,60 @@ function fmtExpire(ts) {
 const haptic = (t = "success") => tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(t);
 const kv = (k, v) => h("div", { class: "kv" }, h("span", {}, k), h("span", {}, v));
 
+// Трафик по дням (awg2 api traffic daily): столбик — приём и отдача за день.
+// Касание или наведение — подпись дня над графиком; без выбора — последний день.
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svg(tag, attrs) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+}
+const fmtDay = (d) => `${d.slice(8)}.${d.slice(5, 7)}`;
+function trafficChart(d) {
+  const days = d.days || [], n = days.length;
+  const tot = days.map((_, i) => (d.rx[i] || 0) + (d.tx[i] || 0));
+  const max = Math.max(1, ...tot), W = 300, H = 96, gap = 2;
+  const bw = Math.max(1, (W - gap * (n - 1)) / n);
+  const box = h("div", { class: "chart", role: "img",
+    "aria-label": `Трафик за ${n} дн.: всего ${fmtBytes(tot.reduce((a, b) => a + b, 0))}` });
+  const cap = h("div", { class: "cap" });
+  const plot = svg("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none" });
+  const bars = [];
+  const show = (i, sel) => {
+    cap.textContent = `${fmtDay(days[i])} · ${tot[i] ? fmtBytes(tot[i]) : "нет трафика"}`
+      + (tot[i] ? ` (↓ ${fmtBytes(d.rx[i])} · ↑ ${fmtBytes(d.tx[i])})` : "");
+    box.classList.toggle("sel", sel);
+    bars.forEach((b, j) => b && b.classList.toggle("on", sel && j === i));
+  };
+  days.forEach((_, i) => {
+    const x = i * (bw + gap), bh = tot[i] ? Math.max(2, (H - 2) * tot[i] / max) : 0, y = H - bh;
+    if (bh) {
+      // Скругление 4 px — только у верхнего края, основание прямое
+      const r = Math.min(4, bw / 2, bh);
+      bars[i] = svg("path", { class: "bar", d: `M${x},${H}V${y + r}Q${x},${y} ${x + r},${y}H${x + bw - r}`
+        + `Q${x + bw},${y} ${x + bw},${y + r}V${H}Z` });
+      plot.append(bars[i]);
+    }
+    const hit = svg("rect", { class: "hit", x: x - gap / 2, y: 0, width: bw + gap, height: H });
+    hit.addEventListener("pointerenter", () => show(i, true));
+    hit.addEventListener("click", () => show(i, true));
+    plot.append(hit);
+  });
+  plot.append(svg("line", { class: "base", x1: 0, x2: W, y1: H - 0.5, y2: H - 0.5 }));
+  plot.addEventListener("pointerleave", () => show(n - 1, false));
+  if (n) show(n - 1, false);
+  box.append(cap, plot, h("div", { class: "ax" }, h("span", {}, n ? fmtDay(days[0]) : ""),
+    h("span", {}, `макс ${fmtBytes(max)}`), h("span", {}, "сегодня")));
+  return box;
+}
+// Полоска «израсходовано из лимита»
+const meter = (used, limit) => {
+  const pct = Math.min(100, Math.round(used * 100 / Math.max(limit, 1)));
+  return h("div", { class: "meter" + (pct >= 100 ? " bad" : pct >= 90 ? " warn" : "") }, h("i", { style: `width:${pct}%` }));
+};
+const PERIOD = { month: "за месяц", total: "всего" };
+const limitText = (c) => `${fmtBytes(c.used)} из ${fmtBytes(c.limit)} ${PERIOD[c.period] || ""}`;
+
 // ── Вид: иконки, тема, шапка, общие детали ────────────────
 function icon(name) {
   const t = document.createElement("template");
@@ -88,7 +142,7 @@ const EMOJI_ICON = {
   "📅": "calendar-clock", "♾": "infinity", "🚪": "door-open", "☁": "cloud", "🛰": "satellite", "🧦": "waypoints",
   "🔐": "lock-keyhole", "🧪": "flask-conical", "🖥": "server", "🛡": "shield", "📁": "folder", "🗜": "file-archive",
   "◀": "arrow-left", "✅": "circle-check", "❌": "circle-x", "✖": "x", "🔃": "arrow-down-up", "📂": "folder",
-  "👮": "user", "🎨": "palette", "🎛": "sliders-horizontal", "↩": "undo-2", "💬": "message-square-text", "📱": "smartphone", "🔗": "share-2", "🙋": "user-plus", "🧯": "eraser",
+  "👮": "user", "🎨": "palette", "📶": "gauge", "📊": "chart-column", "📈": "chart-column", "🕒": "clock", "🎛": "sliders-horizontal", "↩": "undo-2", "💬": "message-square-text", "📱": "smartphone", "🔗": "share-2", "🙋": "user-plus", "🧯": "eraser",
 };
 const EMOJI_RE = /^(\p{Extended_Pictographic})\uFE0F?\s*/u;
 function withIcon(label) {
@@ -486,7 +540,7 @@ const setHome = (v) => { setPref("home", v); if (S.homeDraw) S.homeDraw(); };
 const secIcon = (ico) => icon(EMOJI_ICON[ico.replace("️", "")] || "info");
 const openSection = (path) => (path ? go(path) : toast("Раздел появится в панели следующим обновлением — пока он в боте"));
 
-function homeModel(d, cl) {
+function homeModel(d, cl, traffic) {
   const s = d.server || {}, t = d.tunnels || {}, c = d.components || {};
   const rows = (cl && cl.rows) || [];
   const rx = rows.reduce((a, x) => a + (x.rx || 0), 0), tx = rows.reduce((a, x) => a + (x.tx || 0), 0);
@@ -496,9 +550,10 @@ function homeModel(d, cl) {
   const alerts = [
     s.exists && !s.up ? ["awg0 не поднят — Сервер → Починить", "/server"] : null,
     c.installed && c.reboot ? [c.reboot, "/server/module"] : null,
+    c.kernel_gap ? [`Ядро ${c.kernel_gap} без модуля AWG — пересобрать до перезагрузки`, "/server/module"] : null,
     d.update ? [`Доступна ${d.update} — обновить`, "/update"] : null,
   ].filter(Boolean);
-  return { d, s, t, rx, tx, alerts, leader: leader && leader.rx + leader.tx ? leader : null,
+  return { d, s, t, rx, tx, alerts, traffic, leader: leader && leader.rx + leader.tx ? leader : null,
     state: !s.exists ? "" : s.up ? "on" : "bad",
     exit: up.length ? up.join(", ") : "напрямую",
     expired: rows.filter((x) => x.blocked).length };
@@ -527,25 +582,29 @@ const homeStrip = (m) => h("div", { class: "sstrip" }, [
   [m.exit, "выход", () => go("/tunnels")],
   [m.leader ? m.leader.name : "—", "лидер", toLeader(m)],
 ].map(([big, label, onclick]) => h("div", { class: "cell" + (onclick ? " tap" : ""), onclick }, h("b", {}, big), h("span", {}, label))));
+const trafficCard = (m) => (m.traffic && m.traffic.total ? h("div", { class: "card" },
+  h("div", { class: "kv" }, h("b", {}, "Трафик за 14 дней"), h("span", {}, fmtBytes(m.traffic.total))),
+  trafficChart(m.traffic)) : null);
 const sectionsHead = () => h("div", { class: "h2row" }, h("h2", {}, "Разделы"),
   segBar(HOMES, homePref(), setHome));
 const HOME_VIEWS = {
-  cards: (m) => [homeAlerts(m), serverCard(m), homeStats(m), sectionsHead(),
+  cards: (m) => [homeAlerts(m), serverCard(m), homeStats(m), trafficCard(m), sectionsHead(),
     h("div", { class: "grid" }, SECTIONS.map(([ico, name, path, sub]) =>
       h("div", { class: "tile" + (path ? "" : " soon"), onclick: () => openSection(path) },
         h("div", { class: "ibox" }, secIcon(ico)), h("div", { class: "t" }, name),
         h("div", { class: "s" }, path ? sub : "скоро · пока в боте"))))],
-  compact: (m) => [homeAlerts(m), serverCard(m, false), homeStrip(m), sectionsHead(),
+  compact: (m) => [homeAlerts(m), serverCard(m, false), homeStrip(m), trafficCard(m), sectionsHead(),
     h("div", { class: "card list" }, SECTIONS.map(([ico, name, path, sub]) =>
       menuItem(`${ico} ${name}`, path ? sub : "скоро · пока в боте", () => openSection(path))))],
-  icons: (m) => [homeAlerts(m), serverCard(m), homeStrip(m), sectionsHead(),
+  icons: (m) => [homeAlerts(m), serverCard(m), homeStrip(m), trafficCard(m), sectionsHead(),
     h("div", { class: "igwrap" }, h("div", { class: "igrid" }, SECTIONS.map(([ico, name, path]) =>
       h("div", { class: "ic" + (path ? "" : " soon"), onclick: () => openSection(path) },
         h("div", { class: "ibox" }, secIcon(ico)), h("span", {}, name)))))],
 };
 
 route(/^\/$/, async (ctx) => {
-  const [me, d, cl] = await Promise.all([post("/api/me"), post("/api/status"), post("/api/clients").catch(() => null)]);
+  const [me, d, cl, traffic] = await Promise.all([post("/api/me"), post("/api/status"), post("/api/clients").catch(() => null),
+    call("traffic", "daily", "all", 14).catch(() => null)]);
   S.me = me;
   S.version = d.version;
   S.channel = d.channel;
@@ -555,7 +614,7 @@ route(/^\/$/, async (ctx) => {
     S.clients = cl;
     if (!S.sort) S.sort = cl.sort || "activity";
   }
-  const m = homeModel(d, cl);
+  const m = homeModel(d, cl, traffic);
   // Смена вида перерисовывает без новой загрузки; ушли с главной — put молчит
   const draw = () => ctx.put(HOME_VIEWS[homePref()](m), h("div", { class: "foot" },
     `${me.name} · ${me.owner ? "владелец" : "админ"} · бот ${me.bot}`));
@@ -564,11 +623,12 @@ route(/^\/$/, async (ctx) => {
 });
 
 // ── Клиенты ───────────────────────────────────────────────
-const FILTERS = [["all", "Все"], ["online", "Онлайн"], ["blocked", "Истёкшие"], ["mon", "Мониторинг"]];
+const FILTERS = [["all", "Все"], ["online", "Онлайн"], ["blocked", "Заблок."], ["mon", "Мониторинг"]];
 const EXPIRES = [["", "♾ Бессрочно"], ["+1h", "1 час"], ["+1d", "1 день"], ["+7d", "7 дней"], ["+30d", "30 дней"]];
 
+const blockedWord = (c) => (c.blocked_by === "traffic" ? "лимит исчерпан" : "срок истёк");
 function seen(c) {
-  if (c.blocked) return "срок истёк";
+  if (c.blocked) return blockedWord(c);
   if (c.online) return "онлайн";
   if (c.handshake) return `был ${fmtDur(c.ago)} назад`;
   return "не подключался";
@@ -592,7 +652,7 @@ const byName = (name) => (S.clients && S.clients.rows || []).find((c) => c.name 
 // Состояние клиента: рамка и точка карточки, пометка справа, чипы
 const clientState = (c) => (c.blocked ? "bad" : c.online ? "on" : "");
 function statusPill(c) {
-  if (c.blocked) return pill("срок истёк", "bad");
+  if (c.blocked) return pill(blockedWord(c), "bad");
   if (c.online) return pill("онлайн · " + fmtDur(c.ago), "ok");
   if (c.handshake) return pill(fmtDur(c.ago) + " назад");
   return pill("не подключался");
@@ -610,6 +670,7 @@ function clientTags(c) {
   return [
     c.mimicry && c.mimicry !== "none" ? tag(c.mimicry, "accent", "drama") : tag("без I1-I5"),
     c.expires && !c.blocked ? tag(expShort(c.expires), left < 3 * 86400 ? "warn" : "", "hourglass") : null,
+    c.limit ? tag(`лимит ${Math.min(999, Math.round(c.used * 100 / c.limit))}%`, c.used >= c.limit * 0.9 ? "warn" : "", "gauge") : null,
     routeTag(c, (S.clients && S.clients.route) || {}),
     c.mon ? tag("мониторинг", "", "bell") : null,
   ];
@@ -701,7 +762,7 @@ route(/^\/clients$/, async (ctx) => {
         if (v) go(v);
       } }, icon("plus"), "Создать")),
     statGrid([
-      [`${count("online")}/${d.rows.length}`, "Онлайн", `истёкших ${count("blocked")} · мониторинг ${count("mon")}`],
+      [`${count("online")}/${d.rows.length}`, "Онлайн", `заблокированных ${count("blocked")} · мониторинг ${count("mon")}`],
       [fmtBytes(rx + tx), "Суммарный обмен", `↓ ${fmtBytes(rx)} · ↑ ${fmtBytes(tx)}`],
       [leader && leader.rx + leader.tx ? leader.name : "—", "Лидер по трафику", leader && leader.rx + leader.tx ? fmtBytes(leader.rx + leader.tx) : "—"],
       [String(soon.length), "Истекают за 3 дня", soon.length ? `ближайший: ${soon[0].name}` : "никто"],
@@ -717,6 +778,8 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
   if (!c) return ctx.put(h("div", { class: "empty" }, `Клиента ${name} нет`), h("button", { class: "btn-block", onclick: () => replace("/clients") }, "К списку"));
   const r = S.clients.route || {};
   const enc = encodeURIComponent(name);
+  const chartBox = h("div");
+  call("traffic", "daily", name, 30).then((t) => t && t.total && chartBox.replaceChildren(trafficChart(t))).catch(() => {});
 
   async function setExpire(btn) {
     const v = await sheet("Срок действия", [
@@ -728,6 +791,18 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
     await busy(btn, async () => {
       await (v === "none" ? call("client", "unexpire", name) : call("client", "expire", name, v));
       haptic(); toast("Срок обновлён"); render();
+    });
+  }
+  async function setLimit(btn) {
+    const v = await sheet("Лимит трафика · " + name, [
+      ...["10", "50", "100", "300"].map((g) => ({ label: `📶 ${g} ГБ в месяц`, value: g + "G" })),
+      { label: "✏️ Свой размер или «всего»…", value: "custom" },
+      ...(c.limit ? [{ label: "🔄 Обнулить счётчик", value: "reset" }, { label: "♾ Снять лимит", value: "off" }] : [])]);
+    if (!v) return;
+    if (v === "custom") return go(`/client/${enc}/limit`);
+    await busy(btn, async () => {
+      await (v === "reset" ? call("client", "limit-reset", name) : call("client", "limit", name, v, "month"));
+      haptic(); toast(v === "off" ? "Лимит снят" : v === "reset" ? "Счётчик обнулён" : "Лимит установлен"); render();
     });
   }
   async function setRoute(btn) {
@@ -764,6 +839,9 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
       kv("Мимикрия", h("span", { class: "mono" }, !c.mimicry || c.mimicry === "none" ? "без I1-I5" : c.mimicry)),
       kv("Маршрут", c.route || "напрямую"),
       c.note ? kv("Заметка", c.note) : null),
+    h("div", { class: "card" },
+      kv("За месяц", fmtBytes(c.month)), kv("Сегодня", fmtBytes(c.today)),
+      kv("Лимит", c.limit ? limitText(c) : "нет"), c.limit ? meter(c.used, c.limit) : null, chartBox),
     switchRow("Мониторинг активности", "уведомления в чат, когда клиент пропал и вернулся", c.mon, async (on) => {
       await post("/api/client/mon", { name, on });
       toast(on ? "🔔 Бот сообщит, когда клиент пропадёт и вернётся" : "🔕 Мониторинг выключен", 3000);
@@ -772,6 +850,7 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
       h("button", { class: "btn-primary", onclick: () => go(`/client/${enc}/qr`) }, icon("qr-code"), "Конфиг и QR"),
       h("button", { onclick: () => go(`/client/${enc}/rename`) }, "✏️ Имя"),
       h("button", { onclick: (ev) => setExpire(ev.currentTarget) }, "⏳ Срок"),
+      h("button", { onclick: (ev) => setLimit(ev.currentTarget) }, "📶 Лимит"),
       h("button", { onclick: () => go(`/client/${enc}/mimicry`) }, "🎭 Мимикрия"),
       ["warp", "xray", "exits"].includes(r.kind) ? h("button", { onclick: (ev) => setRoute(ev.currentTarget) }, "🌐 Маршрут") : null,
       h("button", { onclick: () => go(`/client/${enc}/note`) }, "📝 Заметка")),
@@ -813,6 +892,27 @@ route(/^\/client\/([^/]+)\/note$/, async (ctx, name) => {
     h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.target, async () => {
       await post("/api/client/note", { name, text: ta.value.trim() }); haptic(); back();
     }) }, "Сохранить"));
+});
+
+route(/^\/client\/([^/]+)\/limit$/, async (ctx, name) => {
+  await loadClients();
+  const c = byName(name) || {};
+  let period = c.period || "month";
+  const input = h("input", { placeholder: "50G", value: c.limit ? fmtBytes(c.limit).replace(/\.0 /, " ").replace(" ГБ", "G").replace(" ТБ", "T").replace(" МБ", "M") : "",
+    autocapitalize: "off", autocomplete: "off" });
+  const seg = h("div");
+  const drawSeg = () => seg.replaceChildren(segText([["month", "В месяц"], ["total", "Всего"]], period, (p) => { period = p; drawSeg(); }));
+  drawSeg();
+  ctx.put(title("📶 Лимит · " + name),
+    h("label", {}, "Размер: 50G, 500M, 1.5T; число без буквы — гигабайты"), input, seg,
+    hint("Исчерпал лимит — клиент блокируется, как истёкший. «В месяц» — счётчик обнуляется 1-го числа, и клиент "
+      + "разблокируется сам; «всего» — считается с этой минуты, без сброса."),
+    h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.target, async () => {
+      const v = input.value.trim().replace(/\s+/g, "").toUpperCase().replace("ГБ", "G").replace("МБ", "M").replace("ТБ", "T");
+      if (!/^\d{1,7}([.,]\d{1,3})?[KMGT]?$/.test(v)) throw new Error("Размер: например 50G или 500M");
+      await call("client", "limit", name, v, period); haptic(); toast("Лимит установлен"); back();
+    }) }, "Сохранить"));
+  input.focus();
 });
 
 route(/^\/client\/([^/]+)\/date$/, async (ctx, name) => {
@@ -1678,8 +1778,41 @@ async function uploadBackup(file) {
   return d.path;
 }
 
+// Автобэкап: «ежедневно · хранить 7 · последний 02.10 04:00»
+const BACKUP_MODES = [["off", "Выкл"], ["day", "Каждый день"], ["week", "Раз в неделю"]];
+function autoLine(b) {
+  if (b.mode === "off") return "выключен";
+  const mode = { day: "ежедневно", week: "еженедельно" }[b.mode];
+  return `${mode} · хранить ${b.keep} · последний ${b.last ? fmtTime(b.last) : "ещё не было"}` + (b.error ? ` · ⚠️ ${b.error}` : "");
+}
+function autoBackupCard(a, redraw) {
+  const b = a.backup;
+  const set = (body, msg) => busy(null, async () => {
+    const r = await post("/api/alerts", body);
+    haptic(); if (msg) toast(msg, 3000);
+    redraw(r);
+  });
+  return h("div", { class: "card", "data-name": "autobackup", style: "margin-top:12px" },
+    h("div", { class: "kv" }, h("b", {}, "Автобэкап"), h("span", { class: "muted small" }, autoLine(b))),
+    a.owner ? [
+      segText(BACKUP_MODES, b.mode, (m) => set({ backup_mode: m }, m === "off" ? "Автобэкап выключен" : "Первый автобэкап придёт в чат в течение пары минут")),
+      h("div", { class: "row", style: "gap:8px;align-items:center;margin-top:8px" }, h("span", { class: "muted small" }, "Хранить на сервере:"),
+        segText([3, 7, 14, 30].map((n) => [n, String(n)]), b.keep, (n) => set({ backup_keep: n }))),
+      b.mode !== "off" ? h("button", { class: "btn-block", style: "margin-top:8px", onclick: (ev) => busy(ev.currentTarget, async () => {
+        toast("Делаю автобэкап…", 4000);
+        redraw(await post("/api/alerts", { backup_now: true })); haptic(); toast("💾 Автобэкап — в чате", 3000);
+      }) }, "💾 Сделать сейчас") : null,
+    ] : null,
+    hint("Полный бэкап по расписанию — файлом в чат, только владельцам: в нём приватные ключи. "
+      + "Из автобэкапов на сервере остаются последние N, сделанные вручную не трогаются."));
+}
+
 route(/^\/backup$/, async (ctx) => {
-  const rows = ((await call("backup", "list")) || []).slice(0, 30);
+  const [rowsAll, alertsInfo] = await Promise.all([call("backup", "list"), post("/api/alerts").catch(() => null)]);
+  const rows = (rowsAll || []).slice(0, 30);
+  const autoBox = h("div");
+  const drawAuto = (a) => a && autoBox.replaceChildren(autoBackupCard(a, drawAuto));
+  drawAuto(alertsInfo);
   // Без accept: на части Android фильтр по типу прячет .tar.gz; что это бэкап, проверит awg2
   const file = h("input", { type: "file", style: "display:none",
     onchange: () => busy(null, async () => {
@@ -1711,7 +1844,7 @@ route(/^\/backup$/, async (ctx) => {
         if (d && d.path) sendBackup(d.path, note);
         return h("div", { class: "card" }, kv("Файл", (d && d.path || "").split("/").pop()), kv("Размер", fmtBytes(d && d.size)), note);
       }), "btn-primary"),
-      btn("📤 Из файла", () => file.click())), file,
+      btn("📤 Из файла", () => file.click())), file, autoBox,
     h("h2", {}, "На сервере"),
     h("div", { class: "card list" }, rows.length ? rows.map((b) => h("div", { class: "item", onclick: () => pick(b) },
       h("div", { class: "ibox" }, icon(b.full ? "folder" : "file-archive")),
@@ -2029,7 +2162,8 @@ route(/^\/bot$/, async (ctx) => {
       menuItem("🌐 Прокси до Telegram", d.proxy || "нет — напрямую", () => go("/bot/proxy")),
       d.owner ? menuItem("👮 Админы", `владельцев ${d.owners}, приглашённых ${d.invited}`, () => go("/bot/admins")) : null,
       d.owner ? menuItem("🎨 Оформление", "иконки custom emoji в боте", () => go("/bot/look")) : null,
-      d.owner ? menuItem("📱 Mini App и сертификат", w.running ? w.url : "не запущена", () => go("/bot/app")) : null),
+      d.owner ? menuItem("📱 Mini App и сертификат", w.running ? w.url : "не запущена", () => go("/bot/app")) : null,
+      d.owner ? menuItem("🔔 Уведомления", "awg0, перезагрузка, ядро, новая версия, диск", () => go("/bot/alerts")) : null),
     d.owner ? btn("🗑 Удалить бота", async () => {
       if (!await confirmTg("Удалить бота: службу, код и конфиг с токеном? AWG не затрагивается, конфиг копируется в бэкапы.")) return;
       if (!await confirmTg("Точно удалить? Панель и бот перестанут работать.")) return;
@@ -2039,6 +2173,25 @@ route(/^\/bot$/, async (ctx) => {
           hint("Вернуть бота: sudo awg2 → Telegram-бот → Установить."));
       });
     }, "btn-danger btn-block") : null);
+});
+
+const ALERT_HINTS = {
+  iface: "две проверки подряд без awg0 — и когда он вернётся, с временем простоя",
+  reboot: "сервер загрузился заново: время работы и поднялся ли awg0",
+  update: "вышла новая версия AWG Toolza — один раз на версию",
+  kernel: "apt поставил ядро, под которое модуль AWG не собрался",
+  cert: "сертификат панели скоро истечёт — продление не сработало",
+  disk: "место на диске почти кончилось",
+};
+route(/^\/bot\/alerts$/, async (ctx) => {
+  const a = await post("/api/alerts");
+  ctx.put(title("🔔 Уведомления"),
+    hint(`Бот пишет владельцам и админам, когда с сервером что-то случилось; проверка — раз в ${Math.max(1, Math.round(a.interval / 60))} мин. Каждое событие — один раз.`),
+    a.kinds.map((k) => switchRow(k.label, ALERT_HINTS[k.id] || "", k.on, async (on) => {
+      if (!a.owner) throw new Error("Уведомления настраивает только владелец");
+      await post("/api/alerts", { kind: k.id, on });
+    })),
+    hint("Сроки и лимиты трафика клиентов сообщает таймер awg2 — эти уведомления приходят всегда, даже когда бот остановлен."));
 });
 
 route(/^\/bot\/proxy$/, async (ctx) => {

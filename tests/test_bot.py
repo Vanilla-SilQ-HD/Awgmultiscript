@@ -566,9 +566,137 @@ async def run():
         f.write(saved_conf)
     store.set_note("alice", "#ping")
 
+    print("Лимит трафика и трафик по дням")
+    text, buttons = screen(await press("cl:lim:alice"))
+    chk("экран лимита: готовые размеры, свой, период", "Лимит трафика: alice" in text and "без лимита" in text
+        and "cl:ls:alice|50G|month" in [d for _, d in buttons] and "cl:lp:alice|total" in [d for _, d in buttons],
+        [text, buttons])
+    text, buttons = screen(await press("cl:ls:alice|50G|month"))
+    chk("лимит 50 ГБ в месяц — в карточке", "Лимит: 0 Б из 50.0 ГБ за месяц (0%)" in text, text)
+    await press("cl:lp:alice|total")
+    text, buttons = screen(await press("cl:ls:alice|ask|total"))
+    chk("свой размер — вопрос", "1.5T" in text, text)
+    text, _ = screen(await say("1,5 тб"))
+    chk("свой размер «всего»", "Лимит: 0 Б из 1.5 ТБ всего" in text, text)
+    sent = await press("cl:lr:alice")
+    chk("обнулить счётчик", "Счётчик обнулён" in alerts(sent), alerts(sent))
+    text, _ = screen(await press("cl:ls:alice|off|month"))
+    chk("снять лимит", "Лимит:" not in text and "📶 Лимит трафика" in [t for t, _ in screen(SESSION.sent)[1]], text)
+    text, buttons = screen(await press("cl:tday:alice"))
+    chk("трафик клиента по дням — столбиками", "трафик по дням" in text and "<pre>" in text
+        and text.count("\n", text.index("<pre>")) >= 14, text)
+    text, _ = screen(await press("cl:tsrv"))
+    chk("трафик сервера по дням", "Трафик сервера по дням" in text and "<pre>" in text, text)
+
+    print("Уведомления о сервере")
+    from pathlib import Path
+    from awgbot import alerts as al
+    real_data, real_disk = al.api.data, al.disk_pct
+    al.BOOT_ID = Path(TMP) / "boot_id"
+    al.BOOT_ID.write_text("boot-A\n")
+    al.CERT_FULL = Path(TMP) / "alert-cert.pem"
+    st = {}
+
+    def said(mark):
+        return [m.text or "" for n, m in SESSION.sent[mark:] if n == "SendMessage" and m.chat_id == 111]
+
+    mark = len(SESSION.sent)
+    await al.tick(BOT, st)
+    chk("первый проход: только запоминает загрузку, awg0 — первая неудача", not said(mark)
+        and st.get("boot") == "boot-A" and st.get("down") == 1, [said(mark), st])
+    mark = len(SESSION.sent)
+    await al.tick(BOT, st)
+    sent = said(mark)
+    rep = [m for n, m in SESSION.sent[mark:] if n == "SendMessage" and "awg0 не работает" in (m.text or "")]
+    chk("awg0 лежит две проверки — 🔴 с кнопкой «Починить»", len(sent) == 1 and "awg0 не работает" in sent[0]
+        and rep and rep[0].reply_markup.inline_keyboard[0][0].callback_data == "srv:repair", sent)
+    mark = len(SESSION.sent)
+    await al.tick(BOT, st)
+    chk("пока лежит — молчит", not said(mark), said(mark))
+    with open(LINKS, "a") as f:
+        f.write("awg0\n")
+    al.BOOT_ID.write_text("boot-B\n")
+    mark = len(SESSION.sent)
+    await al.tick(BOT, st)
+    sent = said(mark)
+    chk("перезагрузка и awg0 вернулся — два сообщения", len(sent) == 2 and any("перезагрузился" in t for t in sent)
+        and any("снова работает" in t and "Простой" in t for t in sent), sent)
+    with open(LINKS) as f:
+        links = f.read()
+    with open(LINKS, "w") as f:
+        f.write(links.replace("awg0\n", ""))
+
+    async def fake_data(*args, **kw):
+        if args[:1] == ("status",):
+            return {"version": "v1.2.0", "host": "vm1", "update": "v1.2.1",
+                    "components": {"kernel_gap": "6.8.0-150-generic"}, "server": {"exists": True, "up": True}}
+        return await real_data(*args, **kw)
+    al.api.data = fake_data
+    al.disk_pct = lambda: 95
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-days", "1",
+                    "-nodes", "-subj", "/CN=alert", "-keyout", os.path.join(TMP, "alert-key.pem"), "-out", str(al.CERT_FULL)],
+                   capture_output=True, check=True)
+    al.set_enabled("disk", False)
+    mark = len(SESSION.sent)
+    await al.tick(BOT, st)
+    sent = said(mark)
+    btns = [b.callback_data for n, m in SESSION.sent[mark:] if n == "SendMessage" and m.reply_markup
+            for row in m.reply_markup.inline_keyboard for b in row]
+    chk("новая версия, ядро без модуля, сертификат — по сообщению с кнопкой; диск выключен",
+        len(sent) == 3 and any("v1.2.1" in t for t in sent) and any("6.8.0-150-generic" in t for t in sent)
+        and any("Сертификат Mini App" in t for t in sent) and not any("диск" in t for t in sent)
+        and {"upd", "mod:rebuild", "app"} <= set(btns), [sent, btns])
+    mark = len(SESSION.sent)
+    await al.tick(BOT, st)
+    chk("повторно о том же — молчит", not said(mark), said(mark))
+    al.set_enabled("disk", True)
+    al.disk_pct = lambda: 80
+    await al.tick(BOT, st)
+    al.disk_pct = lambda: 93
+    mark = len(SESSION.sent)
+    await al.tick(BOT, st)
+    chk("диск: после спада ниже 85% — снова тревога", len(said(mark)) == 1 and "93%" in said(mark)[0], said(mark))
+    al.api.data, al.disk_pct = real_data, real_disk
+
+    print("Автобэкап")
+    text, buttons = screen(await press("bk"))
+    chk("в «Бэкапах» — строка и кнопка автобэкапа", "Автобэкап: выключен" in text and ("🕒 Автобэкап", "abk") in buttons,
+        [text, buttons])
+    text, buttons = screen(await press("abk"))
+    chk("экран автобэкапа", "abk:m:day" in [d for _, d in buttons] and "abk:k:7" in [d for _, d in buttons], buttons)
+    await press("abk:m:day")
+    await press("abk:k:3")
+    chk("режим и сколько хранить — сохранены", al.config()["backup"] == {"mode": "day", "keep": 3}, al.config())
+    mark = len(SESSION.sent)
+    done = await al.backup_due(BOT)
+    d = [m for n, m in SESSION.sent[mark:] if n == "SendDocument"]
+    chk("первый автобэкап — сразу, файлом владельцу", done and len(d) == 1 and d[0].chat_id == 111
+        and "Автобэкап" in d[0].caption, [n for n, _ in SESSION.sent[mark:]])
+    info = al.backup_info()
+    chk("автобэкап записан: время, без ошибки, только архив", info["last"] and info["ok"] and not info["error"]
+        and any(f.endswith("_auto.tar.gz") for f in os.listdir(os.path.join(ROOT, "awg_backup")))
+        and not any(f.endswith("_auto") for f in os.listdir(os.path.join(ROOT, "awg_backup"))), info)
+    mark = len(SESSION.sent)
+    chk("до срока — не повторяется", not await al.backup_due(BOT) and not docs(SESSION.sent[mark:]))
+    admin = User(id=333, is_bot=False, first_name="Admin")
+    admins.add(333, 111)
+    denied = [alerts(await press(x, admin)) for x in ("abk", "abk:m:off", "ntf", "ntf:t:iface")]
+    chk("автобэкап и уведомления настраивает только владелец", all(a and "только владелец" in a[0] for a in denied)
+        and al.config()["backup"]["mode"] == "day" and al.enabled("iface"), denied)
+    text, buttons = screen(await press("bk", admin))
+    chk("админу кнопки автобэкапа не видно", "abk" not in [d for _, d in buttons], buttons)
+    admins.remove(333, removed_by=111)
+    text, buttons = screen(await press("ntf"))
+    chk("экран уведомлений", "Уведомления" in text and "ntf:t:kernel" in [d for _, d in buttons], buttons)
+    await press("ntf:t:kernel")
+    chk("выключение уведомления", not al.enabled("kernel") and al.enabled("update"), al.config())
+    await press("ntf:t:kernel")
+    await press("abk:m:off")
+
     print("Все экраны")
     screens = ["srv", "mod", "srv:proto", "srv:par", "srv:ep", "srv:install", "srv:reset", "srv:reboot",
                "cl:activity", "cl:exp:alice", "cl:mim:alice", "cl:tun:alice", "cl:ren:alice",
+               "cl:lim:alice", "cl:tday:alice", "cl:tsrv", "ntf", "abk",
                "diag", "diag:status", "diag:dpi", "diag:logs", "diag:log:manager", "diag:sniff",
                "bk", "bk:list", "tun", "tc::warp", "warp", "warp:backend", "xr", "t2s", "ex", "cas", "dns",
                "botm", "botm:proxy", "adm", "del", "del:all", "upd", "wo", "wo:install"]

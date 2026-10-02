@@ -122,7 +122,7 @@ def cmd_peers(conf):
             continue
         print("\t".join([peer_name(b), pub, peer_field(b, "AllowedIPs"),
                          peer_meta(b, "expires"), peer_meta(b, "orig_ips"),
-                         peer_meta(b, "mimicry")]))
+                         peer_meta(b, "mimicry"), peer_meta(b, "limit"), peer_meta(b, "blocked_by")]))
 
 
 def cmd_meta_set(conf, name, key, value):
@@ -440,7 +440,7 @@ def cmd_expire_clear(conf, name, suspend):
     orig = peer_meta(b, "orig_ips")
     if orig and peer_field(b, "AllowedIPs") == suspend:
         b = re.sub(r"^([ \t]*AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + orig, b, count=1, flags=re.M | re.I)
-    b = set_meta(set_meta(b, "expires", ""), "orig_ips", "")
+    b = set_meta(set_meta(set_meta(b, "expires", ""), "orig_ips", ""), "blocked_by", "")
     peers[i] = b
     write_atomic(conf, head + "".join(peers))
     print(orig)
@@ -485,6 +485,357 @@ def cmd_expire_check(conf, suspend, state_dir):
         print("CHANGED")
     for e in events:
         print(e)
+
+
+# ── Трафик клиентов и лимиты ──
+# Счётчики `awg show transfer` живут, пока поднят интерфейс, поэтому таймер
+# раз в минуту складывает их прирост в базу: по дням (DAYS_KEEP дней) и за
+# всё время. Ключ — публичный ключ: переименование историю не теряет.
+# Лимит — метка пира «# limit=БАЙТ/month|total»; превысивший блокируется
+# как истёкший (AllowedIPs → suspend), с меткой «# blocked_by=traffic» — по
+# ней таймер разблокирует его в новом месяце или после смены лимита.
+DAYS_KEEP = 92
+TRAFFIC_SAVE_EVERY = 300
+SIZE_UNITS = {"": 1024 ** 3, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+
+
+def fmt_bytes(n):
+    n = float(n or 0)
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if n < 1024:
+            return "%d %s" % (n, unit) if unit == "Б" else "%.1f %s" % (n, unit)
+        n /= 1024
+    return "%.1f ТБ" % n
+
+
+def parse_size(text):
+    """«50G», «500M», «1.5T», «50» (гигабайты) → байты; None — не размер."""
+    m = re.match(r"^\s*(\d{1,7}(?:[.,]\d{1,3})?)\s*([KMGT]?)(?:i?B)?\s*$", text or "", re.I)
+    if not m:
+        return None
+    n = int(float(m.group(1).replace(",", ".")) * SIZE_UNITS[m.group(2).upper()])
+    return n if n > 0 else None
+
+
+def parse_limit(value):
+    """Метка «БАЙТ/период» → (байт, период) или (0, "")."""
+    m = re.match(r"^(\d+)/(month|total)$", value or "")
+    return (int(m.group(1)), m.group(2)) if m else (0, "")
+
+
+def _read_transfer(path):
+    out = {}
+    try:
+        for line in read(path).splitlines():
+            f = line.split("\t")
+            if len(f) >= 3 and f[1].isdigit() and f[2].isdigit():
+                out[f[0]] = (int(f[1]), int(f[2]))
+    except OSError:
+        pass
+    return out
+
+
+class Traffic:
+    """База трафика: {"v", "ifindex", "saved", "last": {pub: [rx, tx]},
+    "total": {pub: n}, "days": {"ГГГГ-ММ-ДД": {pub: [rx, tx]}},
+    "reset": {pub: {"p": период, "b": байт}}, "warned": {pub: "период:лимит"}}."""
+
+    def __init__(self, path):
+        self.path = path
+        try:
+            data = json.loads(read(path))
+        except (OSError, ValueError):
+            data = {}
+        self.fresh = not isinstance(data, dict) or "last" not in data
+        if not isinstance(data, dict):
+            data = {}
+        self.d = {k: data.get(k) if isinstance(data.get(k), dict) else {}
+                  for k in ("last", "total", "days", "reset", "warned")}
+        self.ifindex = str(data.get("ifindex") or "")
+        self.saved = int(data.get("saved") or 0)
+
+    def apply(self, counters, ifindex=""):
+        """Прирост счётчиков с прошлого раза — в сегодняшний день. Новый
+        интерфейс (другой ifindex — awg0 пересоздан) или счётчик меньше
+        прежнего — отсчёт с нуля. Самый первый проход только запоминает
+        счётчики: накопленное до учёта к сегодняшнему дню не относится."""
+        today = time.strftime("%Y-%m-%d")
+        last, total = self.d["last"], self.d["total"]
+        reborn = bool(ifindex) and bool(self.ifindex) and ifindex != self.ifindex
+        day = self.d["days"].setdefault(today, {})
+        for pub, (rx, tx) in counters.items():
+            prev = last.get(pub)
+            if self.fresh:
+                drx = dtx = 0
+            elif reborn or not isinstance(prev, list) or len(prev) != 2 or rx < prev[0] or tx < prev[1]:
+                drx, dtx = rx, tx
+            else:
+                drx, dtx = rx - prev[0], tx - prev[1]
+            last[pub] = [rx, tx]
+            if drx or dtx:
+                cur = day.get(pub) or [0, 0]
+                day[pub] = [cur[0] + drx, cur[1] + dtx]
+                total[pub] = int(total.get(pub) or 0) + drx + dtx
+        if ifindex:
+            self.ifindex = ifindex
+        self.fresh = False
+
+    @staticmethod
+    def period_key(period):
+        return time.strftime("%Y-%m") if period == "month" else "total"
+
+    def raw_used(self, pub, period):
+        if period == "month":
+            month = time.strftime("%Y-%m")
+            return sum(sum(v.get(pub) or [0, 0]) for d, v in self.d["days"].items() if d.startswith(month))
+        return int(self.d["total"].get(pub) or 0)
+
+    def used(self, pub, period):
+        raw = self.raw_used(pub, period)
+        r = self.d["reset"].get(pub)
+        if isinstance(r, dict) and r.get("p") == self.period_key(period):
+            return max(0, raw - int(r.get("b") or 0))
+        return raw
+
+    def reset(self, pub, period):
+        self.d["reset"][pub] = {"p": self.period_key(period), "b": self.raw_used(pub, period)}
+        self.d["warned"].pop(pub, None)
+
+    def series(self, pubs, days):
+        """Последние days дней (от старых к новым): даты, rx и tx по списку ключей."""
+        dates = [time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400 * i)) for i in range(days - 1, -1, -1)]
+        rx, tx = [], []
+        for d in dates:
+            v = self.d["days"].get(d) or {}
+            rx.append(sum((v.get(p) or [0, 0])[0] for p in pubs))
+            tx.append(sum((v.get(p) or [0, 0])[1] for p in pubs))
+        return dates, rx, tx
+
+    def save(self, alive=None):
+        """Старше DAYS_KEEP дней — прочь; у удалённых клиентов остаётся
+        только история по дням (она входит в общий трафик сервера)."""
+        cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400 * DAYS_KEEP))
+        self.d["days"] = {k: v for k, v in self.d["days"].items() if k >= cutoff and v}
+        if alive is not None:
+            for k in ("last", "total", "reset", "warned"):
+                self.d[k] = {p: v for p, v in self.d[k].items() if p in alive}
+        self.saved = int(time.time())
+        data = dict(self.d, v=1, ifindex=self.ifindex, saved=self.saved)
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        write_atomic(self.path, json.dumps(data, separators=(",", ":")))
+
+
+def _block(b, suspend, aip, reason):
+    if not peer_meta(b, "orig_ips"):
+        b = set_meta(b, "orig_ips", aip)
+    b = re.sub(r"^([ \t]*AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + suspend, b, count=1, flags=re.M | re.I)
+    return set_meta(b, "blocked_by", reason)
+
+
+def _unblock(b, suspend):
+    orig = peer_meta(b, "orig_ips")
+    if orig and peer_field(b, "AllowedIPs") == suspend:
+        b = re.sub(r"^([ \t]*AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + orig, b, count=1, flags=re.M | re.I)
+    return set_meta(set_meta(b, "orig_ips", ""), "blocked_by", "")
+
+
+PERIOD_WORD = {"month": "за месяц", "total": "всего"}
+
+
+def cmd_traffic_tick(conf, suspend, db, transfer, ifindex="", force_save="0"):
+    """Проход таймера: прирост трафика в базу и проверка лимитов. События:
+    CHANGED; LIMIT<TAB>имя<TAB>адрес<TAB>текст; WARN90<TAB>имя<TAB>текст;
+    UNLIMIT<TAB>имя<TAB>текст."""
+    try:
+        text = read(conf)
+    except OSError:
+        return
+    lock = _traffic_lock(db)
+    t = Traffic(db)
+    t.apply(_read_transfer(transfer), ifindex)
+    now = int(time.time())
+    head, peers = split_peers(text)
+    events, changed, alive = [], False, set()
+    for i, b in enumerate(peers):
+        pub, aip = peer_field(b, "PublicKey"), peer_field(b, "AllowedIPs")
+        if not (pub and aip):
+            continue
+        alive.add(pub)
+        name = peer_name(b) or pub[:8]
+        limit, period = parse_limit(peer_meta(b, "limit"))
+        by_traffic = peer_meta(b, "blocked_by") == "traffic"
+        exp = peer_meta(b, "expires")
+        expired = exp.isdigit() and now >= int(exp)
+        used = t.used(pub, period) if limit else 0
+        word = "%s из %s %s" % (fmt_bytes(used), fmt_bytes(limit), PERIOD_WORD.get(period, "")) if limit else ""
+        if by_traffic and expired:
+            # Истёк и срок: блокировку держит уже он, и снимается она сроком
+            peers[i] = set_meta(b, "blocked_by", "")
+            changed = True
+        elif by_traffic and (not limit or used < limit):
+            peers[i] = _unblock(b, suspend)
+            changed = True
+            events.append("UNLIMIT\t%s\t%s" % (name, word or "лимит снят"))
+        elif limit and used >= limit and aip != suspend:
+            peers[i] = _block(b, suspend, aip, "traffic")
+            changed = True
+            events.append("LIMIT\t%s\t%s\t%s" % (name, aip, word))
+        elif limit and used >= limit * 0.9 and aip != suspend:
+            mark = "%s:%d" % (t.period_key(period), limit)
+            if t.d["warned"].get(pub) != mark:
+                t.d["warned"][pub] = mark
+                events.append("WARN90\t%s\t%s" % (name, word))
+    if changed:
+        write_atomic(conf, head + "".join(peers))
+        print("CHANGED")
+    day_changed = time.strftime("%Y-%m-%d", time.localtime(t.saved)) != time.strftime("%Y-%m-%d")
+    if events or changed or day_changed or force_save == "1" or now - t.saved >= TRAFFIC_SAVE_EVERY:
+        t.save(alive)
+    del lock
+    for e in events:
+        print(e)
+
+
+def _traffic_lock(db):
+    """Таймер и вызовы API правят базу по очереди."""
+    import fcntl
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(db)), exist_ok=True)
+        f = open(db + ".lock", "a")
+        fcntl.flock(f, fcntl.LOCK_EX)
+        return f
+    except OSError:
+        return None
+
+
+def cmd_limit_set(conf, db, name, size, period="month"):
+    """Лимит клиенту: размер («50G»), off — снять. Лимит «всего» считается
+    с этой минуты; «за месяц» — с начала месяца."""
+    head, peers = split_peers(read(conf))
+    i = find_peer(peers, name=name)
+    if i < 0:
+        die("клиент %s не найден" % name, 2)
+    if size == "off":
+        peers[i] = set_meta(peers[i], "limit", "")
+        write_atomic(conf, head + "".join(peers))
+        return
+    n = parse_size(size)
+    if n is None:
+        die("размер не распознан: %s (пример: 50G, 500M)" % size)
+    if period not in PERIOD_WORD:
+        die("период: month или total")
+    pub = peer_field(peers[i], "PublicKey")
+    lock = _traffic_lock(db)
+    t = Traffic(db)
+    old, old_period = parse_limit(peer_meta(peers[i], "limit"))
+    if period == "total" and old_period != "total":
+        t.reset(pub, "total")
+    t.d["warned"].pop(pub, None)
+    t.save()
+    del lock
+    peers[i] = set_meta(peers[i], "limit", "%d/%s" % (n, period))
+    write_atomic(conf, head + "".join(peers))
+    print(fmt_bytes(n))
+
+
+def cmd_limit_reset(conf, db, name):
+    """Обнулить счётчик лимита (до конца периода)."""
+    _, peers = split_peers(read(conf))
+    i = find_peer(peers, name=name)
+    if i < 0:
+        die("клиент %s не найден" % name, 2)
+    limit, period = parse_limit(peer_meta(peers[i], "limit"))
+    if not limit:
+        die("у клиента %s нет лимита" % name)
+    lock = _traffic_lock(db)
+    t = Traffic(db)
+    t.reset(peer_field(peers[i], "PublicKey"), period)
+    t.save()
+    del lock
+
+
+def cmd_traffic_daily(conf, db, transfer, name="", days="30"):
+    """Трафик по дням: сервер целиком (с разбивкой по клиентам) или один
+    клиент. Несохранённый прирост счётчиков учитывается, база не пишется."""
+    try:
+        days = max(1, min(DAYS_KEEP, int(days)))
+    except ValueError:
+        days = 30
+    _, peers = split_peers(read(conf))
+    names = {peer_field(b, "PublicKey"): peer_name(b) for b in peers if peer_field(b, "PublicKey")}
+    t = Traffic(db)
+    t.apply(_read_transfer(transfer))
+    if name:
+        pubs = [p for p, n in names.items() if n == name]
+        if not pubs:
+            die("клиент %s не найден" % name, 2)
+    else:
+        pubs = sorted({p for v in t.d["days"].values() for p in v} | set(names))
+    dates, rx, tx = t.series(pubs, days)
+    out = {"name": name, "days": dates, "rx": rx, "tx": tx, "total": sum(rx) + sum(tx)}
+    if not name:
+        rows = []
+        for p, n in names.items():
+            _, r, s = t.series([p], days)
+            if sum(r) + sum(s):
+                rows.append({"name": n or p[:8], "rx": sum(r), "tx": sum(s)})
+        out["clients"] = sorted(rows, key=lambda c: -(c["rx"] + c["tx"]))
+    print(json.dumps(out, ensure_ascii=False))
+
+
+def cmd_traffic_rows(conf, db, transfer):
+    """Для меню: имя, лимит (байт), период, использовано по лимиту, за
+    месяц, сегодня, причина блокировки — построчно через табуляцию."""
+    _, peers = split_peers(read(conf))
+    t = Traffic(db)
+    t.apply(_read_transfer(transfer))
+    today = time.strftime("%Y-%m-%d")
+    for b in peers:
+        pub = peer_field(b, "PublicKey")
+        if not pub:
+            continue
+        limit, period = parse_limit(peer_meta(b, "limit"))
+        by = peer_meta(b, "blocked_by") or ("expire" if peer_meta(b, "orig_ips") else "")
+        print("\t".join(str(x) for x in (
+            peer_name(b), limit, period, t.used(pub, period) if limit else 0, t.raw_used(pub, "month"),
+            sum((t.d["days"].get(today) or {}).get(pub) or [0, 0]), by)))
+
+
+def cmd_traffic_report(conf, db, transfer, days="14"):
+    """Трафик сервера по дням столбиками и клиенты за 30 дней — для меню."""
+    try:
+        days = max(1, min(DAYS_KEEP, int(days)))
+    except ValueError:
+        days = 14
+    _, peers = split_peers(read(conf))
+    names = {peer_field(b, "PublicKey"): peer_name(b) for b in peers if peer_field(b, "PublicKey")}
+    t = Traffic(db)
+    t.apply(_read_transfer(transfer))
+    pubs = sorted({p for v in t.d["days"].values() for p in v} | set(names))
+    dates, rx, tx = t.series(pubs, days)
+    top = max([a + b for a, b in zip(rx, tx)] + [1])
+    print("По дням (↓ от клиентов + ↑ к клиентам):")
+    for d, a, b in zip(dates, rx, tx):
+        bar = "▇" * int(round(28 * (a + b) / top)) if a + b else ""
+        print("  %s.%s  %-28s %s" % (d[8:], d[5:7], bar, fmt_bytes(a + b) if a + b else "—"))
+    print("  Итого за %d дн.: %s" % (days, fmt_bytes(sum(rx) + sum(tx))))
+    rows = []
+    for p, n in names.items():
+        _, r, s = t.series([p], 30)
+        if sum(r) + sum(s):
+            rows.append((sum(r) + sum(s), n or p[:8]))
+    if rows:
+        print("")
+        print("Клиенты за 30 дней:")
+        for total, n in sorted(rows, reverse=True)[:15]:
+            print("  %-24s %s" % (n, fmt_bytes(total)))
+
+
+def cmd_size_parse(text):
+    n = parse_size(text)
+    if n is None:
+        die("размер не распознан: %s" % text)
+    print(n)
 
 
 # ════════════════════════ сети ════════════════════════
@@ -1162,8 +1513,9 @@ def _first_ip(value):
     return value.split(",")[0].split("/")[0].strip()
 
 
-def cmd_clients_json(conf, dump, client_dir, warp, xray, exits):
-    """Клиенты awg0 со статистикой `awg show dump` и туннелями — для бота."""
+def cmd_clients_json(conf, dump, client_dir, warp, xray, exits, db=""):
+    """Клиенты awg0 со статистикой `awg show dump`, туннелями и трафиком за
+    месяц и по лимиту — для бота."""
     _, peers = split_peers(read(conf))
     stats = {}
     try:
@@ -1173,6 +1525,10 @@ def cmd_clients_json(conf, dump, client_dir, warp, xray, exits):
                 stats[f[0]] = f
     except OSError:
         pass
+    traffic = Traffic(db) if db else None
+    if traffic:
+        traffic.apply({k: (int(f[5]), int(f[6])) for k, f in stats.items() if f[5].isdigit() and f[6].isdigit()})
+    today = time.strftime("%Y-%m-%d")
     now = int(time.time())
     tunnels = {"warp": _peers_list(warp), "xray": _peers_list(xray), "exit": _peers_list(exits)}
     rows = []
@@ -1201,6 +1557,13 @@ def cmd_clients_json(conf, dump, client_dir, warp, xray, exits):
             "rx": int(s[5]) if s[5].isdigit() else 0, "tx": int(s[6]) if s[6].isdigit() else 0,
             "endpoint": "" if s[2] in ("", "(none)") else s[2], "file": path,
         }
+        limit, period = parse_limit(peer_meta(b, "limit"))
+        by = peer_meta(b, "blocked_by")
+        row.update(limit=limit or None, period=period or None,
+                   blocked_by=(by or "expire") if orig else None,
+                   used=traffic.used(pub, period) if traffic and limit else None,
+                   month=traffic.raw_used(pub, "month") if traffic else None,
+                   today=sum((traffic.d["days"].get(today) or {}).get(pub) or [0, 0]) if traffic else None)
         for t, lst in tunnels.items():
             if lst is None:
                 row[t] = None
@@ -1571,6 +1934,9 @@ COMMANDS = {
     "i-replace": cmd_i_replace,
     "expire-set": cmd_expire_set, "expire-clear": cmd_expire_clear,
     "expire-check": cmd_expire_check,
+    "traffic-tick": cmd_traffic_tick, "traffic-daily": cmd_traffic_daily,
+    "traffic-rows": cmd_traffic_rows, "traffic-report": cmd_traffic_report,
+    "limit-set": cmd_limit_set, "limit-reset": cmd_limit_reset, "size-parse": cmd_size_parse,
     "net-of": cmd_net_of, "pick-net": cmd_pick_net, "net-overlaps": cmd_net_overlaps,
     "allowed-except": cmd_allowed_except,
     "rand-key": cmd_rand_key, "phobos-link": cmd_phobos_link, "exit-conf-fix": cmd_exit_conf_fix,

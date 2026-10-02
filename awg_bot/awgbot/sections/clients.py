@@ -66,7 +66,7 @@ def sort_rows(rows: list[dict], mode: str) -> list[dict]:
 
 def seen(c: dict) -> str:
     if c.get("blocked"):
-        return "заблокирован: срок истёк"
+        return "заблокирован: исчерпан лимит трафика" if c.get("blocked_by") == "traffic" else "заблокирован: срок истёк"
     if c.get("online"):
         return f"онлайн ({ui.fmt_dur(c.get('ago'))} назад)"
     if c.get("handshake"):
@@ -121,7 +121,7 @@ async def list_screen(target: ui.Target, page: int = 0) -> None:
     text = (f"<b>👥 Клиенты: {len(rows)}</b> · 🟢 {online} онлайн"
             + (f" · 🚫 {blocked} заблок." if blocked else "")
             + ("\n\nКлиентов пока нет." if not rows else
-               f"\nСортировка: {SORTS.get(mode, mode)}\n\n🟢 онлайн · ⚪️ офлайн · 🚫 срок истёк · 🔔 мониторинг")
+               f"\nСортировка: {SORTS.get(mode, mode)}\n\n🟢 онлайн · ⚪️ офлайн · 🚫 заблокирован · 🔔 мониторинг")
             + odd_note(odd))
     notes = store.notes()
     buttons: list[ui.Button] = []
@@ -167,11 +167,14 @@ async def _activity(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     for c in sorted(rows, key=lambda x: (not x.get("online"), -(x.get("handshake") or 0))):
         lines.append(f"{icon(c)} <b>{esc(c['name'])}</b> <code>{c['ip']}</code>\n"
                      f"    {seen(c)} · ↓{ui.fmt_bytes(c.get('rx'))} ↑{ui.fmt_bytes(c.get('tx'))}"
+                     + (f" · месяц {ui.fmt_bytes(c['month'])}" if c.get("month") else "")
+                     + (f"\n    📶 {limit_text(c)}" if c.get("limit") else "")
                      + (f"\n    ⏳ {ui.fmt_expire(c['expires'])}" if c.get("expires") and not c.get("blocked") else ""))
     text = "<b>📊 Активность и трафик</b>\n\n" + "\n".join(lines)
     if len(text) > ui.TEXT_MAX:
         text = text[:ui.TEXT_MAX - 20].rsplit("\n", 1)[0] + "\n…"
-    await ui.render(cb, text, ui.kb(("🔄 Обновить", act.data("activity")), ui.back("cl")))
+    await ui.render(cb, text, ui.kb(("🔄 Обновить", act.data("activity")), ("📈 По дням", act.data("tsrv")),
+                                    ui.back("cl")))
 
 
 @act("export")
@@ -241,15 +244,30 @@ def route_of(c: dict, route: dict) -> str:
     return {"off": "напрямую (exit-ноды — для других)", "shared": "exit-ноды, общий выход"}.get(ex, f"exit-нода {ex}")
 
 
+PERIOD = {"month": "за месяц", "total": "всего"}
+
+
+def limit_text(c: dict) -> str:
+    """«12.3 ГБ из 50.0 ГБ за месяц (25%)» или пусто."""
+    if not c.get("limit"):
+        return ""
+    used, lim = int(c.get("used") or 0), int(c["limit"])
+    return (f"{ui.fmt_bytes(used)} из {ui.fmt_bytes(lim)} {PERIOD.get(c.get('period') or '', '')}"
+            f" ({min(999, used * 100 // max(lim, 1))}%)")
+
+
 def card_text(c: dict, route: dict) -> str:
     name = c["name"]
     note = store.strip_tag(store.note(name))
+    month = c.get("month")
     return "\n".join(filter(None, [
         f"<b>👤 {esc(name)}</b>",
         "",
         f"IP: <code>{c['ip']}</code>",
         f"Статус: {icon(c)} {seen(c)}",
-        f"Трафик: ↓{ui.fmt_bytes(c.get('rx'))} ↑{ui.fmt_bytes(c.get('tx'))}",
+        f"Трафик: ↓{ui.fmt_bytes(c.get('rx'))} ↑{ui.fmt_bytes(c.get('tx'))}"
+        + (f" · за месяц {ui.fmt_bytes(month)}, сегодня {ui.fmt_bytes(c.get('today'))}" if month is not None else ""),
+        f"Лимит: {limit_text(c)}" if c.get("limit") else "",
         f"Адрес клиента: <code>{esc(c['endpoint'].rsplit(':', 1)[0])}</code>" if c.get("endpoint") else "",
         f"Срок: {ui.fmt_expire(c.get('expires'))}",
         f"Мимикрия: {esc(c.get('mimicry') or 'none')}",
@@ -270,6 +288,8 @@ async def card(target: ui.Target, name: str) -> None:
         ("📄 Конфиг и QR", act.data("conf", name)),
         ("✏️ Переименовать", act.data("ren", name)),
         ("⏳ Срок действия", act.data("exp", name)),
+        ("📶 Лимит трафика", act.data("lim", name)),
+        ("📊 Трафик по дням", act.data("tday", name)),
         ("🎭 Мимикрия", act.data("mim", name)),
         ("🌐 Маршрут", act.data("tun", name)) if route["kind"] in ("warp", "xray", "exits") else None,
         ("📝 Заметка", act.data("note", name)),
@@ -493,6 +513,118 @@ async def _exdate(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
         await ask.retry(msg, state, ctx, r.message)
         return
     await card(msg, ctx["name"])
+
+
+# ── Лимит трафика ─────────────────────────────────────────
+LIMITS = ["10G", "50G", "100G", "300G"]
+
+
+@act("lim")
+async def _lim(cb: CallbackQuery, state: FSMContext, name: str) -> None:
+    c = await client(name)
+    if c is None:
+        await card(cb, name)
+        return
+    period = (await state.get_data()).get("lim_period") or c.get("period") or "month"
+    other = "total" if period == "month" else "month"
+    await ui.render(cb, f"<b>📶 Лимит трафика: {esc(name)}</b>\n"
+                        f"Сейчас: {limit_text(c) or 'без лимита'}\n"
+                        f"За этот месяц: {ui.fmt_bytes(c.get('month'))}\n\n"
+                        "Исчерпал лимит — клиент блокируется, как истёкший. «В месяц» — счётчик "
+                        "обнуляется 1-го числа, и клиент разблокируется сам; «всего» — считается с "
+                        "момента установки, без сброса.\n\n"
+                        f"Период для новых значений: <b>{PERIOD[period]}</b>",
+                    ui.kb([(f"📶 {v[:-1]} ГБ", act.data("ls", f"{name}|{v}|{period}")) for v in LIMITS],
+                          ("✏️ Свой размер…", act.data("ls", f"{name}|ask|{period}")),
+                          (f"🔁 {'Всего' if other == 'total' else 'В месяц'}", act.data("lp", f"{name}|{other}")),
+                          ("🔄 Обнулить", act.data("lr", name)) if c.get("limit") else None,
+                          ("♾ Снять лимит", act.data("ls", f"{name}|off|{period}")) if c.get("limit") else None,
+                          ui.back(act.data("v", name))))
+
+
+@act("lp")
+async def _lim_period(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    name, _, period = arg.partition("|")
+    await state.update_data(lim_period=period if period in PERIOD else "month")
+    await _lim(cb, state, name)
+
+
+@act("ls")
+async def _lim_set(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    name, v, period = (arg.split("|") + ["", ""])[:3]
+    if v == "ask":
+        await ask.ask(cb, state, "cl_limit", "Лимит: <code>50G</code>, <code>500M</code>, <code>1.5T</code> "
+                                             "(число без буквы — гигабайты)",
+                      act.data("lim", name), name=name, period=period)
+        return
+    r = await api.call("client", "limit", name, v, period if period in PERIOD else "month")
+    await state.update_data(lim_period="")
+    if not r.ok:
+        await ui.render(cb, ui.fail(r, "Лимит трафика"), ui.kb(ui.back(act.data("lim", name))))
+        return
+    await card(cb, name)
+
+
+@ask.on("cl_limit")
+async def _lim_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
+    v = ask.text_of(msg).replace(" ", "").upper().replace("ГБ", "G").replace("МБ", "M").replace("ТБ", "T")
+    r = await api.call("client", "limit", ctx["name"], v, ctx.get("period") or "month")
+    if not r.ok:
+        await ask.retry(msg, state, ctx, r.message)
+        return
+    await state.update_data(lim_period="")
+    await card(msg, ctx["name"])
+
+
+@act("lr")
+async def _lim_reset(cb: CallbackQuery, state: FSMContext, name: str) -> None:
+    r = await api.call("client", "limit-reset", name)
+    if not r.ok:
+        await ui.render(cb, ui.fail(r, "Счётчик лимита"), ui.kb(ui.back(act.data("lim", name))))
+        return
+    await cb.answer("Счётчик обнулён")
+    await card(cb, name)
+
+
+# ── Трафик по дням ────────────────────────────────────────
+def bars(d: dict, days: int = 14) -> str:
+    """Столбики по дням моноширинным блоком: «02.10 ▇▇▇▇▇▇ 1.2 ГБ»."""
+    rows = list(zip(d.get("days") or [], d.get("rx") or [], d.get("tx") or []))[-days:]
+    top = max([a + b for _, a, b in rows] + [1])
+    out = []
+    for day, a, b in rows:
+        n = round(14 * (a + b) / top) if a + b else 0
+        out.append(f"{day[8:]}.{day[5:7]} {'▇' * n or '·':<14} {ui.fmt_bytes(a + b) if a + b else '—'}")
+    return "<pre>" + esc("\n".join(out)) + "</pre>"
+
+
+@act("tday")
+async def _tday(cb: CallbackQuery, state: FSMContext, name: str) -> None:
+    r = await api.call("traffic", "daily", name, 30)
+    if not r.ok or not isinstance(r.data, dict):
+        await ui.render(cb, ui.fail(r, "Трафик по дням"), ui.kb(ui.back(act.data("v", name))))
+        return
+    d = r.data
+    week = sum(d["rx"][-7:]) + sum(d["tx"][-7:])
+    await ui.render(cb, f"<b>📊 {esc(name)}: трафик по дням</b>\n"
+                        f"За 7 дней: {ui.fmt_bytes(week)} · за 30 дней: {ui.fmt_bytes(d.get('total'))}\n"
+                        f"{bars(d)}\n<i>Приём и отдача вместе; учёт — с установки v1.2.0.</i>",
+                    ui.kb(ui.back(act.data("v", name))))
+
+
+@act("tsrv")
+async def _tsrv(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    r = await api.call("traffic", "daily", "all", 30)
+    if not r.ok or not isinstance(r.data, dict):
+        await ui.render(cb, ui.fail(r, "Трафик по дням"), ui.kb(ui.back("cl")))
+        return
+    d = r.data
+    top = "\n".join(f"{i}. {esc(c['name'])} — {ui.fmt_bytes(c['rx'] + c['tx'])}"
+                    for i, c in enumerate((d.get("clients") or [])[:10], 1))
+    await ui.render(cb, "<b>📊 Трафик сервера по дням</b>\n"
+                        f"За 30 дней: {ui.fmt_bytes(d.get('total'))}\n{bars(d)}\n"
+                        + (f"<b>Больше всех за 30 дней</b>\n{top}" if top else "Трафика пока нет."),
+                    ui.kb(ui.back("cl")))
 
 
 # ── Мимикрия ──────────────────────────────────────────────

@@ -123,6 +123,33 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.click("text=Мониторинг активности");
     await page.waitForSelector(".switch.on");
   });
+  await step("трафик клиента: график по дням", async () => {
+    await nav("/client/alice", ".chart svg .bar");
+    if (await page.locator(".chart .bar").count() < 10) throw new Error("ждали столбики за 30 дней");
+    await page.locator(".chart .hit").nth(-2).click();
+    await page.waitForSelector(".chart.sel .bar.on");
+    const cap = await page.textContent(".chart .cap");
+    if (!/МБ|ГБ/.test(cap)) throw new Error("подпись дня без объёма: " + cap);
+    await shot("03a-traffic");
+  });
+  await step("лимит трафика: готовый размер", async () => {
+    await page.click(".actions button:has-text('Лимит')"); await page.waitForSelector(".sheet");
+    await page.click(".sheet >> text=50 ГБ в месяц");
+    await page.waitForSelector(".kv >> text=/из 50.0 ГБ за месяц/");
+    await page.waitForSelector(".meter");
+    await page.waitForSelector(".tag >> text=/лимит \\d+%/");
+  });
+  await step("лимит трафика: свой размер «всего»", async () => {
+    await nav("/client/alice/limit", "input");
+    await page.fill("input", "1.5T");
+    await page.click(".seg button:has-text('Всего')");
+    await page.click("button:has-text('Сохранить')");
+    await page.waitForSelector(".kv >> text=/из 1.5 ТБ всего/");
+    await shot("03b-limit");
+    await page.click(".actions button:has-text('Лимит')"); await page.waitForSelector(".sheet");
+    await page.click(".sheet >> text=Снять лимит");
+    await page.waitForSelector(".kv >> text=нет");
+  });
   await step("QR", async () => { await page.click("text=Конфиг и QR"); await page.waitForSelector("img.qr"); await shot("04-qr"); });
   await step("в чат", async () => { await page.click("text=Отправить файл в чат"); await page.waitForSelector(".toast"); });
   await step("срок", async () => {
@@ -354,6 +381,16 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.waitForSelector("text=Файл — в чате с ботом", { timeout: 90000 });
     await shot("43-backup-done");
   });
+  await step("автобэкап", async () => {
+    await nav("/backup", "[data-name=autobackup]");
+    await page.click("[data-name=autobackup] button:has-text('Каждый день')");
+    await page.waitForSelector("[data-name=autobackup] >> text=/ежедневно · хранить 7/");
+    await page.click("[data-name=autobackup] button:has-text('14')");
+    await page.waitForSelector("[data-name=autobackup] >> text=/хранить 14/");
+    await shot("44a-autobackup");
+    await page.click("[data-name=autobackup] button:has-text('Выкл')");
+    await page.waitForSelector("[data-name=autobackup] >> text=выключен");
+  });
   await step("бэкапы на сервере", async () => {
     await nav("/backup", ".item");
     if (await page.locator(".item").count() !== 2) throw new Error("ждали каталог и архив");
@@ -442,6 +479,17 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
 
   // ── Бот ──
   await step("бот", async () => { await nav("/bot", "[data-name=bot]"); await page.waitForSelector(".sgrid"); await shot("52-bot"); });
+  await step("уведомления", async () => {
+    await nav("/bot", "text=Уведомления");
+    await page.click("text=Уведомления");
+    await page.waitForSelector("h1:has-text('Уведомления')");
+    if (await page.locator(".switch.on").count() !== 6) throw new Error("ждали 6 включённых уведомлений");
+    await page.click(".card.item >> text=Диск заполнен");
+    await page.waitForFunction(() => document.querySelectorAll(".switch.on").length === 5);
+    await nav("/bot/alerts", ".switch");
+    if (await page.locator(".switch.on").count() !== 5) throw new Error("выключенное уведомление не сохранилось");
+    await shot("52a-alerts");
+  });
   await step("меню бота в чат", async () => {
     await page.click(".top button[aria-label='Разделы']");
     await page.click(".sheet >> text=Меню бота в чат");
@@ -483,6 +531,8 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
   });
   await step("главная: все разделы в панели", async () => {
     await nav("/", ".tile");
+    await page.waitForSelector(".card >> text=Трафик за 14 дней");
+    if (await page.locator(".chart .bar").count() !== 14) throw new Error("на главной ждали 14 столбиков");
     if (await page.locator(".tile.soon").count() !== 0) throw new Error("остались плитки «скоро»");
   });
 

@@ -157,7 +157,8 @@ client_files_sync_suffix() {
   done < <(client_files)
 }
 
-# Клиенты сервера: строки «имя<TAB>ключ<TAB>AllowedIPs<TAB>expires<TAB>orig_ips<TAB>mimicry».
+# Клиенты сервера: строки «имя<TAB>ключ<TAB>AllowedIPs<TAB>expires<TAB>orig_ips<TAB>mimicry
+# <TAB>limit<TAB>blocked_by».
 clients_tsv() { server_exists || return 0; py peers "$SERVER_CONF"; }
 # То же через «|»: табуляция для read — пробельный разделитель, подряд идущие
 # табы схлопываются, и пустые колонки (срок, orig_ips) сдвигают соседние.
@@ -176,7 +177,7 @@ client_exists() { clients_tsv | awk -F'\t' -v n="$1" '$1 == n {f = 1} END {exit 
 
 peer_meta_get() {  # имя ключ
   clients_tsv | awk -F'\t' -v n="$1" -v k="$2" '
-    BEGIN { col["expires"] = 4; col["orig_ips"] = 5; col["mimicry"] = 6 }
+    BEGIN { col["expires"] = 4; col["orig_ips"] = 5; col["mimicry"] = 6; col["limit"] = 7; col["blocked_by"] = 8 }
     $1 == n { print $(col[k]); exit }'
 }
 

@@ -106,6 +106,19 @@
   .card.warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 35%, transparent); color: var(--warn); }
   .card pre { background: var(--soft); }
   .kv { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; }
+  /* Трафик по дням: один ряд столбиков, касание — подпись дня */
+  .chart { margin-top: 8px; }
+  .chart svg { display: block; width: 100%; height: 96px; overflow: visible; }
+  .chart .bar { fill: var(--accent); }
+  .chart.sel .bar { opacity: .45; }
+  .chart .bar.on { opacity: 1; }
+  .chart .base { stroke: var(--border); stroke-width: 1; }
+  .chart .hit { fill: transparent; cursor: pointer; }
+  .chart .cap { font-size: 12px; color: var(--text); min-height: 17px; margin-bottom: 4px; }
+  .chart .ax { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--hint); margin-top: 3px; }
+  .meter { height: 6px; border-radius: 3px; background: var(--soft); overflow: hidden; margin: 4px 0 2px; }
+  .meter > i { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+  .meter.warn > i { background: var(--warn); } .meter.bad > i { background: var(--danger); }
   .kv + .kv { border-top: 1px solid var(--sep); }
   .kv > :first-child { color: var(--hint); flex: none; }
   .kv > :last-child { text-align: right; overflow-wrap: anywhere; }

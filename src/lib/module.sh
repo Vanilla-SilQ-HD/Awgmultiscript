@@ -79,6 +79,28 @@ mod_stale() {
   (( newest > 0 && kt > 0 && newest > kt ))
 }
 
+# Ядра, в которые сервер может загрузиться (работающее и новее), без
+# собранного модуля — после перезагрузки в такое ядро awg0 не поднимется.
+# Так бывает, когда apt поставил новое ядро, а DKMS не смог собрать под него
+# модуль (Ubuntu 7.0.0-38) или заголовков к нему нет. Строки «ядро» или
+# «ядро нет-заголовков»; пусто — всё в порядке.
+kernel_gap() {
+  local k running
+  command -v dkms &>/dev/null && [[ -d "$MOD_SRC_DIR" ]] || return 0
+  running=$(uname -r)
+  for k in $(installed_kernels); do
+    [[ "$(printf '%s\n%s\n' "$running" "$k" | sort -V | head -1)" == "$running" ]] || continue
+    mod_built_for "$k" && continue
+    [[ "$k" == "$running" ]] && mod_loaded && continue
+    if [[ -d "/lib/modules/$k/build" ]]; then echo "$k"; else echo "$k нет-заголовков"; fi
+  done
+}
+
+# Одной строкой для сводок: «6.8.0-150» или «6.8.0-150 (нет заголовков)».
+kernel_gap_line() {
+  kernel_gap | sed 's/ нет-заголовков$/ (нет заголовков)/' | paste -sd, - | sed 's/,/, /g'
+}
+
 # Почему нужна перезагрузка (сервера или модуля). Пусто — не нужна.
 reboot_reason() {
   local running newest
@@ -190,12 +212,16 @@ tools_update_available() {
 
 # Строка состояния для шапки меню.
 components_summary() {
-  local tag upd reason
+  local tag upd reason gap
   command -v awg &>/dev/null || { echo -e "${R}не установлены${N} ${D}— Сервер → Установить компоненты${N}"; return; }
   tag=$(mod_tag)
   reason=$(reboot_reason)
   upd=$(mod_update_available)
-  if [[ -n "$reason" ]]; then
+  gap=$(kernel_gap_line)
+  if [[ -n "$gap" && "$gap" != "$(uname -r)"* ]]; then
+    echo -e "${R}${tag:-?} ▲ ядро $gap без модуля AWG${N} ${D}— после перезагрузки VPN не поднимется:${N}"
+    echo -e "               ${D}Сервер → Модуль ядра → 5) Пересобрать${N}"
+  elif [[ -n "$reason" ]]; then
     echo -e "${Y}${tag:-?} ▲ ${reason}${N}"
   elif [[ -n "$upd" ]]; then
     echo -e "${W}${tag}${N} ${G}⬆ есть $upd${N} ${D}— Сервер → Модуль ядра${N}"
@@ -236,6 +262,7 @@ components_report() {
 
   for k in $(installed_kernels); do
     s="${R}✗ не собран${N}"
+    [[ -n "$(kernel_gap | awk -v k="$k" '$1 == k')" ]] && s="${R}✗ не собран — пункт 5${N}"
     mod_built_for "$k" && s="${G}✓ собран${N}"
     [[ -d "/lib/modules/$k/build" ]] || s+=" ${D}(нет заголовков)${N}"
     [[ "$k" == "$running" ]] && s+=" ${D}← работает${N}"
@@ -496,8 +523,22 @@ tools_update_flow() {  # [force]
   tools_install_tag "$tag"
 }
 
+# Сборка под все ядра. Ядрам, в которые сервер может загрузиться, сначала
+# ставятся недостающие заголовки — иначе их сборка молча пропускается.
 mod_rebuild_all() {
-  components_deps && run_step "Сборка DKMS под все ядра" _mod_dkms_install_all
+  local k _
+  components_deps || return 1
+  while read -r k _; do
+    [[ -n "$k" && ! -d "/lib/modules/$k/build" ]] || continue
+    run_step "Заголовки ядра $k" ensure_headers "$k" || warn "Заголовков для $k в репозитории нет"
+  done < <(kernel_gap)
+  run_step "Сборка DKMS под все ядра" _mod_dkms_install_all || return 1
+  if [[ -n "$(kernel_gap)" ]]; then
+    warn "Модуль не собран под: $(kernel_gap_line) — после перезагрузки в это ядро awg0 не поднимется"
+    info "Журнал сборки: $MOD_LOG и /var/lib/dkms/$MOD_NAME/$MOD_DKMS_VER/build/make.log"
+    return 1
+  fi
+  ok "Модуль собран под все ядра"
 }
 
 mod_backups() { ls -1t "$MOD_BACKUP_DIR"/src-*.tar.gz 2>/dev/null || true; }
@@ -556,7 +597,7 @@ do_components_menu() {
     echo -e "  ${C}2)${N} Выбрать версию модуля из списка"
     echo -e "  ${C}3)${N} Обновить amneziawg-tools ${D}${tupd:+до $tupd}${N}"
     echo -e "  ${C}4)${N} Перезагрузить модуль ${D}— без ребута${N}"
-    echo -e "  ${C}5)${N} Пересобрать под все установленные ядра"
+    echo -e "  $([[ -n "$(kernel_gap)" ]] && echo "${Y}" || echo "${C}")5)${N} Пересобрать под все установленные ядра"
     echo -e "  ${C}6)${N} Откат модуля из резервной копии"
     echo -e "  ${C}7)${N} Проверить обновления сейчас"
     echo -e "  ${W}0)${N} ← Назад"

@@ -37,6 +37,8 @@ def _attention(d: dict) -> str:
     return block(
         "⚠️ awg0 не поднят — <i>Сервер → Проверить и починить</i>" if s.get("exists") and not s.get("up") else "",
         f"▲ {esc(c['reboot'])}" if c.get("installed") and c.get("reboot") else "",
+        f"⚠️ Ядро {esc(c['kernel_gap'])} без модуля AWG — после перезагрузки VPN не поднимется: "
+        "<i>Сервер → Модуль ядра → Под все ядра</i>" if c.get("kernel_gap") else "",
         f"⬆️ Доступна {esc(d['update'])} — <i>Обновление</i>" if d.get("update") else "",
     )
 
