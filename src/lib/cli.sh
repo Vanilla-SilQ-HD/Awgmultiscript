@@ -93,7 +93,8 @@ main() {
     *) err "Неизвестный аргумент: $1"; info "awg2 --help — список аргументов"; exit 1 ;;
   esac
 
-  log_info "=== AWG Toolza $VERSION ==="
+  log_info "=== AWG Toolza $VERSION_SHOW ==="
+  [[ -z "$post" ]] && { self_install_offer || true; }
   update_check_async || true
   upstream_refresh_async || true
   client_files_sync_suffix || true

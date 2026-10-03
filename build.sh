@@ -53,9 +53,12 @@ BUILD="${AWG_BUILD:-}"
   echo "IFS= read -r -d '' _PY_HELPER <<'__AWG2_PY_HELPER__' || true"
   cat src/py/helper.py
   printf '__AWG2_PY_HELPER__\n\n'
-
-  echo 'main "$@"'
 } > "$tmp"
+# Хеш всей сборки: по нему awg2 замечает новую сборку той же версии
+{
+  echo "_BUILD_SUM=$(sha256sum "$tmp" | cut -c1-16)"
+  echo 'main "$@"'
+} >> "$tmp"
 
 bash -n "$tmp" || die "синтаксическая ошибка в собранном файле"
 mkdir -p "$(dirname "$OUT")"

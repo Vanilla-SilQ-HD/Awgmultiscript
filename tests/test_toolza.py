@@ -1176,4 +1176,48 @@ chk("тестовая сборка без ключа — ставит с пре�
 rc, out, _ = bash('grep -c "ssh-ed25519 AAAA" <<< "$(declare -p UPDATE_SIGNERS)"')
 chk("в сборку вшит ключ релизов", out.strip() == "1", out)
 
+print("\n── Запуск из распакованного архива ──")
+INST = os.path.join(TMP, "inst")
+os.makedirs(INST)
+def selfcopy(build_letter, ver="v1.2.0"):
+    path = os.path.join(INST, f"awg2-{ver}{build_letter}.sh")
+    with open(path, "w") as f:
+        f.write(f'#!/usr/bin/env bash\nVERSION="{ver}"\nBUILD="{build_letter}"\necho {ver}{build_letter}\n')
+    return path
+
+def offer(self_path, target, auto=1):
+    code = (PRELUDE + f'SCRIPT_PATH="{target}"; VERSION=v1.2.0; BUILD=d; VERSION_SHOW=v1.2.0d; '
+            f"AUTO_MODE={auto}; self_install_offer; echo rc=$?")
+    r = subprocess.run(["bash", "-c", code, self_path], input="", capture_output=True, text=True, env=ENV, timeout=60)
+    return r.stdout + r.stderr
+
+new_d = selfcopy("d")
+target = os.path.join(INST, "bin-awg2")
+out = offer(new_d, target)
+chk("команды awg2 нет — копия из архива ставится в SCRIPT_PATH",
+    os.path.exists(target) and open(target).read() == open(new_d).read() and "rc=0" in out, out)
+chk("установленная копия исполняемая", os.access(target, os.X_OK), oct(os.stat(target).st_mode))
+out = offer(new_d, target)
+chk("та же копия — без вопросов", "rc=0" in out and "Установить" not in out, out)
+out = offer(target, target)
+chk("запуск самой установленной копии — без вопросов", "Установить" not in out, out)
+os.replace(selfcopy("c"), target)
+out = offer(new_d, target)
+chk("установлена v1.2.0c, запущена v1.2.0d — замена, прежняя в .bak",
+    "v1.2.0c" in out and open(target).read() == open(new_d).read()
+    and "v1.2.0c" in open(target + ".bak").read(), out)
+os.replace(selfcopy("", ver="v9.9.9"), target)
+out = offer(new_d, target)
+chk("установлена более новая — без согласия не откатывается",
+    "откатом" in out and "v9.9.9" in open(target).read(), out)
+rc, out, _ = bash("_script_ver " + new_d + "; echo; _script_ver " + target)
+chk("версия копии читается с буквой сборки", out.split() == ["v1.2.0d", "v9.9.9"], out)
+
+rc, out, _ = bash('server_exists() { return 1; }; cascade_count() { echo 0; }; wgobf_installed() { return 1; }; '
+                  'MOD_SRC_DIR=/nonexistent; echo v1.2.0 > "$STATE_DIR/version"; helpers_refresh; cat "$STATE_DIR/version"; '
+                  'echo "--$_BUILD_SUM"')
+mark, _, bsum = out.strip().partition("\n--")
+chk("служебные скрипты пересобираются и для новой сборки той же версии",
+    len(bsum) == 16 and mark == f"v1.2.0 {bsum}", out)
+
 summary()

@@ -8031,6 +8031,42 @@ update_install() {
   log_info "самообновление $VERSION → $UPDATE_NEW"
 }
 
+_script_ver() {  # файл awg2 → v1.2.0d (версия и буква тестовой сборки)
+  head -c 4096 "$1" 2>/dev/null | awk -F'"' '/^VERSION="/ && !v {v=$2} /^BUILD="/ && !b {b=$2; nb=1}
+    END {printf "%s%s", v, (nb ? b : "")}'
+}
+
+# Запуск из распакованного архива (sudo bash awg2.sh): бот, таймеры и команда
+# awg2 работают с установленной копией $SCRIPT_PATH — предложить заменить её.
+self_install_offer() {
+  local self cur def=y
+  self=$(readlink -f "$0" 2>/dev/null) || return 0
+  [[ -f "$self" && "$self" != "$(readlink -f "$SCRIPT_PATH" 2>/dev/null)" ]] || return 0
+  head -c 4096 "$self" | grep -q '^VERSION="' || return 0
+  cmp -s "$self" "$SCRIPT_PATH" && return 0
+  echo ""
+  if [[ ! -f "$SCRIPT_PATH" ]]; then
+    warn "Команда awg2 не установлена: бот и таймеры ищут $SCRIPT_PATH"
+  else
+    cur=$(_script_ver "$SCRIPT_PATH")
+    warn "Запущена копия $self ($VERSION_SHOW), а установлена ${cur:-другая} в $SCRIPT_PATH"
+    info "Бот, панель и команда awg2 работают с установленной"
+    if [[ "$cur" =~ ^v?[0-9] ]] && (( 10#$(ver_num "$cur") > 10#$(ver_num "$VERSION") )); then
+      warn "Установленная новее — замена будет откатом"
+      def=n
+    fi
+  fi
+  ask_yes "  Установить эту копию в $SCRIPT_PATH? [$([[ $def == y ]] && echo Y/n || echo y/N)]: " "$def" || return 0
+  [[ -f "$SCRIPT_PATH" ]] && cp -a "$SCRIPT_PATH" "$SCRIPT_PATH.bak" 2>/dev/null \
+    && info "Прежняя копия: $SCRIPT_PATH.bak"
+  # Через rename: работающие копии awg2 дочитывают свой файл, а не новый
+  install -m 755 "$self" "$SCRIPT_PATH.new" && mv -f "$SCRIPT_PATH.new" "$SCRIPT_PATH" \
+    || { rm -f "$SCRIPT_PATH.new"; err "Не удалось записать $SCRIPT_PATH"; return 0; }
+  hash -r
+  ok "Установлено: $SCRIPT_PATH ($VERSION_SHOW)"
+  log_info "awg2 $VERSION_SHOW установлен из $self"
+}
+
 do_self_update() {
   local cur_n new_n target="$SCRIPT_PATH"
   [[ -f "$target" ]] || target=$(readlink -f "$0")
@@ -8075,8 +8111,10 @@ do_switch_channel() {
 # После смены версии перегенерируем их у уже включённых компонентов — иначе
 # при загрузке работала бы логика прежней версии.
 helpers_refresh() {
-  local mark="$STATE_DIR/version"
-  [[ "$(cat "$mark" 2>/dev/null)" == "$VERSION" ]] && return 0
+  # Отметка — версия и хеш сборки: тестовые сборки одной версии (v1.2.0c → d)
+  # тоже перегенерируют скрипты
+  local mark="$STATE_DIR/version" stamp="$VERSION_SHOW ${_BUILD_SUM:-}"
+  [[ "$(cat "$mark" 2>/dev/null)" == "$stamp" ]] && return 0
   mkdir -p "$STATE_DIR"
   server_exists && expire_install &>/dev/null
   # Исходник модуля в DKMS поставила прежняя версия: без правки автосборка
@@ -8107,8 +8145,8 @@ helpers_refresh() {
   # Xray прежних версий жил во временных юнитах и перезагрузку не переживал
   [[ -f "$XRAY_STATE" && ! -f "/etc/systemd/system/$XRAY_UNIT" ]] && ! xray_is_up && rm -f "$XRAY_STATE"
   wgobf_installed && _wgobf_write_service_files
-  echo "$VERSION" > "$mark"
-  log_info "служебные скрипты обновлены под $VERSION"
+  echo "$stamp" > "$mark"
+  log_info "служебные скрипты обновлены под $VERSION_SHOW"
 }
 
 do_update_menu() {
@@ -10065,7 +10103,8 @@ main() {
     *) err "Неизвестный аргумент: $1"; info "awg2 --help — список аргументов"; exit 1 ;;
   esac
 
-  log_info "=== AWG Toolza $VERSION ==="
+  log_info "=== AWG Toolza $VERSION_SHOW ==="
+  [[ -z "$post" ]] && { self_install_offer || true; }
   update_check_async || true
   upstream_refresh_async || true
   client_files_sync_suffix || true
@@ -14019,4 +14058,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
+_BUILD_SUM=4a88cf23a0b68b24
 main "$@"
