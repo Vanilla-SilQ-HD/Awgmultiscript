@@ -8117,10 +8117,7 @@ BOT_VENV_PY="$BOT_DIR/venv/bin/python"
 # остатки тоже надо уметь добить.
 bot_installed() { [[ -f /usr/local/bin/awg-bot.py || -d "$BOT_DIR" || -f "/etc/systemd/system/$BOT_UNIT" ]]; }
 
-bot_version() {
-  sed -n "s/^__version__[[:space:]]*=[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" \
-    "$BOT_DIR/awgbot/__init__.py" 2>/dev/null | head -1
-}
+bot_version() { _bot_src_version "$BOT_DIR"; }
 
 # ── Прокси до Telegram ────────────────────────────────────
 # Значение ключа из конфига бота (кавычки и пробелы по краям снимаются).
@@ -8374,15 +8371,26 @@ bot_restart() {
 # ── Установка / удаление ──────────────────────────────────
 # Код бота из распакованного архива рядом: при проверке правок на GitHub
 # ещё старая версия.
+# Версия кода бота в каталоге с awgbot/ (как __version__ у установленного).
+_bot_src_version() {
+  sed -n "s/^__version__[[:space:]]*=[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" \
+    "$1/awgbot/__init__.py" 2>/dev/null | head -1
+}
+
+# Локальный код бота из распакованного архива Тулзы: рядом с awg2, в
+# текущем каталоге, в /opt, /root и /home/*. Из нескольких — самая новая
+# версия бота (дата файла после распаковки ни о чём не говорит), при
+# равных — найденная раньше.
 _bot_local_src() {
-  local d best="" ts best_ts=0
-  d=$(dirname "$(readlink -f "$0")")
-  [[ -d "$d/awg_bot/awgbot" && -f "$d/awg_bot/run.py" ]] && { echo "$d/awg_bot"; return 0; }
-  for d in /opt/awg-toolza-*/ /root/awg-toolza-*/ /opt/awg-toolza/; do
+  local d best="" bv="" v
+  for d in "$(dirname "$(readlink -f "$0")")" "$PWD" /opt/awg-toolza-*/ /root/awg-toolza-*/ \
+           /home/*/awg-toolza-*/ /opt/awg-toolza/; do
     d="${d%/}"
-    [[ -f "$d/awg_bot/run.py" ]] || continue
-    ts=$(stat -c %Y "$d/awg_bot/run.py")
-    (( ts >= best_ts )) && { best="$d/awg_bot"; best_ts=$ts; }
+    [[ -d "$d/awg_bot/awgbot" && -f "$d/awg_bot/run.py" ]] || continue
+    v=$(_bot_src_version "$d/awg_bot")
+    if [[ -z "$best" ]] || [[ "$v" != "$bv" && "$(printf '%s\n%s\n' "$bv" "$v" | sort -V | tail -1)" == "$v" ]]; then
+      best="$d/awg_bot"; bv="$v"
+    fi
   done
   [[ -n "$best" ]] && echo "$best"
 }
@@ -8391,7 +8399,9 @@ bot_install() {
   local src installer
   src=$(_bot_local_src || true)
   mktmp installer || return 1
-  if [[ -n "$src" ]] && ask_yes "  Найден локальный код бота ($src). Ставить из него? [Y/n]: " y; then
+  local lv iv
+  lv=$(_bot_src_version "$src"); iv=$(bot_version)
+  if [[ -n "$src" ]] && ask_yes "  Найден локальный код бота ${lv:-?} ($src)${iv:+, установлен $iv}. Ставить из него? [Y/n]: " y; then
     if [[ -f "${src%/awg_bot}/awg-bot-install.sh" ]]; then
       bash "${src%/awg_bot}/awg-bot-install.sh" --src "$src"
       return
