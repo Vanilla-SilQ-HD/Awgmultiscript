@@ -106,7 +106,7 @@ xray_install() {  # [update] — без вопроса обновить уже �
 xray_add_outbound() {
   local link
   xray_installed || { err "Сначала установи Xray"; return 1; }
-  read_line link "${C}  Ссылка (vless:// vmess:// hysteria2://): ${N}"
+  read_line link "${C}  Ссылка (vless:// vmess:// trojan:// ss:// hysteria2://): ${N}"
   link="${link//[[:space:]]/}"
   [[ -n "$link" ]] || return 0
   xray_add_link "$link"
@@ -127,7 +127,7 @@ xray_add_link() {  # ссылка
   if ! why=$(xray_test "$probe"); then
     err "Этот Xray не принимает такой выход:"
     sed 's/^/      /' <<< "$why"
-    [[ "$link" =~ ^(hysteria2|hy2):// ]] && info "hysteria2 есть не во всех сборках Xray — используй vless/vmess"
+    [[ "$link" =~ ^(hysteria2|hy2):// ]] && info "Hysteria2 есть в Xray 26 и новее — обнови Xray: Установить / обновить"
     return 1
   fi
   py xray-add "$XRAY_CONF" <<< "$ob" 2>/dev/null || rc=$?

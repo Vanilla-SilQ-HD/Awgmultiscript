@@ -258,7 +258,8 @@ chk("Xray: удаление выхода чинит балансировщик",
 
 # ── Xray: пробы на бинаре ─────────────────────────────────
 # Заглушка ведёт себя как Xray 26.x: формат конфига — по расширению, без
-# «.json» отказ; hysteria2 не знает, inbound tun умеет.
+# «.json» отказ; protocol hysteria2 (старое имя) и allowInsecure не знает,
+# hysteria версии 2 и inbound tun умеет. XRAY_STUB_OLD=1 — сборка без hysteria.
 XRAY_STUB = os.path.join(TMP, "xray-stub")
 with open(XRAY_STUB, "w") as f:
     f.write(r"""#!/usr/bin/env bash
@@ -269,6 +270,10 @@ python3 -c 'import json, os, sys
 c = json.load(open(sys.argv[1]))
 if any(o.get("protocol") == "hysteria2" for o in c.get("outbounds", [])):
     print("infra/conf: unknown config id: hysteria2"); sys.exit(23)
+if os.environ.get("XRAY_STUB_OLD") and any(o.get("protocol") == "hysteria" for o in c.get("outbounds", [])):
+    print("infra/conf: unknown config id: hysteria"); sys.exit(23)
+if "allowInsecure" in json.dumps(c):
+    print("The feature allowInsecure has been removed"); sys.exit(23)
 # Проверка с inbound tun создаёт устройство: занятое имя — отказ, как у Xray
 busy = open(os.environ["LINKS"]).read().split()
 for ib in c.get("inbounds", []):
@@ -291,11 +296,46 @@ rc, out, _ = bash(XRAY_ENV + 'py xray-prepare "$XRAY_CONF" native; xray_test && 
 open(LINKS, "w").close()
 chk("Xray работает (xray0 занят): проверка конфига и проба tun не упираются в busy",
     "TEST-OK" in out and "TUN-YES" in out, out)
-rc, out, _ = bash(XRAY_ENV + "xray_add_link 'hysteria2://secret@h2.example.site:443?sni=h2.example.site#H2'")
-chk("Xray: неподдерживаемый hysteria2 отклонён с подсказкой", rc != 0 and "hysteria2 есть не во всех" in out, out)
+rc, out, _ = bash("XRAY_STUB_OLD=1; export XRAY_STUB_OLD; " + XRAY_ENV
+                  + "xray_add_link 'hysteria2://secret@h2.example.site:443?sni=h2.example.site#H2'")
+chk("Xray без Hysteria2: выход отклонён с подсказкой обновить Xray", rc != 0 and "обнови Xray" in out, out)
+H2 = ("hysteria2://rck1sael0kc0e537@h2.example.site:443?alpn=h3&ech=AGb%2BDQBi&fp=chrome"
+      "&pinSHA256=898e8399e9c247e3035954e6405caae6bec0904c40add25f6aebe85be7d643fd%2Ca2372d06431e9716365eeed47ec02035"
+      "1497d182fcc038e457e58168a03cac07&security=tls&sni=h2.example.site#H2-Ha2pa")
+rc, out, _ = bash(XRAY_ENV + f"xray_add_link '{H2}' && cat \"$XRAY_CONF\"")
+xc = json.loads(out[out.index("{"):]) if rc == 0 and "{" in out else {}
+h2 = next((o for o in xc.get("outbounds", []) if o.get("tag") == "proxy_h2_example_site"), {})
+st = h2.get("streamSettings") or {}
+chk("Hysteria2 — в формате Xray 26: hysteria v2, пароль, SNI, h3, ECH, pinSHA256",
+    h2.get("protocol") == "hysteria" and h2["settings"] == {"version": 2, "address": "h2.example.site", "port": 443}
+    and st.get("network") == "hysteria" and st["hysteriaSettings"] == {"version": 2, "auth": "rck1sael0kc0e537"}
+    and st["tlsSettings"]["serverName"] == "h2.example.site" and st["tlsSettings"]["alpn"] == ["h3"]
+    and st["tlsSettings"]["echConfigList"] == "AGb+DQBi" and st["tlsSettings"]["pinnedPeerCertSha256"].count(",") == 1,
+    [rc, out[-600:]])
+bash(XRAY_ENV + "xray_del_tag proxy_h2_example_site >/dev/null")
 rc, out, _ = bash(XRAY_ENV + "xray_add_link 'vless://11111111-2222-3333-4444-555555555555@x.example.site:443?security=tls&type=tcp#dup'"
                   " >/dev/null; xray_add_link 'vless://11111111-2222-3333-4444-555555555555@x.example.site:443?security=tls&type=tcp#dup'")
-chk("Xray: подсказка про hysteria2 только для hysteria2", "hysteria2 есть не во всех" not in out, out)
+chk("Xray: подсказка про Hysteria2 только для неё", "Hysteria2" not in out, out)
+LINKS_OK = {
+    "trojan": "trojan://tpass@t.example.com:443?security=tls&sni=t.example.com&type=ws&path=%2Fws&host=t.example.com#tr",
+    "ss SIP002": "ss://YWVzLTI1Ni1nY206cGFzczEyMw@1.2.3.4:8388#ss1",
+    "ss 2022": "ss://2022-blake3-aes-128-gcm:AAAAAAAAAAAAAAAAAAAAAA%3D%3D@ss.example.com:443#ss2022",
+    "ss старый": "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwd0A1LjYuNy44OjkwMDA=#legacy",
+}
+want = {"trojan": ("trojan", "t.example.com", 443, "tpass"), "ss SIP002": ("shadowsocks", "1.2.3.4", 8388, "pass123"),
+        "ss 2022": ("shadowsocks", "ss.example.com", 443, "AAAAAAAAAAAAAAAAAAAAAA=="),
+        "ss старый": ("shadowsocks", "5.6.7.8", 9000, "pw")}
+for k, link in LINKS_OK.items():
+    rc, out, _ = bash(f"py xray-link '{link}'")
+    ob = json.loads(out) if rc == 0 else {}
+    srv = ((ob.get("settings") or {}).get("servers") or [{}])[0]
+    chk(f"ссылка {k} разбирается", (ob.get("protocol"), srv.get("address"), srv.get("port"), srv.get("password")) == want[k], out)
+rc, out, err = bash("py xray-link 'vless://0378c8eb-6544-478e-837d-c3599ef8e73d@v.example.site:443?security=tls&type=tcp&allowInsecure=1#v'")
+chk("allowInsecure не попадает в конфиг (Xray 26 его отвергает), с пояснением",
+    rc == 0 and "allowInsecure" not in out and "pinSHA256" in err, [out, err])
+rc, out, err = bash("py xray-link 'hy2://pw@h.example.com:443?obfs=salamander&obfs-password=s3#x'")
+chk("Hysteria2 с salamander — finalmask", rc == 0 and json.loads(out)["streamSettings"]["finalmask"]
+    == {"udp": [{"type": "salamander", "settings": {"password": "s3"}}]}, [out, err])
 
 # ── Xray: свой выход клиенту ──
 XP = os.path.join(ROOT, "xray.peers")

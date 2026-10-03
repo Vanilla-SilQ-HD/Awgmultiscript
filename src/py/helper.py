@@ -1066,13 +1066,89 @@ def apply_tls(ss, get, fallback_sni):
             tls[dst] = get(src)
     if get("alpn"):
         tls["alpn"] = get("alpn").split(",")
-    if str(get("allowInsecure") or "").lower() in ("1", "true"):
-        tls["allowInsecure"] = True
+    if str(get("allowInsecure") or get("insecure") or "").lower() in ("1", "true"):
+        _note_insecure()
     ss["realitySettings" if sec == "reality" else "tlsSettings"] = tls
+
+
+def _note_insecure():
+    """Xray 26 убрал allowInsecure: с ним отвергается весь конфиг. Вместо
+    него — pinSHA256 (отпечаток сертификата сервера) или настоящий сертификат."""
+    sys.stderr.write("NOTE:allowInsecure пропущен — Xray 26 его не принимает; самоподписанному "
+                     "сертификату нужен pinSHA256 в ссылке\n")
 
 
 def tag_for(host):
     return "proxy_" + re.sub(r"[^A-Za-z0-9]", "_", host or "server")
+
+
+def _hy2_outbound(link):
+    """hysteria2:// → outbound Xray 26+: protocol hysteria (version 2) и
+    транспорт hysteria; пароль — auth, TLS — SNI, ALPN (h3), ECH, pinSHA256.
+    Обфускация salamander — finalmask, порт-хоппинг (mport) не переносится."""
+    u = urllib.parse.urlparse(link)
+    qs = urllib.parse.parse_qs(u.query)
+
+    def get(k):
+        return qs[k][0] if qs.get(k) else None
+    host = u.hostname or ""
+    auth = urllib.parse.unquote(u.username or "")
+    if u.password is not None:
+        auth += ":" + urllib.parse.unquote(u.password)
+    if not host or not auth:
+        die("hysteria2: в ссылке нет адреса или пароля")
+    tls = {"serverName": get("sni") or host, "alpn": (get("alpn") or "h3").split(",")}
+    if get("pinSHA256"):
+        tls["pinnedPeerCertSha256"] = get("pinSHA256")
+    if get("ech"):
+        tls["echConfigList"] = get("ech")
+    if str(get("insecure") or "").lower() in ("1", "true") and not get("pinSHA256"):
+        _note_insecure()
+    ss = {"network": "hysteria", "hysteriaSettings": {"version": 2, "auth": auth},
+          "security": "tls", "tlsSettings": tls}
+    if get("obfs"):
+        if get("obfs") != "salamander":
+            sys.stderr.write("UNSUPPORTED:obfs=%s\n" % get("obfs"))
+            die("hysteria2: обфускация %s не поддерживается" % get("obfs"))
+        ss["finalmask"] = {"udp": [{"type": "salamander", "settings": {"password": get("obfs-password") or ""}}]}
+    if get("mport"):
+        sys.stderr.write("NOTE:порт-хоппинг (mport=%s) не переносится — только порт %d\n" % (get("mport"), u.port or 443))
+    return {"protocol": "hysteria", "tag": tag_for(host),
+            "settings": {"version": 2, "address": host, "port": u.port or 443}, "streamSettings": ss}
+
+
+def _ss_outbound(link):
+    """ss:// — SIP002 (метод:пароль в base64 или открыто @хост:порт) и
+    старый формат (всё в base64). Плагины (obfs, v2ray-plugin) не переносятся."""
+    body = link[5:].split("#", 1)[0]
+    body, _, query = body.partition("?")
+    body = body.rstrip("/")
+
+    def b64(text):
+        text = urllib.parse.unquote(text)
+        try:
+            return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
+    if "@" in body:
+        userinfo, hostport = body.rsplit("@", 1)
+        dec = b64(userinfo)
+        cred = dec if dec and ":" in dec else urllib.parse.unquote(userinfo)
+    else:
+        dec = b64(body) or ""
+        if "@" not in dec:
+            die("ss: ссылка не разобрана")
+        cred, hostport = dec.rsplit("@", 1)
+    method, _, password = cred.partition(":")
+    host, _, port = hostport.rpartition(":")
+    host = host.strip("[]")
+    if not (method and password and host and port.isdigit()):
+        die("ss: нужен метод, пароль, адрес и порт")
+    if "plugin=" in query:
+        sys.stderr.write("UNSUPPORTED:ss-plugin\n")
+        die("ss: плагины (obfs, v2ray-plugin) не поддерживаются")
+    return {"protocol": "shadowsocks", "tag": tag_for(host),
+            "settings": {"servers": [{"address": host, "port": int(port), "method": method, "password": password}]}}
 
 
 def cmd_xray_link(link):
@@ -1108,23 +1184,25 @@ def cmd_xray_link(link):
                                                  "security": data.get("scy") or "auto"}]}]},
               "streamSettings": {"network": data.get("net") or "tcp",
                                  "security": data.get("tls") or "none"}}
-    elif link.startswith(("hysteria2://", "hy2://")):
+    elif link.startswith("trojan://"):
         u = urllib.parse.urlparse(link)
         qs = urllib.parse.parse_qs(u.query)
-        st = {"server": u.hostname, "port": u.port or 443,
-              "password": urllib.parse.unquote(u.username or "")}
-        if qs.get("sni"):
-            st["serverName"] = qs["sni"][0]
-        if qs.get("insecure"):
-            st["insecure"] = qs["insecure"][0] == "1"
-        if qs.get("obfs"):
-            st["obfs"] = {"type": qs["obfs"][0]}
-            if qs.get("obfs-password"):
-                st["obfs"]["password"] = qs["obfs-password"][0]
-        print(json.dumps({"protocol": "hysteria2", "tag": tag_for(u.hostname), "settings": st}))
+
+        def get(k):
+            return qs[k][0] if qs.get(k) else None
+        host = u.hostname or ""
+        ob = {"protocol": "trojan", "tag": tag_for(host),
+              "settings": {"servers": [{"address": host, "port": u.port or 443,
+                                        "password": urllib.parse.unquote(u.username or "")}]},
+              "streamSettings": {"network": get("type") or "tcp", "security": get("security") or "tls"}}
+    elif link.startswith("ss://"):
+        print(json.dumps(_ss_outbound(link)))
+        return
+    elif link.startswith(("hysteria2://", "hy2://")):
+        print(json.dumps(_hy2_outbound(link)))
         return
     else:
-        die("поддерживаются vless://, vmess://, hysteria2://")
+        die("поддерживаются vless://, vmess://, trojan://, ss://, hysteria2://")
     apply_transport(ob["streamSettings"], ob["streamSettings"]["network"], get)
     apply_tls(ob["streamSettings"], get, host)
     print(json.dumps(ob))
