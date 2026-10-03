@@ -6,7 +6,7 @@ show_header() {
   [[ "$UPDATE_CHANNEL" == beta ]] && ch=" ${Y}[beta]${N}"
   upd=$(update_available || true)
   echo -e "${B}${LINE}${N}"
-  echo -e "  ${W}AWG Toolza $VERSION${N}$ch${upd:+   ${G}⬆ есть $upd${N} ${D}— Обновление${N}}"
+  echo -e "  ${W}AWG Toolza $VERSION_SHOW${N}$ch${upd:+   ${G}⬆ есть $upd${N} ${D}— Обновление${N}}"
   echo -e "  ${C}TG: @awgToolza${N}"
   echo -e "${B}${LINE}${N}"
   why=$(os_supported) || echo -e "  ${Y}▲ $why${N}"

@@ -6,3 +6,7 @@
 set -uo pipefail
 
 VERSION="v1.2.0"
+# Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
+# в сравнении версий не участвует. У выпущенной сборки пусто.
+BUILD=""
+VERSION_SHOW="$VERSION$BUILD"

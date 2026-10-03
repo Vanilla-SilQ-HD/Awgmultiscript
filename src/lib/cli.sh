@@ -56,7 +56,7 @@ main() {
   local post=""
   case "${1:-}" in
     -h|--help) usage; exit 0 ;;
-    -v|--version) echo "awg2 $VERSION"; exit 0 ;;
+    -v|--version) echo "awg2 $VERSION_SHOW"; exit 0 ;;
   esac
   (( EUID == 0 )) || { echo "awg2: нужен root — sudo awg2" >&2; exit 1; }
   log_init

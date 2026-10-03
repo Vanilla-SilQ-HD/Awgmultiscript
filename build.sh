@@ -28,8 +28,12 @@ grep -qx '__AWG2_PY_HELPER__' src/py/helper.py && die "в helper.py встреч
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 
+# Буква тестовой сборки — только в показ версии
+BUILD="${AWG_BUILD:-}"
+[[ -z "$BUILD" || "$BUILD" =~ ^[a-z]$ ]] || die "AWG_BUILD — одна строчная буква"
+
 {
-  cat src/head.sh
+  sed "s/^BUILD=\"\"$/BUILD=\"$BUILD\"/" src/head.sh
   for lib in "${LIBS[@]}"; do
     f="src/lib/${lib}.sh"
     [[ -f "$f" ]] || die "нет $f"

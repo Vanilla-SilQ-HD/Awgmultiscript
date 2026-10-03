@@ -314,23 +314,26 @@ _choose_dns() {
 }
 
 _choose_mtu() {  # $1 — значение по умолчанию
-  local c v
-  echo -e "  ${C}1)${N} $1 ${C}(рекомендуется)${N}"
-  echo -e "  ${C}2)${N} 1420"
-  echo -e "  ${C}3)${N} 1380"
-  echo -e "  ${C}4)${N} 1320"
-  echo -e "  ${C}5)${N} 1280"
-  echo -e "  ${C}6)${N} Вручную"
-  read_choice c "${C}  MTU [1-6] (Enter = 1): ${N}" 1 6 1
-  case "$c" in
-    1) MTU=$1 ;; 2) MTU=1420 ;; 3) MTU=1380 ;; 4) MTU=1320 ;; 5) MTU=1280 ;;
-    6) while true; do
-         read_line v "${C}  MTU (1280-1500): ${N}"
-         [[ -n "$v" ]] || { MTU=$1; break; }
-         [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1280 && v <= 1500 )) && { MTU=$v; break; }
-         warn "Число 1280-1500"
-       done ;;
-  esac
+  local c v i opts=("$1")
+  # Рекомендуемое — первым, остальные стандартные без повтора
+  for v in 1420 1380 1320 1280; do [[ "$v" == "$1" ]] || opts+=("$v"); done
+  echo ""
+  hdr "MTU"
+  for i in "${!opts[@]}"; do
+    echo -e "  ${C}$((i + 1)))${N} ${opts[$i]}$( (( i == 0 )) && echo -e " ${C}(рекомендуется)${N}")"
+  done
+  echo -e "  ${C}$(( ${#opts[@]} + 1 )))${N} Вручную"
+  read_choice c "${C}  MTU [1-$(( ${#opts[@]} + 1 ))] (Enter = 1): ${N}" 1 $(( ${#opts[@]} + 1 )) 1
+  if (( c <= ${#opts[@]} )); then
+    MTU=${opts[$((c - 1))]}
+  else
+    while true; do
+      read_line v "${C}  MTU (1280-1500): ${N}"
+      [[ -n "$v" ]] || { MTU=$1; break; }
+      [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1280 && v <= 1500 )) && { MTU=$v; break; }
+      warn "Число 1280-1500"
+    done
+  fi
 }
 
 # Версия протокола нового сервера. 3.1 по умолчанию, если компоненты её умеют.

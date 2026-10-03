@@ -263,7 +263,7 @@ do_update_menu() {
   while true; do
     echo ""
     hdr "Обновление скрипта"
-    echo -e "  Версия : ${W}$VERSION${N}"
+    echo -e "  Версия : ${W}$VERSION_SHOW${N}"
     echo -e "  Канал  : $([[ "$UPDATE_CHANNEL" == beta ]] && echo -e "${Y}бета${N}" || echo -e "${G}стабильный${N}") ${D}($UPDATE_REPO)${N}"
     upd=$(update_available || true)
     [[ -n "$upd" ]] && echo -e "  Доступна: ${G}$upd${N}"

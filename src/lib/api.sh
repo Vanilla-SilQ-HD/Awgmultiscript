@@ -76,7 +76,7 @@ _api_status() {
   upstream_refresh_async || true
   server_exists && n=$(clients_tsv | grep -c . || true)
   {
-    _kv version "$VERSION"; _kv api:n "$API_VERSION"
+    _kv version "$VERSION_SHOW"; _kv api:n "$API_VERSION"
     _kv channel "$UPDATE_CHANNEL"; _kv update "$(update_available || true)"
     _kv host "$(hostname)"; _kv ip "$(public_ip_cached)"
     _kv os "$OS_LABEL"; _kv kernel "$(uname -r)"
@@ -682,11 +682,11 @@ _api_update() {
   case "$a" in
     status)
       v=$(update_available || true)
-      { _kv version "$VERSION"; _kv channel "$UPDATE_CHANNEL"; _kv repo "$UPDATE_REPO"
+      { _kv version "$VERSION_SHOW"; _kv channel "$UPDATE_CHANNEL"; _kv repo "$UPDATE_REPO"
         _kv available "$v"; } | api_obj ;;
     check)
       v=$(update_peek) || { err "Канал обновлений недоступен ($UPDATE_REPO)"; return 1; }
-      { _kv version "$VERSION"; _kv latest "$v"; _kv channel "$UPDATE_CHANNEL"
+      { _kv version "$VERSION_SHOW"; _kv latest "$v"; _kv channel "$UPDATE_CHANNEL"
         _kv newer:b "$( (( 10#$(ver_num "$v") > 10#$(ver_num "$VERSION") )) && echo 1 || echo 0)"; } | api_obj
       info "Текущая: $VERSION, в канале: $v" ;;
     install)
@@ -893,7 +893,7 @@ api_dispatch() {
   local cmd="${1:-help}"
   shift || true
   case "$cmd" in
-    version) { _kv version "$VERSION"; _kv api:n "$API_VERSION"; _kv channel "$UPDATE_CHANNEL"
+    version) { _kv version "$VERSION_SHOW"; _kv api:n "$API_VERSION"; _kv channel "$UPDATE_CHANNEL"
                _kv update "$(update_available || true)"; } | api_obj ;;
     status) _api_status ;;
     server) _api_server "$@" ;;

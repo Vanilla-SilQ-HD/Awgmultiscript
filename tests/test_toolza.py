@@ -1049,6 +1049,32 @@ chk("шапка меню предупреждает о ядре без моду�
 r = api("status")
 chk("api status: components.kernel_gap", r.get("ok") and "kernel_gap" in (r["data"].get("components") or {}), r.get("data"))
 
+print("Домен мимикрии по региону")
+STUBSCAN = 'scan_domains() { shift; SCAN_OK=("$@"); }; '
+rc, out, _ = bash(STUBSCAN + 'SERVER_CONF=/nonexistent; S_REGION=world; MIMICRY=dns; mimicry_pool_domain >/dev/null; '
+                  'echo "$CPS_DOMAIN"; printf "%s\\n" "${TLS_DOMAINS[@]}"')
+lines = out.split()
+chk("мастер, регион «мир» — домен из мировых сайтов", lines and lines[0] in lines[1:], out)
+rc, out, _ = bash(STUBSCAN + 'SERVER_CONF=/nonexistent; S_REGION=ru; MIMICRY=dns; mimicry_pool_domain >/dev/null; '
+                  'echo "$CPS_DOMAIN"; printf "%s\\n" "${CPS_DOMAINS[@]}"')
+lines = out.split()
+chk("мастер, регион «Россия» — домен из российских", lines and lines[0] in lines[1:], out)
+rc, out, _ = bash(STUBSCAN + 'MIMICRY=dns; choose_cps_domain; echo "D=$CPS_DOMAIN"; printf "%s\\n" "${TLS_DOMAINS[@]}" "${CPS_DOMAINS[@]}"',
+                  stdin="\n")
+out = re.sub(r"\x1b\[[0-9;]*m", "", out)
+dom = re.search(r"D=(\S+)", out)
+chk("домен мимикрии: Enter — автоматически из пула", "1 Автоматически" in out and dom and dom.group(1) in out.split()[1:]
+    and "Домен (Enter" not in out, out[-500:])
+rc, out, _ = bash('MIMICRY=dns; choose_cps_domain; echo "D=$CPS_DOMAIN"', stdin="2\nexample.org\n")
+chk("домен мимикрии: 2 — свой", "D=example.org" in out, out[-300:])
+rc, out, _ = bash('_choose_mtu 1280; echo "M=$MTU"', stdin="\n")
+chk("MTU: 1280 в списке один раз, Enter — рекомендуемый",
+    len(re.findall(r"\) 1280", re.sub(r"\x1b\[[0-9;]*m", "", out))) == 1 and "M=1280" in out, out)
+rc, out, _ = bash('_choose_mtu 1320; echo "M=$MTU"', stdin="4\n")
+chk("MTU: другой рекомендуемый — первым, остальные по порядку", "M=1280" in out and "5)" in re.sub(r"\x1b\[[0-9;]*m", "", out), out)
+rc, out, _ = bash('echo "$VERSION_SHOW"')
+chk("версия без буквы у обычной сборки", out.strip() == bash('echo "$VERSION"')[1].strip(), out)
+
 print("Подпись обновлений")
 SIG = os.path.join(TMP, "sigsrv")
 SIGBIN = os.path.join(TMP, "sigbin")

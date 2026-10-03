@@ -6,6 +6,10 @@
 set -uo pipefail
 
 VERSION="v1.2.0"
+# Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
+# в сравнении версий не участвует. У выпущенной сборки пусто.
+BUILD=""
+VERSION_SHOW="$VERSION$BUILD"
 
 # ═════ core ═════
 # Базовые примитивы: вывод, ввод, журнал, временные файлы, случайные числа,
@@ -1864,8 +1868,8 @@ conf_hp_min_s_violations() {
 # Цепочка I1-I5 — клиентская: у каждого устройства своя, сервер её не видит.
 # Поэтому у выданного клиента профиль мимикрии можно сменить, не трогая сервер.
 
-# Пулы доменов. Свой домен пользователя всегда лучше встроенного: пул одинаков
-# у всех, кто пользуется скриптом. Проверяются на доступность перед выдачей.
+# Пулы доменов — по региону сервера: российские сайты для сервера в РФ,
+# мировые — для остальных. Проверяются на доступность перед выдачей.
 CPS_DOMAINS=(
   yastatic.net mc.yandex.ru avatars.mds.yandex.net ok.ru st.mycdn.me vk.ru
   kinopoisk.ru hh.ru 2gis.ru lenta.ru mos.ru citilink.ru
@@ -2041,6 +2045,12 @@ choose_cps_budget() {
   case "$c" in 1) CPS_BUDGET=1500 ;; 2) CPS_BUDGET=3000 ;; *) CPS_BUDGET=$CPS_HARD_LIMIT ;; esac
 }
 
+# Регион для пула доменов: при создании сервера — выбранный в мастере
+# (конфига ещё нет), потом — из конфига.
+mimicry_region() {
+  if server_exists; then server_region; else echo "${S_REGION:-world}"; fi
+}
+
 # Один домен на всю цепочку: настоящий клиент за одно рукопожатие ходит на
 # один хост. Результат — CPS_DOMAIN (пусто = генератор возьмёт свой).
 choose_cps_domain() {
@@ -2053,12 +2063,13 @@ choose_cps_domain() {
   else
     echo ""
     hdr "Домен мимикрии (один на все I1-I5)"
-    echo -e "  ${G}1${N} Ввести свой ${C}(рекомендуется)${N}"
-    echo -e "  ${G}2${N} Из встроенного пула"
-    echo -e "  ${D}  Свой — живой сайт, куда ходят с устройства клиента.${N}"
+    echo -e "  ${G}1${N} Автоматически ${C}(рекомендуется)${N}"
+    echo -e "  ${D}    доступный сайт из пула: $([[ "$(mimicry_region)" == ru ]] && echo "российские" || echo "мировые") — по региону сервера${N}"
+    echo -e "  ${G}2${N} Ввести свой"
+    echo -e "  ${D}    живой сайт, куда ходят с устройства клиента${N}"
     [[ "$MIMICRY" == *quic ]] && echo -e "  ${Y}  Для QUIC сайт должен отдавать HTTP/3.${N}"
     read_choice c "${C}  Выбор [1-2] (Enter = 1): ${N}" 1 2 1
-    [[ "$c" == 2 ]] && ask_own=0
+    [[ "$c" == 1 ]] && ask_own=0
   fi
   if (( ask_own )); then
     while true; do
@@ -2080,9 +2091,10 @@ mimicry_pool_domain() {
   local kind pool=()
   case "$MIMICRY" in
     quic|curl_quic) kind=quic; pool=("${QUIC_DOMAINS[@]}")
-                    [[ "$(server_region)" == ru ]] && pool+=("${QUIC_DOMAINS_RU[@]}") ;;
+                    [[ "$(mimicry_region)" == ru ]] && pool+=("${QUIC_DOMAINS_RU[@]}") ;;
     sip) kind=sip; pool=("${SIP_DOMAINS[@]}") ;;
-    *) kind=tls; pool=("${CPS_DOMAINS[@]}") ;;
+    *) kind=tls
+       if [[ "$(mimicry_region)" == ru ]]; then pool=("${CPS_DOMAINS[@]}"); else pool=("${TLS_DOMAINS[@]}"); fi ;;
   esac
   info "Проверяю доступность доменов пула..."
   scan_domains "$kind" "${pool[@]}"
@@ -2466,23 +2478,26 @@ _choose_dns() {
 }
 
 _choose_mtu() {  # $1 — значение по умолчанию
-  local c v
-  echo -e "  ${C}1)${N} $1 ${C}(рекомендуется)${N}"
-  echo -e "  ${C}2)${N} 1420"
-  echo -e "  ${C}3)${N} 1380"
-  echo -e "  ${C}4)${N} 1320"
-  echo -e "  ${C}5)${N} 1280"
-  echo -e "  ${C}6)${N} Вручную"
-  read_choice c "${C}  MTU [1-6] (Enter = 1): ${N}" 1 6 1
-  case "$c" in
-    1) MTU=$1 ;; 2) MTU=1420 ;; 3) MTU=1380 ;; 4) MTU=1320 ;; 5) MTU=1280 ;;
-    6) while true; do
-         read_line v "${C}  MTU (1280-1500): ${N}"
-         [[ -n "$v" ]] || { MTU=$1; break; }
-         [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1280 && v <= 1500 )) && { MTU=$v; break; }
-         warn "Число 1280-1500"
-       done ;;
-  esac
+  local c v i opts=("$1")
+  # Рекомендуемое — первым, остальные стандартные без повтора
+  for v in 1420 1380 1320 1280; do [[ "$v" == "$1" ]] || opts+=("$v"); done
+  echo ""
+  hdr "MTU"
+  for i in "${!opts[@]}"; do
+    echo -e "  ${C}$((i + 1)))${N} ${opts[$i]}$( (( i == 0 )) && echo -e " ${C}(рекомендуется)${N}")"
+  done
+  echo -e "  ${C}$(( ${#opts[@]} + 1 )))${N} Вручную"
+  read_choice c "${C}  MTU [1-$(( ${#opts[@]} + 1 ))] (Enter = 1): ${N}" 1 $(( ${#opts[@]} + 1 )) 1
+  if (( c <= ${#opts[@]} )); then
+    MTU=${opts[$((c - 1))]}
+  else
+    while true; do
+      read_line v "${C}  MTU (1280-1500): ${N}"
+      [[ -n "$v" ]] || { MTU=$1; break; }
+      [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1280 && v <= 1500 )) && { MTU=$v; break; }
+      warn "Число 1280-1500"
+    done
+  fi
 }
 
 # Версия протокола нового сервера. 3.1 по умолчанию, если компоненты её умеют.
@@ -8070,7 +8085,7 @@ do_update_menu() {
   while true; do
     echo ""
     hdr "Обновление скрипта"
-    echo -e "  Версия : ${W}$VERSION${N}"
+    echo -e "  Версия : ${W}$VERSION_SHOW${N}"
     echo -e "  Канал  : $([[ "$UPDATE_CHANNEL" == beta ]] && echo -e "${Y}бета${N}" || echo -e "${G}стабильный${N}") ${D}($UPDATE_REPO)${N}"
     upd=$(update_available || true)
     [[ -n "$upd" ]] && echo -e "  Доступна: ${G}$upd${N}"
@@ -8743,7 +8758,7 @@ do_client_dpi_hint() {
 # Сводка для «awg2 --status» и меню диагностики.
 do_status() {
   local n
-  hdr "AWG Toolza $VERSION"
+  hdr "AWG Toolza $VERSION_SHOW"
   os_detect
   echo -e "  Система   : $OS_LABEL, ядро $(uname -r)"
   echo -e "  Компоненты: $(components_summary)"
@@ -8798,7 +8813,7 @@ show_header() {
   [[ "$UPDATE_CHANNEL" == beta ]] && ch=" ${Y}[beta]${N}"
   upd=$(update_available || true)
   echo -e "${B}${LINE}${N}"
-  echo -e "  ${W}AWG Toolza $VERSION${N}$ch${upd:+   ${G}⬆ есть $upd${N} ${D}— Обновление${N}}"
+  echo -e "  ${W}AWG Toolza $VERSION_SHOW${N}$ch${upd:+   ${G}⬆ есть $upd${N} ${D}— Обновление${N}}"
   echo -e "  ${C}TG: @awgToolza${N}"
   echo -e "${B}${LINE}${N}"
   why=$(os_supported) || echo -e "  ${Y}▲ $why${N}"
@@ -8988,7 +9003,7 @@ _api_status() {
   upstream_refresh_async || true
   server_exists && n=$(clients_tsv | grep -c . || true)
   {
-    _kv version "$VERSION"; _kv api:n "$API_VERSION"
+    _kv version "$VERSION_SHOW"; _kv api:n "$API_VERSION"
     _kv channel "$UPDATE_CHANNEL"; _kv update "$(update_available || true)"
     _kv host "$(hostname)"; _kv ip "$(public_ip_cached)"
     _kv os "$OS_LABEL"; _kv kernel "$(uname -r)"
@@ -9594,11 +9609,11 @@ _api_update() {
   case "$a" in
     status)
       v=$(update_available || true)
-      { _kv version "$VERSION"; _kv channel "$UPDATE_CHANNEL"; _kv repo "$UPDATE_REPO"
+      { _kv version "$VERSION_SHOW"; _kv channel "$UPDATE_CHANNEL"; _kv repo "$UPDATE_REPO"
         _kv available "$v"; } | api_obj ;;
     check)
       v=$(update_peek) || { err "Канал обновлений недоступен ($UPDATE_REPO)"; return 1; }
-      { _kv version "$VERSION"; _kv latest "$v"; _kv channel "$UPDATE_CHANNEL"
+      { _kv version "$VERSION_SHOW"; _kv latest "$v"; _kv channel "$UPDATE_CHANNEL"
         _kv newer:b "$( (( 10#$(ver_num "$v") > 10#$(ver_num "$VERSION") )) && echo 1 || echo 0)"; } | api_obj
       info "Текущая: $VERSION, в канале: $v" ;;
     install)
@@ -9805,7 +9820,7 @@ api_dispatch() {
   local cmd="${1:-help}"
   shift || true
   case "$cmd" in
-    version) { _kv version "$VERSION"; _kv api:n "$API_VERSION"; _kv channel "$UPDATE_CHANNEL"
+    version) { _kv version "$VERSION_SHOW"; _kv api:n "$API_VERSION"; _kv channel "$UPDATE_CHANNEL"
                _kv update "$(update_available || true)"; } | api_obj ;;
     status) _api_status ;;
     server) _api_server "$@" ;;
@@ -9952,7 +9967,7 @@ main() {
   local post=""
   case "${1:-}" in
     -h|--help) usage; exit 0 ;;
-    -v|--version) echo "awg2 $VERSION"; exit 0 ;;
+    -v|--version) echo "awg2 $VERSION_SHOW"; exit 0 ;;
   esac
   (( EUID == 0 )) || { echo "awg2: нужен root — sudo awg2" >&2; exit 1; }
   log_init
