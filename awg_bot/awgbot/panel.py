@@ -145,11 +145,12 @@ def setup(app: web.Application, user_of: UserOf) -> None:
     # ── Клиенты: то, что знает только бот ──
     @route("/api/clients")
     async def _clients(request: web.Request, user: dict, body: dict) -> web.Response:
-        r = await api.call("clients", "list")
+        # Три вызова awg2 — одновременно, а не по очереди
+        r, route_, info = await asyncio.gather(api.call("clients", "list"), cls.active_route(),
+                                               api.data("server", "info", default={}))
         if not r.ok:
             return _result(r)
         rows = r.data if isinstance(r.data, list) else []
-        route_ = await cls.active_route()
         notes = store.notes()
         for c in rows:
             raw = notes.get(c["name"], "")
@@ -157,7 +158,7 @@ def setup(app: web.Application, user_of: UserOf) -> None:
             c["mon"] = store.MONITOR_TAG in raw.lower()
             c["route"] = cls.route_of(c, route_)
             c["exit_choice"] = cls.exit_of(c, route_) if route_.get("kind") == "exits" else None
-        info = await api.data("server", "info", default={}) or {}
+        info = info or {}
         return web.json_response({"ok": True, "rows": rows, "route": route_, "profile": info.get("profile") or "",
                                   "sort": store.setting("clients_sort", "activity")})
 

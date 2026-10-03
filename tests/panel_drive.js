@@ -124,10 +124,10 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.waitForSelector(".switch.on");
   });
   await step("трафик клиента: график по дням", async () => {
-    await nav("/client/alice", ".chart svg .bar");
-    if (await page.locator(".chart .bar").count() < 10) throw new Error("ждали столбики за 30 дней");
-    await page.locator(".chart .hit").nth(-2).click();
-    await page.waitForSelector(".chart.sel .bar.on");
+    await nav("/client/alice", ".chart.line path.ln");
+    if (await page.locator(".chart.line .hit").count() !== 30) throw new Error("ждали 30 дней на линии");
+    await page.locator(".chart.line .hit").nth(-3).click();
+    await page.waitForSelector(".chart.line.sel");
     const cap = await page.textContent(".chart .cap");
     if (!/МБ|ГБ/.test(cap)) throw new Error("подпись дня без объёма: " + cap);
     await shot("03a-traffic");
@@ -355,6 +355,24 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
   });
 
   // ── Диагностика ──
+  await step("главная: трафик — свёрнут, по клиентам и линией", async () => {
+    await nav("/", "[data-name=traffic]");
+    if (await page.locator("[data-name=traffic] .chart").count()) throw new Error("карточка трафика должна быть свёрнута");
+    await page.waitForSelector("[data-name=traffic] .trf-head .spark path");
+    await page.click("[data-name=traffic] .trf-head");
+    await page.waitForSelector("[data-name=traffic] .chips button.on >> text=Все");
+    if (await page.locator("[data-name=traffic] .chart .bar").count() !== 2) throw new Error("«Все»: ждали столбцы двух клиентов");
+    const cap = await page.textContent("[data-name=traffic] .chart .cap");
+    if (!cap.startsWith("alice")) throw new Error("первым — клиент с наибольшим трафиком: " + cap);
+    await shot("01b-traffic-clients");
+    await page.click("[data-name=traffic] .chips button >> text=bob");
+    await page.waitForSelector("[data-name=traffic] .chart.line path.ln");
+    await nav("/", "[data-name=traffic] .chart.line");
+    if (!(await page.textContent("[data-name=traffic] .chips button.on")).includes("bob")) throw new Error("выбор клиента не запомнился");
+    await shot("01c-traffic-client");
+    await page.click("[data-name=traffic] .trf-head");
+    if (await page.locator("[data-name=traffic] .chart").count()) throw new Error("не свернулась");
+  });
   await step("диагностика", async () => { await nav("/diag", "text=Система"); await shot("40-diag"); });
   await step("домены мимикрии", async () => {
     await page.click("text=Домены мимикрии: мир");
@@ -531,8 +549,6 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
   });
   await step("главная: все разделы в панели", async () => {
     await nav("/", ".tile");
-    await page.waitForSelector(".card >> text=Трафик за 14 дней");
-    if (await page.locator(".chart .bar").count() !== 14) throw new Error("на главной ждали 14 столбиков");
     if (await page.locator(".tile.soon").count() !== 0) throw new Error("остались плитки «скоро»");
   });
 

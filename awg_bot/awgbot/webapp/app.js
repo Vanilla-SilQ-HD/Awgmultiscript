@@ -79,24 +79,24 @@ function svg(tag, attrs) {
   return el;
 }
 const fmtDay = (d) => `${d.slice(8)}.${d.slice(5, 7)}`;
-function trafficChart(d) {
-  const days = d.days || [], n = days.length;
-  const tot = days.map((_, i) => (d.rx[i] || 0) + (d.tx[i] || 0));
-  const max = Math.max(1, ...tot), W = 300, H = 96, gap = 2;
+// Столбцы (по дням или по клиентам): касание или наведение — подпись над
+// графиком; без выбора — столбец def. items: [{label, value, detail}].
+function barChart(items, { def = items.length - 1, axis = null } = {}) {
+  const n = items.length, max = Math.max(1, ...items.map((x) => x.value)), W = 300, H = 96, gap = 2;
   const bw = Math.max(1, (W - gap * (n - 1)) / n);
   const box = h("div", { class: "chart", role: "img",
-    "aria-label": `Трафик за ${n} дн.: всего ${fmtBytes(tot.reduce((a, b) => a + b, 0))}` });
+    "aria-label": items.map((x) => `${x.label}: ${fmtBytes(x.value)}`).join(", ") });
   const cap = h("div", { class: "cap" });
   const plot = svg("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none" });
   const bars = [];
   const show = (i, sel) => {
-    cap.textContent = `${fmtDay(days[i])} · ${tot[i] ? fmtBytes(tot[i]) : "нет трафика"}`
-      + (tot[i] ? ` (↓ ${fmtBytes(d.rx[i])} · ↑ ${fmtBytes(d.tx[i])})` : "");
+    const x = items[i];
+    cap.textContent = `${x.label} · ${x.value ? fmtBytes(x.value) : "нет трафика"}` + (x.value && x.detail ? ` (${x.detail})` : "");
     box.classList.toggle("sel", sel);
-    bars.forEach((b, j) => b && b.classList.toggle("on", sel && j === i));
+    bars.forEach((el, j) => el && el.classList.toggle("on", sel && j === i));
   };
-  days.forEach((_, i) => {
-    const x = i * (bw + gap), bh = tot[i] ? Math.max(2, (H - 2) * tot[i] / max) : 0, y = H - bh;
+  items.forEach((it, i) => {
+    const x = i * (bw + gap), bh = it.value ? Math.max(2, (H - 2) * it.value / max) : 0, y = H - bh;
     if (bh) {
       // Скругление 4 px — только у верхнего края, основание прямое
       const r = Math.min(4, bw / 2, bh);
@@ -110,12 +110,63 @@ function trafficChart(d) {
     plot.append(hit);
   });
   plot.append(svg("line", { class: "base", x1: 0, x2: W, y1: H - 0.5, y2: H - 0.5 }));
-  plot.addEventListener("pointerleave", () => show(n - 1, false));
-  if (n) show(n - 1, false);
-  box.append(cap, plot, h("div", { class: "ax" }, h("span", {}, n ? fmtDay(days[0]) : ""),
-    h("span", {}, `макс ${fmtBytes(max)}`), h("span", {}, "сегодня")));
+  plot.addEventListener("pointerleave", () => show(def, false));
+  if (n) show(def, false);
+  box.append(cap, plot, axis || h("div", { class: "ax" }, h("span", {}), h("span", {}, `макс ${fmtBytes(max)}`), h("span", {})));
   return box;
 }
+
+const dayDetail = (d, i) => `↓ ${fmtBytes(d.rx[i])} · ↑ ${fmtBytes(d.tx[i])}`;
+const dayAxis = (d, max) => h("div", { class: "ax" }, h("span", {}, d.days.length ? fmtDay(d.days[0]) : ""),
+  h("span", {}, `макс ${fmtBytes(max)}`), h("span", {}, "сегодня"));
+
+// Трафик по дням линией (awg2 api traffic daily): приём и отдача вместе.
+// Касание или наведение — точка дня и подпись; без выбора — сегодня.
+function lineChart(d, { H = 80 } = {}) {
+  const days = d.days || [], n = days.length, W = 300, P = 4;
+  const tot = days.map((_, i) => (d.rx[i] || 0) + (d.tx[i] || 0));
+  const max = Math.max(1, ...tot);
+  const X = (i) => (n > 1 ? P + i * (W - 2 * P) / (n - 1) : W / 2), Y = (v) => H - 1 - (H - 8) * v / max;
+  const box = h("div", { class: "chart line", role: "img",
+    "aria-label": `Трафик за ${n} дн.: всего ${fmtBytes(tot.reduce((a, b) => a + b, 0))}` });
+  const cap = h("div", { class: "cap" });
+  const plot = svg("svg", { viewBox: `0 0 ${W} ${H}` });
+  const pts = tot.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`);
+  if (n) {
+    plot.append(svg("path", { class: "area", d: `M${pts.join("L")}L${X(n - 1)},${H}L${X(0)},${H}Z` }),
+      svg("path", { class: "ln", d: "M" + pts.join("L") }));
+  }
+  plot.append(svg("line", { class: "base", x1: 0, x2: W, y1: H - 0.5, y2: H - 0.5 }));
+  const cross = svg("line", { class: "cross", y1: 0, y2: H }), dot = svg("circle", { class: "dot", r: 4 });
+  plot.append(cross, dot);
+  const show = (i, sel) => {
+    cap.textContent = `${fmtDay(days[i])} · ${tot[i] ? fmtBytes(tot[i]) : "нет трафика"}` + (tot[i] ? ` (${dayDetail(d, i)})` : "");
+    cross.setAttribute("x1", X(i)); cross.setAttribute("x2", X(i));
+    dot.setAttribute("cx", X(i)); dot.setAttribute("cy", Y(tot[i]));
+    box.classList.toggle("sel", sel);
+  };
+  days.forEach((_, i) => {
+    const w = n > 1 ? (W - 2 * P) / (n - 1) : W;
+    const hit = svg("rect", { class: "hit", x: X(i) - w / 2, y: 0, width: w, height: H });
+    hit.addEventListener("pointerenter", () => show(i, true));
+    hit.addEventListener("click", () => show(i, true));
+    plot.append(hit);
+  });
+  plot.addEventListener("pointerleave", () => show(n - 1, false));
+  if (n) show(n - 1, false);
+  box.append(cap, plot, dayAxis(d, max));
+  return box;
+}
+
+// Мини-линия для свёрнутой карточки
+function sparkline(values) {
+  const n = values.length, max = Math.max(1, ...values), W = 64, H = 18;
+  const pts = values.map((v, i) => `${(n > 1 ? i * W / (n - 1) : W / 2).toFixed(1)},${(H - 1 - (H - 3) * v / max).toFixed(1)}`);
+  const el = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, "aria-hidden": "true" });
+  if (n) el.append(svg("path", { d: "M" + pts.join("L") }));
+  return el;
+}
+
 // Полоска «израсходовано из лимита»
 const meter = (used, limit) => {
   const pct = Math.min(100, Math.round(used * 100 / Math.max(limit, 1)));
@@ -582,9 +633,49 @@ const homeStrip = (m) => h("div", { class: "sstrip" }, [
   [m.exit, "выход", () => go("/tunnels")],
   [m.leader ? m.leader.name : "—", "лидер", toLeader(m)],
 ].map(([big, label, onclick]) => h("div", { class: "cell" + (onclick ? " tap" : ""), onclick }, h("b", {}, big), h("span", {}, label))));
-const trafficCard = (m) => (m.traffic && m.traffic.total ? h("div", { class: "card" },
-  h("div", { class: "kv" }, h("b", {}, "Трафик за 14 дней"), h("span", {}, fmtBytes(m.traffic.total))),
-  trafficChart(m.traffic)) : null);
+// Трафик на главной: свёрнута — строка с суммой и мини-линией; развёрнута —
+// выбор клиента и график: у одного клиента (или когда клиент один) — линия
+// по дням, у «Все» при нескольких клиентах — столбцы по клиентам.
+function trafficCard(m) {
+  const t = m.traffic;
+  if (!t || !t.total) return null;
+  const rows = (t.clients || []).slice(0, 15);
+  const per = {};
+  const card = h("div", { class: "card trf", "data-name": "traffic" });
+  const tot = t.days.map((_, i) => (t.rx[i] || 0) + (t.tx[i] || 0));
+  function draw() {
+    const open = pref("traffic-open", "0") === "1";
+    let sel = pref("traffic-client", "");
+    if (sel && !rows.some((c) => c.name === sel)) sel = "";
+    const head = h("div", { class: "trf-head", onclick: () => { setPref("traffic-open", open ? "0" : "1"); draw(); } },
+      h("span", { class: "t" }, "Трафик · 14 дн."), sparkline(tot), h("b", {}, fmtBytes(t.total)),
+      h("span", { class: "chev" + (open ? " open" : "") }, icon("chevron-right")));
+    if (!open) return card.replaceChildren(head);
+    const pick = (name) => { setPref("traffic-client", name); draw(); };
+    const chips = rows.length > 1 ? h("div", { class: "chips" },
+      [["", "Все"], ...rows.map((c) => [c.name, c.name])].map(([k, label]) =>
+        h("button", { class: k === sel ? "on" : null, onclick: () => pick(k) }, label))) : null;
+    const body = h("div");
+    if (!sel && rows.length > 1) {
+      // Имена под столбцами — пока они помещаются (до 8 клиентов)
+      const labels = rows.length <= 8 ? h("div", { class: "bl", style: `grid-template-columns:repeat(${rows.length},1fr)` },
+        rows.map((c) => h("span", {}, c.name))) : null;
+      body.append(barChart(rows.map((c) => ({ label: c.name, value: c.rx + c.tx,
+        detail: `↓ ${fmtBytes(c.rx)} · ↑ ${fmtBytes(c.tx)}` })), { def: 0, axis: labels }));
+    } else if (!sel) {
+      body.append(lineChart(t, { H: 64 }));
+    } else if (per[sel]) {
+      body.append(lineChart(per[sel], { H: 64 }));
+    } else {
+      body.append(h("div", { class: "muted small", style: "padding:20px 0;text-align:center" }, "Загружаю…"));
+      call("traffic", "daily", sel, 14).then((d) => { per[sel] = d; draw(); })
+        .catch(() => { setPref("traffic-client", ""); draw(); });
+    }
+    card.replaceChildren(head, chips, body);
+  }
+  draw();
+  return card;
+}
 const sectionsHead = () => h("div", { class: "h2row" }, h("h2", {}, "Разделы"),
   segBar(HOMES, homePref(), setHome));
 const HOME_VIEWS = {
@@ -780,7 +871,7 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
   const r = S.clients.route || {};
   const enc = encodeURIComponent(name);
   const chartBox = h("div");
-  call("traffic", "daily", name, 30).then((t) => t && t.total && chartBox.replaceChildren(trafficChart(t))).catch(() => {});
+  call("traffic", "daily", name, 30).then((t) => t && t.total && chartBox.replaceChildren(lineChart(t))).catch(() => {});
 
   async function setExpire(btn) {
     const v = await sheet("Срок действия", [

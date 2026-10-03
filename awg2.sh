@@ -281,7 +281,30 @@ ver_num() { echo "${1#v}" | awk -F'[.-]' '{printf "%d%03d%03d\n", $1, $2, $3}'; 
 
 # Встроенный Python читается с дескриптора: код не упирается в предел длины
 # аргумента (128 КБ), а stdin остаётся свободным для данных.
-py()  { python3 /dev/fd/3 "$@" 3<<< "$_PY_HELPER"; }
+# Помощник один раз на версию кладётся файлом в $STATE_DIR/py — Python
+# кэширует его байткод рядом, и запуск не компилирует ~90 КБ кода заново
+# (а awg2 api зовёт помощник дважды на вызов). Нет прав или места — как
+# раньше, с дескриптора. В служебных скриптах (emit_script) _py_mod нет.
+_PY_MOD=""
+_py_mod() {
+  local d="$STATE_DIR/py/$_PY_HELPER_SUM" tmp
+  [[ -n "$_PY_MOD" ]] && return 0
+  [[ -n "${_PY_HELPER_SUM:-}" ]] || return 1
+  if [[ ! -f "$d/awg2helper.py" ]]; then
+    mkdir -p "$d" 2>/dev/null && chmod 700 "$STATE_DIR/py" "$d" 2>/dev/null || return 1
+    tmp="$d/.awg2helper.$$"
+    printf '%s' "$_PY_HELPER" > "$tmp" 2>/dev/null && mv -f "$tmp" "$d/awg2helper.py" || { rm -f "$tmp"; return 1; }
+    find "$STATE_DIR/py" -mindepth 1 -maxdepth 1 -type d ! -name "$_PY_HELPER_SUM" -exec rm -rf {} + 2>/dev/null
+  fi
+  _PY_MOD="$d"
+}
+py() {
+  if declare -F _py_mod >/dev/null && _py_mod; then
+    python3 -I -S -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); import awg2helper; awg2helper.main()' "$_PY_MOD" "$@"
+  else
+    python3 /dev/fd/3 "$@" 3<<< "$_PY_HELPER"
+  fi
+}
 cps() { python3 /dev/fd/3 "$@" 3<<< "$_CPS_GENERATOR"; }
 
 # Самостоятельный служебный скрипт из функций и переменных awg2.
@@ -5419,13 +5442,21 @@ xray_test() {
 
 # Умеет ли бинарь inbound tun. Апстримный XTLS/Xray-core долго его не имел,
 # поэтому спрашиваем сам бинарь, а не гадаем по версии.
+# Ответ запоминается и в $STATE_DIR/xray_tun до смены бинаря: проба
+# запускает сам Xray, а спрашивают её на каждом экране клиента в боте.
 _XRAY_TUN=""
 xray_tun_supported() {
-  local probe
+  local probe key cache="$STATE_DIR/xray_tun"
   if [[ -z "$_XRAY_TUN" ]]; then
-    _XRAY_TUN=0
-    mktmp probe .json || return 1
-    py xray-tun-probe "$probe" && xray_test "$probe" >/dev/null && _XRAY_TUN=1
+    key=$(stat -c '%Y:%s' "$XRAY_BIN" 2>/dev/null || true)
+    if [[ -n "$key" && "$(cut -d' ' -f1 "$cache" 2>/dev/null)" == "$key" ]]; then
+      _XRAY_TUN=$(cut -d' ' -f2 "$cache")
+    else
+      _XRAY_TUN=0
+      mktmp probe .json || return 1
+      py xray-tun-probe "$probe" && xray_test "$probe" >/dev/null && _XRAY_TUN=1
+      [[ -n "$key" ]] && mkdir -p "$STATE_DIR" && echo "$key $_XRAY_TUN" > "$cache" 2>/dev/null
+    fi
   fi
   [[ "$_XRAY_TUN" == 1 ]]
 }
@@ -11863,6 +11894,7 @@ if __name__ == "__main__":
 '
 # CPS_GENERATOR_END v2
 
+_PY_HELPER_SUM=856e2d5c3a10cc05
 IFS= read -r -d '' _PY_HELPER <<'__AWG2_PY_HELPER__' || true
 """Встроенный помощник awg2: разбор и атомарная правка конфигов, JSON Xray,
 расчёты подсетей, разбор pcap. Вызывается как `py <команда> [аргументы]`.
@@ -11872,19 +11904,35 @@ IFS= read -r -d '' _PY_HELPER <<'__AWG2_PY_HELPER__' || true
 с целевым и os.replace: обрыв на середине не оставляет битый конфиг.
 """
 import base64
-import ipaddress
+import importlib
 import json
 import os
-import random
 import re
-import secrets
-import shutil
-import string
 import struct
 import sys
-import tempfile
 import time
 import urllib.parse
+
+
+class _Lazy:
+    """Модуль, который загружается при первом обращении: большинство команд
+    его не трогает, а awg2 api зовёт помощник дважды на каждый вызов."""
+
+    def __init__(self, name):
+        self._name, self._mod = name, None
+
+    def __getattr__(self, attr):
+        if self._mod is None:
+            self._mod = importlib.import_module(self._name)
+        return getattr(self._mod, attr)
+
+
+ipaddress = _Lazy("ipaddress")
+random = _Lazy("random")
+secrets = _Lazy("secrets")
+shutil = _Lazy("shutil")
+string = _Lazy("string")
+tempfile = _Lazy("tempfile")
 
 
 def die(msg, code=1):
@@ -13954,7 +14002,7 @@ COMMANDS = {
     "tg-targets": cmd_tg_targets,
 }
 
-if __name__ == "__main__":
+def main():
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
         die("команда: " + ", ".join(sorted(COMMANDS)))
     # Байты не-UTF-8 из конфига (surrogateescape в read) печатаем как «?», а не падаем
@@ -13965,6 +14013,10 @@ if __name__ == "__main__":
         die("неверные аргументы %s: %s" % (sys.argv[1], e))
     except (OSError, ValueError) as e:
         die("%s: %s" % (sys.argv[1], e))
+
+
+if __name__ == "__main__":
+    main()
 __AWG2_PY_HELPER__
 
 main "$@"

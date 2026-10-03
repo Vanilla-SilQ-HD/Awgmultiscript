@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -289,11 +290,10 @@ def card_text(c: dict, route: dict) -> str:
 
 
 async def card(target: ui.Target, name: str) -> None:
-    c = await client(name)
+    c, route = await asyncio.gather(client(name), active_route())
     if c is None:
         await ui.render(target, f"Клиента <b>{esc(name)}</b> нет.", ui.kb(ui.back("cl")))
         return
-    route = await active_route()
     mon = store.monitored(name)
     await ui.render(target, card_text(c, route), ui.kb(
         ("📄 Конфиг и QR", act.data("conf", name)),

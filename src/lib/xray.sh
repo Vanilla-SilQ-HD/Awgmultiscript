@@ -48,13 +48,21 @@ xray_test() {
 
 # Умеет ли бинарь inbound tun. Апстримный XTLS/Xray-core долго его не имел,
 # поэтому спрашиваем сам бинарь, а не гадаем по версии.
+# Ответ запоминается и в $STATE_DIR/xray_tun до смены бинаря: проба
+# запускает сам Xray, а спрашивают её на каждом экране клиента в боте.
 _XRAY_TUN=""
 xray_tun_supported() {
-  local probe
+  local probe key cache="$STATE_DIR/xray_tun"
   if [[ -z "$_XRAY_TUN" ]]; then
-    _XRAY_TUN=0
-    mktmp probe .json || return 1
-    py xray-tun-probe "$probe" && xray_test "$probe" >/dev/null && _XRAY_TUN=1
+    key=$(stat -c '%Y:%s' "$XRAY_BIN" 2>/dev/null || true)
+    if [[ -n "$key" && "$(cut -d' ' -f1 "$cache" 2>/dev/null)" == "$key" ]]; then
+      _XRAY_TUN=$(cut -d' ' -f2 "$cache")
+    else
+      _XRAY_TUN=0
+      mktmp probe .json || return 1
+      py xray-tun-probe "$probe" && xray_test "$probe" >/dev/null && _XRAY_TUN=1
+      [[ -n "$key" ]] && mkdir -p "$STATE_DIR" && echo "$key $_XRAY_TUN" > "$cache" 2>/dev/null
+    fi
   fi
   [[ "$_XRAY_TUN" == 1 ]]
 }

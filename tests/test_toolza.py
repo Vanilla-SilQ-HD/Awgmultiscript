@@ -299,16 +299,15 @@ chk("Xray работает (xray0 занят): проверка конфига �
 rc, out, _ = bash("XRAY_STUB_OLD=1; export XRAY_STUB_OLD; " + XRAY_ENV
                   + "xray_add_link 'hysteria2://secret@h2.example.site:443?sni=h2.example.site#H2'")
 chk("Xray без Hysteria2: выход отклонён с подсказкой обновить Xray", rc != 0 and "обнови Xray" in out, out)
-H2 = ("hysteria2://rck1sael0kc0e537@h2.example.site:443?alpn=h3&ech=AGb%2BDQBi&fp=chrome"
-      "&pinSHA256=898e8399e9c247e3035954e6405caae6bec0904c40add25f6aebe85be7d643fd%2Ca2372d06431e9716365eeed47ec02035"
-      "1497d182fcc038e457e58168a03cac07&security=tls&sni=h2.example.site#H2-Ha2pa")
+H2 = ("hysteria2://h2testpass0001@h2.example.site:443?alpn=h3&ech=AGb%2BDQBi&fp=chrome"
+      f"&pinSHA256={'aa' * 32}%2C{'bb' * 32}&security=tls&sni=h2.example.site#H2-Ha2pa")
 rc, out, _ = bash(XRAY_ENV + f"xray_add_link '{H2}' && cat \"$XRAY_CONF\"")
 xc = json.loads(out[out.index("{"):]) if rc == 0 and "{" in out else {}
 h2 = next((o for o in xc.get("outbounds", []) if o.get("tag") == "proxy_h2_example_site"), {})
 st = h2.get("streamSettings") or {}
 chk("Hysteria2 — в формате Xray 26: hysteria v2, пароль, SNI, h3, ECH, pinSHA256",
     h2.get("protocol") == "hysteria" and h2["settings"] == {"version": 2, "address": "h2.example.site", "port": 443}
-    and st.get("network") == "hysteria" and st["hysteriaSettings"] == {"version": 2, "auth": "rck1sael0kc0e537"}
+    and st.get("network") == "hysteria" and st["hysteriaSettings"] == {"version": 2, "auth": "h2testpass0001"}
     and st["tlsSettings"]["serverName"] == "h2.example.site" and st["tlsSettings"]["alpn"] == ["h3"]
     and st["tlsSettings"]["echConfigList"] == "AGb+DQBi" and st["tlsSettings"]["pinnedPeerCertSha256"].count(",") == 1,
     [rc, out[-600:]])

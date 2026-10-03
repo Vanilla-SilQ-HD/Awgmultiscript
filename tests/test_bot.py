@@ -51,6 +51,9 @@ BOT_CONF = os.path.join(TMP, "awg-bot.conf")
 with open(BOT_CONF, "w") as f:
     f.write("BOT_TOKEN=123456:" + "A" * 35 + "\nADMIN_ID=111\n")
 os.environ.update(ENV)
+# Кэш чтений выключен: тест меняет файлы сервера в обход awg2 между нажатиями
+# (сам кэш проверяется отдельно — «Кэш вызовов awg2»)
+os.environ.update(AWG_API_CACHE_TTL="0")
 os.environ.update(AWG2_BIN=API, AWG_BOT_STATE=STATE, AWG_ADMINS_FILE=os.path.join(STATE, "admins.json"),
                   AWG_BOT_CONF=BOT_CONF, AWG_CERT_FULL=os.path.join(ROOT, "etc/awg2/cert/fullchain.pem"),
                   AWG_CERT_KEY=os.path.join(ROOT, "etc/awg2/cert/key.pem"))
@@ -731,6 +734,31 @@ async def run():
     chk("выключение уведомления", not al.enabled("kernel") and al.enabled("update"), al.config())
     await press("ntf:t:kernel")
     await press("abk:m:off")
+
+    print("Кэш вызовов awg2")
+    from awgbot import api as apimod
+    runs = []
+    real_run = apimod._run
+
+    async def counting(*args, **kw):
+        runs.append(args)
+        return await real_run(*args, **kw)
+    apimod._run, apimod.CACHE_TTL = counting, 5.0
+    try:
+        apimod.invalidate()
+        a, b = await asyncio.gather(apimod.call("status"), apimod.call("status"))
+        chk("одновременные одинаковые чтения — один вызов awg2", a.ok and b.ok and len(runs) == 1, runs)
+        await apimod.call("status")
+        chk("повторное чтение в пределах TTL — из кэша", len(runs) == 1, runs)
+        await apimod.call("job", "status", "20990101-000000-0000")
+        await apimod.call("status")
+        chk("опрос задачи кэш не сбрасывает", sum(1 for x in runs if x[:1] == ("status",)) == 1, runs)
+        await apimod.call("client", "limit", "nobody", "1G")
+        await apimod.call("status")
+        chk("изменение сбрасывает кэш — следующее чтение свежее", sum(1 for x in runs if x[:1] == ("status",)) == 2, runs)
+    finally:
+        apimod._run, apimod.CACHE_TTL = real_run, 0.0
+        apimod.invalidate()
 
     print("Все экраны")
     screens = ["srv", "mod", "srv:proto", "srv:par", "srv:ep", "srv:install", "srv:reset", "srv:reboot",

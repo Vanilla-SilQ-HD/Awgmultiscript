@@ -48,6 +48,8 @@ BUILD="${AWG_BUILD:-}"
   cat src/py/cpsgen.py
   printf "'\n# CPS_GENERATOR_END v2\n\n"
 
+  # Хеш — имя каталога закэшированного помощника: новая версия кода — новый каталог
+  echo "_PY_HELPER_SUM=$(sha256sum src/py/helper.py | cut -c1-16)"
   echo "IFS= read -r -d '' _PY_HELPER <<'__AWG2_PY_HELPER__' || true"
   cat src/py/helper.py
   printf '__AWG2_PY_HELPER__\n\n'

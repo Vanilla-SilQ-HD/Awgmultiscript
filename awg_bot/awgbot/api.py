@@ -41,9 +41,74 @@ class Result:
         return self.error or (self.log.strip().splitlines() or ["без подробностей"])[-1]
 
 
+# Короткий кэш чтений: экраны бота и панели раз за разом просят одну и ту
+# же сводку, а каждый вызов awg2 — это запуск bash и Python. Одинаковые
+# одновременные запросы ждут один вызов; любая не-читающая команда (или
+# задача) сбрасывает кэш, так что после изменений данные свежие.
+CACHE_TTL = float(os.environ.get("AWG_API_CACHE_TTL", 5))
+CACHED = {("status",), ("version",), ("server", "info"), ("tunnels", "status"), ("xray", "status"),
+          ("exits", "status"), ("warp", "status"), ("dns", "status"), ("t2s", "status"), ("wgobf", "status"),
+          ("clients", "list"), ("bot", "status"), ("cert", "status"), ("update", "status"), ("mimicry",),
+          ("traffic", "daily"), ("backup", "list")}
+_cache: dict[tuple[str, ...], tuple[float, "Result"]] = {}
+_inflight: dict[tuple[str, ...], "asyncio.Future[Result]"] = {}
+
+
+# Чтения, которые не кэшируются, но и кэш не сбрасывают
+READS = {("job", "status"), ("job", "list"), ("log",), ("module", "report"), ("module", "tags"),
+         ("module", "check"), ("update", "check"), ("update", "changelog"), ("cert", "find"),
+         ("diag", "status"), ("diag", "sniff-list"), ("tunnels", "clients"), ("wgobf", "clients"),
+         ("xray", "diag"), ("cascade", "list"), ("module", "backups"), ("backup", "inspect"),
+         ("bot", "proxy", "get"), ("bot", "webapp", "get"), ("server", "params")}
+
+
+def _cacheable(key: tuple[str, ...]) -> bool:
+    return key[:2] in CACHED or key[:1] in CACHED
+
+
+def _writes(key: tuple[str, ...]) -> bool:
+    return not (_cacheable(key) or key[:1] in READS or key[:2] in READS or key[:3] in READS)
+
+
+def invalidate() -> None:
+    _cache.clear()
+
+
 async def call(*args: Any, stdin: str | bytes | None = None,
                timeout: float = DEFAULT_TIMEOUT) -> Result:
-    """awg2 api АРГУМЕНТЫ... → Result. Не бросает исключений."""
+    """awg2 api АРГУМЕНТЫ... → Result. Не бросает исключений. Чтения из
+    CACHED отдаются из кэша CACHE_TTL секунд, записи его сбрасывают."""
+    key = tuple(str(a) for a in args)
+    if stdin is not None or not _cacheable(key) or CACHE_TTL <= 0:
+        if _writes(key):
+            invalidate()
+        r = await _run(*args, stdin=stdin, timeout=timeout)
+        if _writes(key):
+            invalidate()                # и после: пока шла запись, кто-то мог прочитать старое
+        return r
+    hit = _cache.get(key)
+    loop = asyncio.get_running_loop()
+    if hit and loop.time() - hit[0] < CACHE_TTL:
+        return hit[1]
+    if key in _inflight:
+        return await asyncio.shield(_inflight[key])
+    fut: asyncio.Future[Result] = loop.create_future()
+    _inflight[key] = fut
+    try:
+        r = await _run(*args, timeout=timeout)
+        if r.ok:
+            _cache[key] = (loop.time(), r)
+        fut.set_result(r)
+        return r
+    except BaseException as e:
+        fut.set_exception(e) if not fut.done() else None
+        raise
+    finally:
+        _inflight.pop(key, None)
+
+
+async def _run(*args: Any, stdin: str | bytes | None = None,
+               timeout: float = DEFAULT_TIMEOUT) -> Result:
     argv = [AWG2, "api", *(str(a) for a in args)]
     data = stdin.encode() if isinstance(stdin, str) else stdin
     try:
@@ -86,8 +151,12 @@ async def data(*args: Any, default: Any = None, **kw: Any) -> Any:
 
 async def job_start(*args: Any, stdin: str | bytes | None = None) -> Result:
     """Запуск задачи. data.id — её номер."""
+    invalidate()
     return await call("job", "start", *args, stdin=stdin, timeout=60)
 
 
 async def job_status(job_id: str, offset: int = 0) -> Result:
-    return await call("job", "status", job_id, offset, timeout=60)
+    r = await call("job", "status", job_id, offset, timeout=60)
+    if isinstance(r.data, dict) and r.data.get("state") != "running":
+        invalidate()                    # задача что-то поменяла — экраны после неё читают заново
+    return r

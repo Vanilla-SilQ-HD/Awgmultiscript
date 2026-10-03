@@ -6,19 +6,35 @@
 с целевым и os.replace: обрыв на середине не оставляет битый конфиг.
 """
 import base64
-import ipaddress
+import importlib
 import json
 import os
-import random
 import re
-import secrets
-import shutil
-import string
 import struct
 import sys
-import tempfile
 import time
 import urllib.parse
+
+
+class _Lazy:
+    """Модуль, который загружается при первом обращении: большинство команд
+    его не трогает, а awg2 api зовёт помощник дважды на каждый вызов."""
+
+    def __init__(self, name):
+        self._name, self._mod = name, None
+
+    def __getattr__(self, attr):
+        if self._mod is None:
+            self._mod = importlib.import_module(self._name)
+        return getattr(self._mod, attr)
+
+
+ipaddress = _Lazy("ipaddress")
+random = _Lazy("random")
+secrets = _Lazy("secrets")
+shutil = _Lazy("shutil")
+string = _Lazy("string")
+tempfile = _Lazy("tempfile")
 
 
 def die(msg, code=1):
@@ -2088,7 +2104,7 @@ COMMANDS = {
     "tg-targets": cmd_tg_targets,
 }
 
-if __name__ == "__main__":
+def main():
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
         die("команда: " + ", ".join(sorted(COMMANDS)))
     # Байты не-UTF-8 из конфига (surrogateescape в read) печатаем как «?», а не падаем
@@ -2099,3 +2115,7 @@ if __name__ == "__main__":
         die("неверные аргументы %s: %s" % (sys.argv[1], e))
     except (OSError, ValueError) as e:
         die("%s: %s" % (sys.argv[1], e))
+
+
+if __name__ == "__main__":
+    main()
