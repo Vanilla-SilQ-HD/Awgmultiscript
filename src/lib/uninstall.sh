@@ -58,8 +58,19 @@ _tools_files() {
        /usr/lib/systemd/system/awg-quick@.service /usr/lib/systemd/system/awg-quick.target
 }
 
+# Распакованные архивы Тулзы (с awg2.sh и awg_bot): из них «Установить бота»
+# берёт локальный код, поэтому после полного удаления о них спрашиваем.
+toolza_unpacked() {
+  local d
+  for d in /root/awg-toolza-*/ /home/*/awg-toolza-*/; do
+    d="${d%/}"
+    [[ -d "$d" && -f "$d/awg2.sh" && -d "$d/awg_bot" ]] && echo "$d"
+  done
+  return 0
+}
+
 do_uninstall() {
-  local del_bot=n del_wgobf=n del_self=n opts
+  local del_bot=n del_wgobf=n del_self=n del_src=n opts src=()
   hdr "Удаление AWG Toolza"
   warn "Будет удалено:"
   echo -e "  ${R}—${N} сервер awg0, его клиенты и автозапуск"
@@ -74,11 +85,20 @@ do_uninstall() {
   bot_installed && read_yesno del_bot "  Удалить и Telegram-бота? [Y/n]: " y
   wgobf_installed && read_yesno del_wgobf "  Удалить и WG + обфускатор? [Y/n]: " y
   read_yesno del_self "  Удалить сам скрипт awg2? [Y/n]: " y
+  mapfile -t src < <(toolza_unpacked)
+  if (( ${#src[@]} )); then
+    echo -e "  ${D}Распакованные архивы Тулзы — из них ставится бот «из локального кода»:${N}"
+    printf "  ${D}  %s${N}\n" "${src[@]}"
+    read_yesno del_src "  Удалить и их? [y/N]: " n
+  fi
   opts=()
   [[ "$del_bot" == y ]] && opts+=(bot)
   [[ "$del_wgobf" == y ]] && opts+=(wgobf)
   [[ "$del_self" == y ]] && opts+=(self)
   uninstall_all "${opts[@]}"
+  if [[ "$del_src" == y ]]; then
+    rm -rf "${src[@]}" && ok "Распакованные архивы удалены: ${#src[@]}"
+  fi
   (( UNINSTALLED_SELF )) && exit 0
   return 0
 }
