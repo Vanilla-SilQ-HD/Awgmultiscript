@@ -42,7 +42,9 @@ UPDATE_CHECK_TTL=21600
 UPDATE_SIG_NS="awg-toolza"
 UPDATE_SIGNER="awg-toolza-release"
 UPDATE_SIG_SINCE="v1.2.0"
-UPDATE_SIGNERS=()
+UPDATE_SIGNERS=(
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMSoLr9/XltV/DHvw8sMTsKqMkxxGQRezmGJgBKczeAk"   # awg-toolza-release, 2026-10
+)
 
 # ── Бэкапы ────────────────────────────────────────────────
 # В домашнем каталоге того, кто запустил sudo: так было всегда, и уже
