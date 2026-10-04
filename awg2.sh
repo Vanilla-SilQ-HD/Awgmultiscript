@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.2.1"
+VERSION="v1.2.2"
 # Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
 # в сравнении версий не участвует. У выпущенной сборки пусто.
 BUILD=""
@@ -2421,6 +2421,19 @@ write_client_conf() {
     echo "AllowedIPs = 0.0.0.0/0, ::/0"
     echo "PersistentKeepalive = $(keepalive_for "$(server_proto)")"
   } | write_file "$f" 600
+}
+
+# Умеют ли модуль и tools AWG 3.1, когда сервера ещё нет. Проверка создаёт
+# пробный интерфейс, а бот спрашивает сводку раз в минуту — ответ помнится до
+# смены модуля или tools. «Не подтверждено» (модуль не загружен) не помнится.
+proto31_cached() {
+  local f="$STATE_DIR/proto31" bin key k v rc=0
+  bin=$(command -v awg) || return 1
+  key="$(mod_tag)|$(stat -c %s:%Y "$bin" 2>/dev/null)|$(cat "/sys/module/$MOD_NAME/srcversion" 2>/dev/null)"
+  if [[ -f "$f" ]] && IFS=$'\t' read -r k v < "$f" && [[ "$k" == "$key" && "$v" =~ ^[01]$ ]]; then return "$v"; fi
+  proto_supported 3.1 || rc=$?
+  (( rc == 2 )) || { mkdir -p "$STATE_DIR" && printf '%s\t%s\n' "$key" "$rc" > "$f"; } 2>/dev/null
+  return "$rc"
 }
 
 # Внешний интерфейс в правиле NAT awg0.conf — аплинк, на котором создан сервер.
@@ -9173,7 +9186,9 @@ _api_server() {
   shift || true
   case "$a" in
     info)
-      if server_exists; then proto_supported 3.1 || rc=$?; else rc=1; fi
+      # Сервера ещё нет — мастеру в боте и панели нужен тот же честный ответ,
+      # что и меню (раньше здесь был жёсткий «нет», и создать 3.1 было нельзя)
+      if server_exists; then proto_supported 3.1 || rc=$?; else proto31_cached || rc=$?; fi
       {
         _kv installed:b "$(_b command -v awg)"; _kv exists:b "$(_b server_exists)"
         _kv proto31:b "$([[ $rc == 0 ]] && echo 1 || echo 0)"
@@ -14086,5 +14101,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=959d1ebfdfff8521
+_BUILD_SUM=c925c07047020619
 main "$@"

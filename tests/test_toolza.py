@@ -844,6 +844,24 @@ chk("restore: конфиг клиента не из бэкапа убран, о�
     not os.path.exists(LATE) and os.path.exists(ALICE)
     and not any(c["name"] == "late" for c in api("clients", "list").get("data") or []), os.listdir(os.path.join(ROOT, "root")))
 
+# Сервера ещё нет: мастер в боте и панели спрашивает server info — поддержка 3.1
+# проверяется честно (раньше был жёсткий «нет»), пробный интерфейс — один раз
+awg_stub = os.path.join(BIN, "awg")
+stub_body = open(awg_stub).read()
+with open(awg_stub, "a") as f:
+    f.write("# RandomTrailers\n")
+NOSRV = 'echo v3.1.20260906 > "$MOD_TAG_FILE"; rm -f "$STATE_DIR/proto31"; SERVER_CONF="$STATE_DIR/none/awg0.conf"; '
+reset_calls()
+rc, out, _ = bash(NOSRV + "api_main server info; api_main server info >/dev/null")
+d = json.loads(out.strip().splitlines()[0])
+chk("без сервера: модуль и tools умеют 3.1 — мастер предложит AWG 3.1",
+    d["data"]["exists"] is False and d["data"]["proto31"] is True and d["log"] == "", d)
+chk("без сервера: пробный интерфейс — один раз, дальше ответ из памяти", calls().count("ip link add") == 1, calls())
+rc, out, _ = bash(NOSRV.replace("v3.1.20260906", "v2.0.0").replace('rm -f "$STATE_DIR/proto31"; ', "") + "api_main server info")
+chk("модуль сменился на 2.0 — ответ пересчитан: 3.1 нет", json.loads(out)["data"]["proto31"] is False, out)
+open(awg_stub, "w").write(stub_body)
+bash('rm -f "$STATE_DIR/proto31"')
+
 # Бэкап с другого VPS: аплинк там назывался иначе (eth0 → ens3) — NAT в awg0.conf
 # переводится на аплинк этого сервера, иначе клиенты остались бы без интернета
 orig_conf = open(conf).read()

@@ -119,7 +119,9 @@ _api_server() {
   shift || true
   case "$a" in
     info)
-      if server_exists; then proto_supported 3.1 || rc=$?; else rc=1; fi
+      # Сервера ещё нет — мастеру в боте и панели нужен тот же честный ответ,
+      # что и меню (раньше здесь был жёсткий «нет», и создать 3.1 было нельзя)
+      if server_exists; then proto_supported 3.1 || rc=$?; else proto31_cached || rc=$?; fi
       {
         _kv installed:b "$(_b command -v awg)"; _kv exists:b "$(_b server_exists)"
         _kv proto31:b "$([[ $rc == 0 ]] && echo 1 || echo 0)"

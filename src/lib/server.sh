@@ -236,6 +236,19 @@ write_client_conf() {
   } | write_file "$f" 600
 }
 
+# Умеют ли модуль и tools AWG 3.1, когда сервера ещё нет. Проверка создаёт
+# пробный интерфейс, а бот спрашивает сводку раз в минуту — ответ помнится до
+# смены модуля или tools. «Не подтверждено» (модуль не загружен) не помнится.
+proto31_cached() {
+  local f="$STATE_DIR/proto31" bin key k v rc=0
+  bin=$(command -v awg) || return 1
+  key="$(mod_tag)|$(stat -c %s:%Y "$bin" 2>/dev/null)|$(cat "/sys/module/$MOD_NAME/srcversion" 2>/dev/null)"
+  if [[ -f "$f" ]] && IFS=$'\t' read -r k v < "$f" && [[ "$k" == "$key" && "$v" =~ ^[01]$ ]]; then return "$v"; fi
+  proto_supported 3.1 || rc=$?
+  (( rc == 2 )) || { mkdir -p "$STATE_DIR" && printf '%s\t%s\n' "$key" "$rc" > "$f"; } 2>/dev/null
+  return "$rc"
+}
+
 # Внешний интерфейс в правиле NAT awg0.conf — аплинк, на котором создан сервер.
 conf_uplink() {
   [[ -f "$SERVER_CONF" ]] || return 1
