@@ -589,7 +589,11 @@ _wgobf_hooks_reset() {
     sed 's/^/    /; s/\t/ = /' <<< "$bad"
   fi
   sed -i -E '/^[[:space:]]*(PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=/Id' "$WGOBF_WG_CONF"
+  # Заголовок секции — в канонический вид: awg-quick примет и « [interface]»
+  # и CRLF, а вставка ниже ищет ровно «[Interface]» — иначе файрвол не встал бы
+  sed -i -E 's/\r$//; s/^[[:space:]]*\[[[:space:]]*interface[[:space:]]*\][[:space:]]*$/[Interface]/I' "$WGOBF_WG_CONF"
   sed -i "0,/^\[Interface\]/s|^\[Interface\]|[Interface]\nPostUp = $WGOBF_FW up\nPostDown = $WGOBF_FW down|" "$WGOBF_WG_CONF"
+  grep -qxF "PostUp = $WGOBF_FW up" "$WGOBF_WG_CONF" || { err "В $WGOBF_IF.conf из бэкапа нет секции [Interface]"; return 1; }
 }
 
 # Из папки бэкапа (<бэкап>/wgobf): ключи, настройки и клиенты — из бэкапа,
@@ -605,7 +609,7 @@ wgobf_restore() {
   install -m 600 "$src/etc/${WGOBF_STATE##*/}" "$WGOBF_STATE"
   install -m 600 "$src/$WGOBF_IF.conf" "$WGOBF_WG_CONF"
   # Хуки wgobf0 пишет только Тулза: чужие команды из бэкапа — прочь, свои — на место
-  _wgobf_hooks_reset
+  _wgobf_hooks_reset || return 1
   if [[ -d "$src/clients" ]]; then
     mkdir -p "$WGOBF_CLIENTS" && cp -a "$src/clients/." "$WGOBF_CLIENTS/" && chmod 700 "$WGOBF_CLIENTS"
   fi

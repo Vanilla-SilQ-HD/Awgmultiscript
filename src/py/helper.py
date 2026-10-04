@@ -1271,6 +1271,71 @@ def cmd_xray_del(path, *tags):
     jsave(path, conf)
 
 
+XRAY_RESTORE_KEEP = ("outbounds", "routing", "observatory")
+
+
+def _shown(v, n=40):
+    """Имя из чужого файла — для вывода в терминал и бот: без управляющих
+    символов и обратной косой (warn печатает через echo -e)."""
+    return re.sub(r"[\x00-\x1f\x7f\\]", "?", str(v))[:n]
+
+
+def cmd_xray_restore_clean(path):
+    """Конфиг Xray из бэкапа (бэкап мог прийти чужой, Xray работает от root):
+    остаются выходы, маршрутизация и observatory — то, что пишет сама Тулза.
+    Входы пересоберёт xray-prepare (SOCKS только на 127.0.0.1); api, stats,
+    reverse, log и прочие разделы, правила чужих входов и правила на
+    несуществующие выходы — убираются. Правила своего входа tun с чужим тегом
+    переводятся на tun-in: входов в конфиге уже нет, и xray-prepare их бы не
+    узнал. Кривые записи (не объект, тег — не строка) — тоже убираются, а не
+    роняют разбор всего конфига. Печатает, что убрано."""
+    conf = jload(path)
+    if not isinstance(conf, dict):
+        die("не объект JSON")
+    is_tag = lambda v: isinstance(v, str) and v != ""          # noqa: E731
+    as_list = lambda v: v if isinstance(v, list) else []       # noqa: E731
+    outs = [o for o in as_list(conf.get("outbounds"))
+            if isinstance(o, dict) and (o.get("tag") is None or is_tag(o.get("tag")))]
+    tags = {o["tag"] for o in outs if is_tag(o.get("tag"))}
+    if not any(is_tag(o.get("tag")) and o.get("protocol") not in SKIP_PROTO for o in outs):
+        die("нет выходов")
+    inbounds = [i for i in as_list(conf.get("inbounds")) if isinstance(i, dict)]
+    tun_tags = {i["tag"] for i in inbounds if i.get("protocol") == "tun" and is_tag(i.get("tag"))}
+    known = KNOWN_IN | tun_tags
+    routing = conf.get("routing") if isinstance(conf.get("routing"), dict) else {}
+    balancers = [b for b in as_list(routing.get("balancers")) if isinstance(b, dict) and is_tag(b.get("tag"))]
+    btags = {b["tag"] for b in balancers}
+    rules, dropped_rules = [], 0
+    for r in as_list(routing.get("rules")):
+        inb = r.get("inboundTag") if isinstance(r, dict) else None
+        ot = r.get("outboundTag") if isinstance(r, dict) else None
+        bt = r.get("balancerTag") if isinstance(r, dict) else None
+        if (not isinstance(r, dict)
+                or (inb and not (isinstance(inb, list) and all(is_tag(t) for t in inb) and set(inb) & known))
+                or (ot and not (is_tag(ot) and ot in tags))
+                or (bt and not (is_tag(bt) and bt in btags))):
+            dropped_rules += 1
+            continue
+        if inb:
+            r["inboundTag"] = list(dict.fromkeys("tun-in" if t in tun_tags else t for t in inb))
+        rules.append(r)
+    clean = {"inbounds": [], "outbounds": outs,
+             "routing": {"domainStrategy": routing.get("domainStrategy") if is_tag(routing.get("domainStrategy"))
+                         else "AsIs", "rules": rules}}
+    if balancers:
+        clean["routing"]["balancers"] = balancers
+    if isinstance(conf.get("observatory"), dict):
+        clean["observatory"] = conf["observatory"]
+    foreign = [_shown(i.get("tag") or i.get("protocol") or "?") for i in inbounds
+               if not (is_tag(i.get("tag")) and i["tag"] in KNOWN_IN) and i.get("protocol") != "tun"]
+    gone = ["входы: " + ", ".join(foreign)] if foreign else []
+    gone += sorted(_shown(k) for k in conf if k not in XRAY_RESTORE_KEEP + ("inbounds",))
+    if dropped_rules:
+        gone.append("правил: %d" % dropped_rules)
+    jsave(path, clean)
+    print("; ".join(gone))
+
+
 def cmd_xray_tags(path):
     for t in proxy_tags(jload(path)):
         print(t)
@@ -2115,7 +2180,7 @@ COMMANDS = {
     "rand-key": cmd_rand_key, "phobos-link": cmd_phobos_link, "exit-conf-fix": cmd_exit_conf_fix,
     "conf-hooks": cmd_conf_hooks, "mod-compat-patch": cmd_mod_compat_patch,
     "xray-link": cmd_xray_link, "xray-default": cmd_xray_default, "xray-add": cmd_xray_add,
-    "xray-del": cmd_xray_del, "xray-tags": cmd_xray_tags, "xray-probe": cmd_xray_probe,
+    "xray-del": cmd_xray_del, "xray-tags": cmd_xray_tags, "xray-restore-clean": cmd_xray_restore_clean, "xray-probe": cmd_xray_probe,
     "xray-probe-tag": cmd_xray_probe_tag, "xray-tun-probe": cmd_xray_tun_probe,
     "xray-test-copy": cmd_xray_test_copy,
     "xray-balancer": cmd_xray_balancer, "xray-balancer-get": cmd_xray_balancer_get,

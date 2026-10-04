@@ -207,6 +207,14 @@ rc, out, err = bash('valid_port 0080 || echo a; valid_port 65536 || echo b; vali
                     'valid_port 80 && valid_port 65535 && valid_cidr 10.0.0.0/0 && valid_cidr 10.8.0.0/24 && echo f')
 chk("valid_port/valid_cidr: ведущие нули — отказ без ошибки bash", out.split() == ["a", "b", "c", "d", "e", "f"]
     and "too great" not in err and "syntax error" not in err, out + err)
+# Октеты IP без ведущих нулей: «010.0.0.1» iptables отвергает, а ip_is_private
+# счёл бы его публичным
+rc, out, err = bash('valid_ip 010.0.0.1 || echo a; valid_ip 1.2.3.04 || echo b; valid_ip 256.1.1.1 || echo c; '
+                    'valid_ip 0.0.0.0 && valid_ip 10.0.0.1 && valid_ip 255.255.255.255 && echo d; '
+                    'valid_cidr 010.8.0.0/24 || echo e')
+chk("valid_ip: октеты с ведущими нулями — отказ", out.split() == ["a", "b", "c", "d", "e"] and not err, out + err)
+rc, out, _ = bash('for d in 010.0.0.1 1.2.3.04 1.2.3.4 example.com; do valid_domain "$d" && echo "$d"; done')
+chk("valid_domain: цифры с точками (и с нулями) — не домен", out.split() == ["example.com"], out)
 
 WG = os.path.join(ROOT, "etc/wireguard/wgobf0.conf")
 os.makedirs(os.path.dirname(WG), exist_ok=True)
@@ -989,6 +997,16 @@ fw = fw.strip()
 chk("wgobf0 из бэкапа: хуки — ровно скрипт Тулзы, о чужих — предупреждение",
     conf_text.strip() == f"[Interface]\nPostUp = {fw} up\nPostDown = {fw} down\nPrivateKey = X\nListenPort = 1"
     and "чужие команды" in said and "touch /tmp/x" in said and "/old/fw.sh down" in said, out)
+with open(WGC, "w") as f:
+    f.write(" [interface]\r\nPrivateKey = X\r\nPostUp = touch /tmp/x\r\nListenPort = 1\r\n")
+rc, out, _ = bash('_wgobf_hooks_reset >/dev/null 2>&1; echo "rc=$?"; cat "$WGOBF_WG_CONF"')
+chk("wgobf0 из бэкапа: « [interface]» и CRLF — заголовок приведён, хуки Тулзы на месте",
+    out.startswith("rc=0\n") and f"[Interface]\nPostUp = {fw} up\nPostDown = {fw} down\nPrivateKey = X\nListenPort = 1" in out
+    and b"\r" not in open(WGC, "rb").read(), repr(out))   # вывод bash() — text=True, \r\n там уже \n
+with open(WGC, "w") as f:
+    f.write("PrivateKey = X\n")
+rc, out, _ = bash('_wgobf_hooks_reset >/dev/null 2>&1; echo "rc=$?"')
+chk("wgobf0 из бэкапа без секции [Interface] — ошибка, а не обфускатор без файрвола", out.strip() == "rc=1", out)
 
 # Подделанный бэкап: в awg0.conf — команды не из Тулзы, в архиве туннелей —
 # файл вне путей Тулзы, exit-нода с хуком, мусор в каскаде и tun2socks,
@@ -1019,7 +1037,17 @@ members = {
                                             f"PostUp = touch {TMP}/pwned\n\n[Peer]\nPublicKey = P\n"
                                             "Endpoint = 1.2.3.4:51820\nAllowedIPs = 0.0.0.0/0\n",
     os.path.join(AWGD, "awg-exit-../x.conf"): "[Interface]\n",
-    os.path.join(ROOT, "etc/awg-cascade/rules.conf"): "udp|4443|5.6.7.8|443|ok\nudp|1;id|5.6.7.8|443|bad\n",
+    os.path.join(ROOT, "etc/awg-cascade/rules.conf"): "udp|4443|5.6.7.8|443|ok\nudp|1;id|5.6.7.8|443|bad\n"
+        "tcp|8080|10.0.0.5|80|private\nudp|4444|010.0.0.1|443|zeros\ntcp|99999|5.6.7.8|443|port\n"
+        "udp|51820|5.6.7.8|443|awgport\nudp|4443|5.6.7.9|443|dup\n",
+    os.path.join(ROOT, "etc/xray/config.json"): json.dumps({
+        "log": {"access": "/etc/cron.d/x"}, "api": {"tag": "api", "services": ["HandlerService"]},
+        "inbounds": [{"tag": "socks-in", "protocol": "socks", "listen": "0.0.0.0", "port": 10808},
+                     {"tag": "open", "protocol": "socks", "listen": "0.0.0.0", "port": 1080},
+                     {"tag": "api-in", "protocol": "dokodemo-door", "listen": "0.0.0.0", "port": 10085}],
+        "outbounds": [{"tag": "proxy_a", "protocol": "vless", "settings": {}}, {"tag": "direct", "protocol": "freedom"}],
+        "routing": {"rules": [{"inboundTag": ["api-in"], "outboundTag": "api"},
+                              {"inboundTag": ["socks-in"], "outboundTag": "proxy_a"}]}}),
     os.path.join(ROOT, "etc/tun2socks/proxy.txt"): "127.0.0.1:1080;touch x\n",
     os.path.join(ROOT, "etc/dnscrypt-proxy/dnscrypt-proxy.toml"):
         "server_names = ['quad9-doh-ip4-port443-nofilter-pri']\n[query_log]\n  file = '/etc/cron.d/x'\n",
@@ -1049,7 +1077,37 @@ chk("exit-нода из бэкапа — без хуков, с Table = off", "Po
     and not os.path.exists(os.path.join(AWGD, "x.conf")), ex2)
 with open(os.path.join(ROOT, "etc/awg-cascade/rules.conf")) as f:
     rules = f.read()
-chk("каскад из бэкапа — только строки по формату", rules == "udp|4443|5.6.7.8|443|ok\n", rules)
+chk("каскад из бэкапа — только с проверками добавления: публичная цель, порты, вход не занят, без дублей",
+    rules == "udp|4443|5.6.7.8|443|ok\n" and "10.0.0.5" in log and "010.0.0.1" in log and "51820" in log, [rules, log[-900:]])
+CRF, CRO = os.path.join(TMP, "cr-in"), os.path.join(TMP, "cr-out")
+with open(CRF, "w", newline="") as f:
+    f.write("udp|4443|5.6.7.8|443|a\r\nudp|4445|5.6.7.9|443\r\ntcp|4446|5.6.7.9|443|last")
+rc, out, _ = bash(f'CASCADE_RULES="{CRO}"; write_file() {{ cat > "$1"; }}; _restore_cascade_rules "{CRF}" 2>&1; cat "{CRO}"')
+chk("каскад из бэкапа: CRLF и последняя строка без перевода строки — не теряются",
+    out.strip().splitlines()[-3:] == ["udp|4443|5.6.7.8|443|a", "udp|4445|5.6.7.9|443|", "tcp|4446|5.6.7.9|443|last"], out)
+with open(os.path.join(ROOT, "etc/xray/config.json")) as f:
+    xr = json.load(f)
+chk("Xray из бэкапа: выходы и маршруты — да, чужие входы, API и журнал — нет",
+    [o["tag"] for o in xr["outbounds"]] == ["proxy_a", "direct"] and xr["inbounds"] == []
+    and "api" not in xr and "log" not in xr
+    and xr["routing"]["rules"] == [{"inboundTag": ["socks-in"], "outboundTag": "proxy_a"}]
+    and "Из конфига Xray бэкапа убрано" in log and "api-in" in log, [xr, log[-600:]])
+# Чужой тег своего входа tun и кривые записи: главное правило не теряется
+XRC = os.path.join(TMP, "xrc.json")
+with open(XRC, "w") as f:
+    json.dump({"inbounds": [{"protocol": "tun", "tag": "tun"}, {"protocol": "socks", "tag": "evil\u001b[2J"}, "x", ["y"],
+                            {"protocol": "socks", "tag": ["list"]}],
+               "outbounds": [{"protocol": "vless", "tag": "a"}, {"protocol": "vless", "tag": "b"},
+                             {"protocol": "freedom", "tag": "direct"}, {"protocol": "vless", "tag": ["z"]}],
+               "routing": {"balancers": "oops", "rules": [
+                   {"inboundTag": ["tun"], "outboundTag": "b"}, {"inboundTag": [["x"]], "outboundTag": "a"},
+                   {"outboundTag": ["a"]}, "junk"]}}, f)
+rc, out, err = bash(f'py xray-restore-clean "{XRC}" && py xray-prepare "{XRC}" native && py xray-main-get "{XRC}"')
+xc = json.load(open(XRC))
+chk("Xray из бэкапа: правило своего tun с чужим тегом сохраняется (выход b), кривые записи — убраны без падения",
+    rc == 0 and out.strip().splitlines()[-1] == "b" and "\x1b" not in out and "Traceback" not in err
+    and [r for r in xc["routing"]["rules"] if r.get("inboundTag")] == [{"inboundTag": ["tun-in"], "outboundTag": "b"}],
+    [out, err[-300:], xc["routing"]])
 chk("адрес tun2socks не по формату не восстановлен", not os.path.exists(os.path.join(ROOT, "etc/tun2socks/proxy.txt")))
 with open(os.path.join(ROOT, "etc/dnscrypt-proxy/dnscrypt-proxy.toml")) as f:
     toml = f.read()

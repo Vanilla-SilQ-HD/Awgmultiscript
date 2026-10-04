@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.2.7"
+VERSION="v1.2.8"
 # Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
 # в сравнении версий не участвует. У выпущенной сборки пусто.
 BUILD=""
@@ -749,10 +749,12 @@ ufw_delete_matching() {
 # ═════ net ═════
 # Сеть: проверка адресов, аплинк, публичный IP, порты, домены.
 
+# Октеты без ведущих нулей, как у портов и масок: «010.0.0.1» iptables
+# отвергает, а ip_is_private (по тексту) счёл бы его публичным.
 valid_ip() {
   local ip="$1" o
-  [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
-  for o in "${BASH_REMATCH[@]:1}"; do (( 10#$o <= 255 )) || return 1; done
+  [[ "$ip" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]] || return 1
+  for o in "${BASH_REMATCH[@]:1}"; do (( o <= 255 )) || return 1; done
 }
 
 valid_cidr() {
@@ -769,7 +771,9 @@ valid_port() { [[ "$1" =~ ^[1-9][0-9]{0,4}$ ]] && (( $1 <= 65535 )); }
 valid_domain() {
   local d="$1"
   [[ -n "$d" && ${#d} -le 253 ]] || return 1
-  valid_ip "$d" && return 1
+  # Одни цифры и точки — это адрес, а не домен: и «010.0.0.1», который
+  # valid_ip (без ведущих нулей) не принимает, тоже
+  [[ "$d" =~ ^[0-9.]+$ ]] && return 1
   [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]
 }
 
@@ -5302,11 +5306,19 @@ cascade_add() {
 }
 
 # cascade_rule_add udp|tcp|both ВХОД ЦЕЛЬ ВЫХОД [комментарий]
+# Порты и адрес цели правила; причина отказа — в stdout. Общая для
+# добавления и для правил из бэкапа: те раньше проверялись только по формату
+# и могли увести порт сервера во внутреннюю сеть.
+_cascade_rule_invalid() {  # вход цель выход
+  valid_port "$1" && valid_port "$3" || { echo "Порт 1-65535"; return 0; }
+  valid_ip "$2" && ! ip_is_private "$2" || { echo "Нужен публичный IPv4, например 5.6.7.8"; return 0; }
+  return 1
+}
+
 cascade_rule_add() {
   local protos=() proto in="$2" dst="$3" out="$4" comment="${5//[|$'\n\r']/ }" why added=0
   case "$1" in udp|tcp) protos=("$1") ;; both) protos=(udp tcp) ;; *) err "Протокол: udp | tcp | both"; return 1 ;; esac
-  valid_port "$in" && valid_port "$out" || { err "Порт 1-65535"; return 1; }
-  valid_ip "$dst" && ! ip_is_private "$dst" || { err "Нужен публичный IPv4, например 5.6.7.8"; return 1; }
+  if why=$(_cascade_rule_invalid "$in" "$dst" "$out"); then err "$why"; return 1; fi
   ip_forward_enable
   mkdir -p "$CASCADE_DIR"
   for proto in "${protos[@]}"; do
@@ -7345,7 +7357,11 @@ _wgobf_hooks_reset() {
     sed 's/^/    /; s/\t/ = /' <<< "$bad"
   fi
   sed -i -E '/^[[:space:]]*(PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=/Id' "$WGOBF_WG_CONF"
+  # Заголовок секции — в канонический вид: awg-quick примет и « [interface]»
+  # и CRLF, а вставка ниже ищет ровно «[Interface]» — иначе файрвол не встал бы
+  sed -i -E 's/\r$//; s/^[[:space:]]*\[[[:space:]]*interface[[:space:]]*\][[:space:]]*$/[Interface]/I' "$WGOBF_WG_CONF"
   sed -i "0,/^\[Interface\]/s|^\[Interface\]|[Interface]\nPostUp = $WGOBF_FW up\nPostDown = $WGOBF_FW down|" "$WGOBF_WG_CONF"
+  grep -qxF "PostUp = $WGOBF_FW up" "$WGOBF_WG_CONF" || { err "В $WGOBF_IF.conf из бэкапа нет секции [Interface]"; return 1; }
 }
 
 # Из папки бэкапа (<бэкап>/wgobf): ключи, настройки и клиенты — из бэкапа,
@@ -7361,7 +7377,7 @@ wgobf_restore() {
   install -m 600 "$src/etc/${WGOBF_STATE##*/}" "$WGOBF_STATE"
   install -m 600 "$src/$WGOBF_IF.conf" "$WGOBF_WG_CONF"
   # Хуки wgobf0 пишет только Тулза: чужие команды из бэкапа — прочь, свои — на место
-  _wgobf_hooks_reset
+  _wgobf_hooks_reset || return 1
   if [[ -d "$src/clients" ]]; then
     mkdir -p "$WGOBF_CLIENTS" && cp -a "$src/clients/." "$WGOBF_CLIENTS/" && chmod 700 "$WGOBF_CLIENTS"
   fi
@@ -7861,7 +7877,11 @@ _restore_tunnels() {  # каталог бэкапа
   mktmp x -d || return 1
   py safe-untar "$arch" "$x" || { warn "Настройки туннелей не распаковались"; return 0; }
   if [[ -f "$x$XRAY_CONF" ]]; then
-    if py xray-tags "$x$XRAY_CONF" >/dev/null 2>&1; then install -D -m 600 "$x$XRAY_CONF" "$XRAY_CONF"
+    # Xray работает от root: из чужого конфига — только выходы и маршруты,
+    # входы (SOCKS на 0.0.0.0, API) и журналы Тулза пишет сама
+    if n=$(py xray-restore-clean "$x$XRAY_CONF" 2>/dev/null); then
+      install -D -m 600 "$x$XRAY_CONF" "$XRAY_CONF"
+      [[ -n "$n" ]] && warn "Из конфига Xray бэкапа убрано: $n"
     else warn "Конфиг Xray из бэкапа не разобран — пропущен"; fi
   fi
   [[ -f "$x$XRAY_PEERS" ]] && install -D -m 600 "$x$XRAY_PEERS" "$XRAY_PEERS"
@@ -7874,10 +7894,7 @@ _restore_tunnels() {  # каталог бэкапа
     [[ "$n" =~ ^[A-Za-z0-9_]{1,6}$ ]] || { warn "Пропущен конфиг exit-ноды: ${f##*/}"; continue; }
     py exit-conf-fix "$f" && install -m 600 "$f" "$EXITS_DIR/awg-exit-$n.conf"
   done
-  if [[ -f "$x$CASCADE_RULES" ]]; then
-    grep -E '^(udp|tcp)\|[0-9]{1,5}\|[0-9]{1,3}(\.[0-9]{1,3}){3}\|[0-9]{1,5}\|' "$x$CASCADE_RULES" \
-      | write_file "$CASCADE_RULES" 600
-  fi
+  [[ -f "$x$CASCADE_RULES" ]] && _restore_cascade_rules "$x$CASCADE_RULES"
   if [[ -f "$x$T2S_CONF" ]]; then
     n=$(head -1 "$x$T2S_CONF" | tr -d '[:space:]')
     [[ "$n" =~ ^[A-Za-z0-9._-]+:[0-9]{1,5}$ ]] && echo "$n" | write_file "$T2S_CONF" 600
@@ -7892,6 +7909,33 @@ _restore_tunnels() {  # каталог бэкапа
   for n in $(exits_nodes); do systemctl enable --now "awg-quick@awg-exit-$n" &>/dev/null || warn "Нода $n не поднялась"; done
   (( $(cascade_count) )) && { _cascade_persist; systemctl restart awg-cascade.service &>/dev/null; }
   ok "Настройки туннелей восстановлены; маршрутизация клиентов выключена"
+}
+
+# Правила каскада из бэкапа — с теми же проверками, что при добавлении:
+# публичный адрес цели, порты 1-65535, вход не занят AmneziaWG, обфускатором
+# или локальным сервисом. Не прошедшее — пропускается с причиной.
+_restore_cascade_rules() {  # файл правил из бэкапа
+  local p in dst out comment why seen=" " kept=()
+  # || [[ -n $p ]]: последняя строка без перевода строки (файл правили руками)
+  # иначе молча терялась
+  while IFS='|' read -r p in dst out comment || [[ -n "$p" ]]; do
+    [[ "$p" == udp || "$p" == tcp ]] || continue
+    out="${out//[$'\r']/}" comment="${comment//[$'\r']/}"
+    # Поля из чужого файла идут в warn (echo -e) — без управляющих символов и \\
+    in="${in//[$'\001'-$'\037'$'\177'\\]/?}" dst="${dst//[$'\001'-$'\037'$'\177'\\]/?}"
+    out="${out//[$'\001'-$'\037'$'\177'\\]/?}"
+    if why=$(_cascade_rule_invalid "$in" "$dst" "$out"); then
+      warn "Каскад из бэкапа: пропущено ${p^^} $in → $dst:$out — $why"; continue
+    fi
+    [[ "$seen" == *" $p|$in "* ]] && continue
+    if why=$(CASCADE_RULES=/dev/null _cascade_port_conflict "$p" "$in"); then
+      warn "Каскад из бэкапа: пропущено ${p^^} $in — $why"; continue
+    fi
+    seen+="$p|$in "
+    kept+=("$p|$in|$dst|$out|$comment")
+  done < "$1"
+  if (( ${#kept[@]} )); then printf '%s\n' "${kept[@]}" | write_file "$CASCADE_RULES" 600
+  else rm -f "$CASCADE_RULES"; fi
 }
 
 # Хуки конфига из бэкапа (PostUp и т. п.) выполняются от root при подъёме
@@ -12321,7 +12365,7 @@ if __name__ == "__main__":
 '
 # CPS_GENERATOR_END v2
 
-_PY_HELPER_SUM=d1ed9ac893e06acc
+_PY_HELPER_SUM=e559fec39e53dfa3
 IFS= read -r -d '' _PY_HELPER <<'__AWG2_PY_HELPER__' || true
 """Встроенный помощник awg2: разбор и атомарная правка конфигов, JSON Xray,
 расчёты подсетей, разбор pcap. Вызывается как `py <команда> [аргументы]`.
@@ -13596,6 +13640,71 @@ def cmd_xray_del(path, *tags):
     jsave(path, conf)
 
 
+XRAY_RESTORE_KEEP = ("outbounds", "routing", "observatory")
+
+
+def _shown(v, n=40):
+    """Имя из чужого файла — для вывода в терминал и бот: без управляющих
+    символов и обратной косой (warn печатает через echo -e)."""
+    return re.sub(r"[\x00-\x1f\x7f\\]", "?", str(v))[:n]
+
+
+def cmd_xray_restore_clean(path):
+    """Конфиг Xray из бэкапа (бэкап мог прийти чужой, Xray работает от root):
+    остаются выходы, маршрутизация и observatory — то, что пишет сама Тулза.
+    Входы пересоберёт xray-prepare (SOCKS только на 127.0.0.1); api, stats,
+    reverse, log и прочие разделы, правила чужих входов и правила на
+    несуществующие выходы — убираются. Правила своего входа tun с чужим тегом
+    переводятся на tun-in: входов в конфиге уже нет, и xray-prepare их бы не
+    узнал. Кривые записи (не объект, тег — не строка) — тоже убираются, а не
+    роняют разбор всего конфига. Печатает, что убрано."""
+    conf = jload(path)
+    if not isinstance(conf, dict):
+        die("не объект JSON")
+    is_tag = lambda v: isinstance(v, str) and v != ""          # noqa: E731
+    as_list = lambda v: v if isinstance(v, list) else []       # noqa: E731
+    outs = [o for o in as_list(conf.get("outbounds"))
+            if isinstance(o, dict) and (o.get("tag") is None or is_tag(o.get("tag")))]
+    tags = {o["tag"] for o in outs if is_tag(o.get("tag"))}
+    if not any(is_tag(o.get("tag")) and o.get("protocol") not in SKIP_PROTO for o in outs):
+        die("нет выходов")
+    inbounds = [i for i in as_list(conf.get("inbounds")) if isinstance(i, dict)]
+    tun_tags = {i["tag"] for i in inbounds if i.get("protocol") == "tun" and is_tag(i.get("tag"))}
+    known = KNOWN_IN | tun_tags
+    routing = conf.get("routing") if isinstance(conf.get("routing"), dict) else {}
+    balancers = [b for b in as_list(routing.get("balancers")) if isinstance(b, dict) and is_tag(b.get("tag"))]
+    btags = {b["tag"] for b in balancers}
+    rules, dropped_rules = [], 0
+    for r in as_list(routing.get("rules")):
+        inb = r.get("inboundTag") if isinstance(r, dict) else None
+        ot = r.get("outboundTag") if isinstance(r, dict) else None
+        bt = r.get("balancerTag") if isinstance(r, dict) else None
+        if (not isinstance(r, dict)
+                or (inb and not (isinstance(inb, list) and all(is_tag(t) for t in inb) and set(inb) & known))
+                or (ot and not (is_tag(ot) and ot in tags))
+                or (bt and not (is_tag(bt) and bt in btags))):
+            dropped_rules += 1
+            continue
+        if inb:
+            r["inboundTag"] = list(dict.fromkeys("tun-in" if t in tun_tags else t for t in inb))
+        rules.append(r)
+    clean = {"inbounds": [], "outbounds": outs,
+             "routing": {"domainStrategy": routing.get("domainStrategy") if is_tag(routing.get("domainStrategy"))
+                         else "AsIs", "rules": rules}}
+    if balancers:
+        clean["routing"]["balancers"] = balancers
+    if isinstance(conf.get("observatory"), dict):
+        clean["observatory"] = conf["observatory"]
+    foreign = [_shown(i.get("tag") or i.get("protocol") or "?") for i in inbounds
+               if not (is_tag(i.get("tag")) and i["tag"] in KNOWN_IN) and i.get("protocol") != "tun"]
+    gone = ["входы: " + ", ".join(foreign)] if foreign else []
+    gone += sorted(_shown(k) for k in conf if k not in XRAY_RESTORE_KEEP + ("inbounds",))
+    if dropped_rules:
+        gone.append("правил: %d" % dropped_rules)
+    jsave(path, clean)
+    print("; ".join(gone))
+
+
 def cmd_xray_tags(path):
     for t in proxy_tags(jload(path)):
         print(t)
@@ -14440,7 +14549,7 @@ COMMANDS = {
     "rand-key": cmd_rand_key, "phobos-link": cmd_phobos_link, "exit-conf-fix": cmd_exit_conf_fix,
     "conf-hooks": cmd_conf_hooks, "mod-compat-patch": cmd_mod_compat_patch,
     "xray-link": cmd_xray_link, "xray-default": cmd_xray_default, "xray-add": cmd_xray_add,
-    "xray-del": cmd_xray_del, "xray-tags": cmd_xray_tags, "xray-probe": cmd_xray_probe,
+    "xray-del": cmd_xray_del, "xray-tags": cmd_xray_tags, "xray-restore-clean": cmd_xray_restore_clean, "xray-probe": cmd_xray_probe,
     "xray-probe-tag": cmd_xray_probe_tag, "xray-tun-probe": cmd_xray_tun_probe,
     "xray-test-copy": cmd_xray_test_copy,
     "xray-balancer": cmd_xray_balancer, "xray-balancer-get": cmd_xray_balancer_get,
@@ -14471,5 +14580,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=032fe1aa00307f68
+_BUILD_SUM=59e806c7865710e5
 main "$@"
