@@ -844,6 +844,35 @@ chk("restore: конфиг клиента не из бэкапа убран, о�
     not os.path.exists(LATE) and os.path.exists(ALICE)
     and not any(c["name"] == "late" for c in api("clients", "list").get("data") or []), os.listdir(os.path.join(ROOT, "root")))
 
+# Бэкап с другого VPS: аплинк там назывался иначе (eth0 → ens3) — NAT в awg0.conf
+# переводится на аплинк этого сервера, иначе клиенты остались бы без интернета
+orig_conf = open(conf).read()
+_, pl, _ = bash("_postup_lines 10.23.45.0/24 eth0")
+eth0_conf = orig_conf.replace("PostUp = true\nPostDown = true\n", pl)
+open(conf, "w").write(eth0_conf)
+rc, out, _ = bash("conf_uplink")
+chk("NAT в awg0.conf — на аплинк, где создан сервер", eth0_conf != orig_conf and out.strip() == "eth0", out)
+rc, out, _ = bash('uplink_iface() { echo ens3; }; conf_uplink_sync >/dev/null; echo "rc=$?"; conf_uplink_sync; echo "rc2=$?"')
+post = [ln for ln in open(conf).read().splitlines() if ln.startswith(("PostUp", "PostDown"))]
+chk("аплинк сменился — PostUp и PostDown на новом, FORWARD awg0 не тронут, повтор ничего не меняет",
+    "rc=0" in out and "rc2=1" in out and len(post) == 2
+    and all("-o ens3 -j MASQUERADE" in ln and "-o eth0" not in ln for ln in post) and "-o awg0 -j ACCEPT" in post[0],
+    [out, post])
+BK_ETH0 = os.path.join(TMP, "bk_eth0")
+os.makedirs(BK_ETH0)
+with open(os.path.join(BK_ETH0, "awg0.conf"), "w") as f:
+    f.write(eth0_conf)
+rc, out, _ = bash("AUTO_MODE=1; uplink_iface() { echo ens3; }; " + f"backup_restore '{BK_ETH0}' 2>&1")
+now_conf = open(conf).read()
+chk("восстановление бэкапа с eth0 на сервер с ens3 — NAT сразу на ens3",
+    rc == 0 and "eth0 → ens3" in out and "-o ens3 -j MASQUERADE" in now_conf and "-o eth0 -j MASQUERADE" not in now_conf, out[-600:])
+rc, out, _ = bash("AUTO_MODE=1; do_repair 2>&1")
+now_conf = open(conf).read()
+chk("«Проверить и починить» возвращает NAT на настоящий аплинк навсегда — в awg0.conf",
+    "ens3, а выход сервера — eth0" in out and "NAT перенесён на eth0" in out
+    and "-o eth0 -j MASQUERADE" in now_conf and "-o ens3" not in now_conf, out[-800:])
+open(conf, "w").write(orig_conf)
+
 # Хуки awg-quick выполняются от root. Свои команды Тулзы (1.x и 0.8) проходят,
 # чужие и iptables --modprobe (запускает любую программу) — нет.
 HOOKS = os.path.join(TMP, "hooks.conf")
@@ -1215,9 +1244,10 @@ chk("версия копии читается с буквой сборки", out
 
 rc, out, _ = bash('server_exists() { return 1; }; cascade_count() { echo 0; }; wgobf_installed() { return 1; }; '
                   'MOD_SRC_DIR=/nonexistent; echo v1.2.0 > "$STATE_DIR/version"; helpers_refresh; cat "$STATE_DIR/version"; '
-                  'echo "--$_BUILD_SUM"')
-mark, _, bsum = out.strip().partition("\n--")
+                  'echo "--$_BUILD_SUM--$VERSION_SHOW"')
+mark, _, rest = out.strip().partition("\n--")
+bsum, _, ver = rest.partition("--")
 chk("служебные скрипты пересобираются и для новой сборки той же версии",
-    len(bsum) == 16 and mark == f"v1.2.0 {bsum}", out)
+    len(bsum) == 16 and ver.startswith("v1.") and mark == f"{ver} {bsum}", out)
 
 summary()

@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.2.0"
+VERSION="v1.2.1"
 # Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
 # в сравнении версий не участвует. У выпущенной сборки пусто.
 BUILD=""
@@ -2423,6 +2423,27 @@ write_client_conf() {
   } | write_file "$f" 600
 }
 
+# Внешний интерфейс в правиле NAT awg0.conf — аплинк, на котором создан сервер.
+conf_uplink() {
+  [[ -f "$SERVER_CONF" ]] || return 1
+  sed -nE 's/^PostUp *=.*POSTROUTING -s [^ ]+ -o ([^ ]+) -j MASQUERADE.*/\1/p' "$SERVER_CONF" | head -1 | grep .
+}
+
+# Сервер восстановлен на другом VPS (или интерфейс переименован): у аплинка
+# другое имя (ens3 вместо eth0) — клиенты подключаются, но без NAT остаются
+# без интернета. Правило NAT в PostUp/PostDown переводится на аплинк этого
+# сервера. 0 — awg0.conf поправлен (нужен перезапуск awg0).
+conf_uplink_sync() {
+  local old dev
+  old=$(conf_uplink) || return 1
+  dev=$(uplink_iface) || return 1
+  [[ "$old" != "$dev" ]] || return 1
+  sed -i -E "/^Post(Up|Down) *=/ s#(POSTROUTING -s [^ ]+ -o )${old//./\\.}( -j MASQUERADE)#\1$dev\2#g" "$SERVER_CONF" || return 1
+  [[ "$(conf_uplink)" == "$dev" ]] || return 1
+  info "Внешний интерфейс сервера: $old → $dev (NAT в $SERVER_CONF)"
+  log_info "NAT awg0: $old → $dev"
+}
+
 # Создаёт awg0.conf и первого клиента из S_* и выбранной мимикрии.
 server_write() {
   local net="$S_NET" base srv_priv cli_priv psk dev
@@ -2789,7 +2810,7 @@ _issue() { REPAIR_ISSUES=$((REPAIR_ISSUES + 1)); warn "$1"; }
 _fixed() { REPAIR_FIXED=$((REPAIR_FIXED + 1)); ok "$1"; }
 
 do_repair() {
-  local bad conf_n live_n dev net perm rc
+  local bad conf_n live_n dev net perm rc old
   REPAIR_ISSUES=0 REPAIR_FIXED=0
   echo ""
   hdr "Проверка и ремонт"
@@ -2840,6 +2861,11 @@ do_repair() {
     else ok "awg0 работает, пиров: $live_n"; fi
   fi
   dev=$(uplink_iface || true); net=$(server_net || true)
+  old=$(conf_uplink || true)
+  if [[ -n "$dev" && -n "$old" && "$old" != "$dev" ]]; then
+    _issue "NAT в awg0.conf — на $old, а выход сервера — $dev"
+    conf_uplink_sync && server_restart && _fixed "NAT перенесён на $dev"
+  fi
   if [[ -n "$dev" && -n "$net" ]]; then
     if iptables -t nat -C POSTROUTING -s "$net" -o "$dev" -j MASQUERADE 2>/dev/null; then ok "NAT на $dev"
     else _issue "Нет NAT для $net на $dev"; ipt_add -t nat POSTROUTING -s "$net" -o "$dev" -j MASQUERADE && _fixed "NAT добавлен"; fi
@@ -7830,6 +7856,8 @@ backup_restore() {
   [[ -f "$SERVER_CONF" ]] && cp -a "$SERVER_CONF" "$SERVER_CONF.pre_restore.$(date +%s)"
   _restore_awg_files "$src"
   _restore_hooks "$SERVER_CONF" || return 1
+  # Бэкап с другого VPS: NAT — на аплинк этого сервера
+  conf_uplink_sync || true
   client_files_sync_suffix
   ok "Сервер и клиенты: $(client_files | wc -l) кл."
   _restore_warp "$src"
@@ -14058,5 +14086,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=4a88cf23a0b68b24
+_BUILD_SUM=959d1ebfdfff8521
 main "$@"

@@ -236,6 +236,27 @@ write_client_conf() {
   } | write_file "$f" 600
 }
 
+# Внешний интерфейс в правиле NAT awg0.conf — аплинк, на котором создан сервер.
+conf_uplink() {
+  [[ -f "$SERVER_CONF" ]] || return 1
+  sed -nE 's/^PostUp *=.*POSTROUTING -s [^ ]+ -o ([^ ]+) -j MASQUERADE.*/\1/p' "$SERVER_CONF" | head -1 | grep .
+}
+
+# Сервер восстановлен на другом VPS (или интерфейс переименован): у аплинка
+# другое имя (ens3 вместо eth0) — клиенты подключаются, но без NAT остаются
+# без интернета. Правило NAT в PostUp/PostDown переводится на аплинк этого
+# сервера. 0 — awg0.conf поправлен (нужен перезапуск awg0).
+conf_uplink_sync() {
+  local old dev
+  old=$(conf_uplink) || return 1
+  dev=$(uplink_iface) || return 1
+  [[ "$old" != "$dev" ]] || return 1
+  sed -i -E "/^Post(Up|Down) *=/ s#(POSTROUTING -s [^ ]+ -o )${old//./\\.}( -j MASQUERADE)#\1$dev\2#g" "$SERVER_CONF" || return 1
+  [[ "$(conf_uplink)" == "$dev" ]] || return 1
+  info "Внешний интерфейс сервера: $old → $dev (NAT в $SERVER_CONF)"
+  log_info "NAT awg0: $old → $dev"
+}
+
 # Создаёт awg0.conf и первого клиента из S_* и выбранной мимикрии.
 server_write() {
   local net="$S_NET" base srv_priv cli_priv psk dev
@@ -602,7 +623,7 @@ _issue() { REPAIR_ISSUES=$((REPAIR_ISSUES + 1)); warn "$1"; }
 _fixed() { REPAIR_FIXED=$((REPAIR_FIXED + 1)); ok "$1"; }
 
 do_repair() {
-  local bad conf_n live_n dev net perm rc
+  local bad conf_n live_n dev net perm rc old
   REPAIR_ISSUES=0 REPAIR_FIXED=0
   echo ""
   hdr "Проверка и ремонт"
@@ -653,6 +674,11 @@ do_repair() {
     else ok "awg0 работает, пиров: $live_n"; fi
   fi
   dev=$(uplink_iface || true); net=$(server_net || true)
+  old=$(conf_uplink || true)
+  if [[ -n "$dev" && -n "$old" && "$old" != "$dev" ]]; then
+    _issue "NAT в awg0.conf — на $old, а выход сервера — $dev"
+    conf_uplink_sync && server_restart && _fixed "NAT перенесён на $dev"
+  fi
   if [[ -n "$dev" && -n "$net" ]]; then
     if iptables -t nat -C POSTROUTING -s "$net" -o "$dev" -j MASQUERADE 2>/dev/null; then ok "NAT на $dev"
     else _issue "Нет NAT для $net на $dev"; ipt_add -t nat POSTROUTING -s "$net" -o "$dev" -j MASQUERADE && _fixed "NAT добавлен"; fi
