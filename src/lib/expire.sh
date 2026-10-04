@@ -8,6 +8,9 @@
 # бота: таймер работает и тогда, когда сам бот остановлен.
 _expire_notify() {
   local token="" proxy="" id ids=() via=()
+  # Проход таймера под замком API: сообщения — после замка (curl до 8 с на
+  # каждого админа держал бы замок, и правки из бота и панели получали отказ)
+  if [[ -n "${EXPIRE_DEFER:-}" ]]; then EXPIRE_QUEUE+=("$1"); return 0; fi
   [[ -f "$BOT_CONF" ]] || return 0
   { read -r token; read -r proxy; mapfile -t ids; } < <(py tg-targets "$BOT_CONF" "$BOT_ADMINS" 2>/dev/null)
   [[ -n "$token" ]] && (( ${#ids[@]} )) || return 0
@@ -38,13 +41,25 @@ _expire_sync() {
 
 # Трафик клиентов: прирост счётчиков — в базу по дням, превысившие лимит
 # блокируются, в новом месяце (или после смены лимита) — разблокируются.
-traffic_tick() {  # [1 — записать базу сейчас]
-  local out ev name arg text tr="$EXPIRE_STATE_DIR/transfer" ifx=""
-  [[ -f "$SERVER_CONF" ]] || return 0
+# Снимок счётчиков — свой файл на каждый вызов: таймер и команда из меню
+# или API, писавшие в один файл, читали бы недописанные строки друг друга.
+_traffic_snapshot() {  # → путь к снимку в stdout
+  local tr
   mkdir -p "$EXPIRE_STATE_DIR"
+  tr=$(mktemp "$EXPIRE_STATE_DIR/transfer.XXXXXX") || return 1
   awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || : > "$tr"
+  printf '%s\n' "$tr"
+}
+
+traffic_tick() {  # [1 — записать базу сейчас]
+  local out ev name arg text tr ifx=""
+  [[ -f "$SERVER_CONF" ]] || return 0
+  tr=$(_traffic_snapshot) || return 0
   ifx=$(cat "/sys/class/net/$AWG_IF/ifindex" 2>/dev/null || true)
-  out=$(py traffic-tick "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$TRAFFIC_DB" "$tr" "$ifx" "${1:-0}" 2>>"$EXPIRE_LOG") || return 0
+  out=$(py traffic-tick "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$TRAFFIC_DB" "$tr" "$ifx" "${1:-0}" 2>>"$EXPIRE_LOG") || out=""
+  # Прочитанный снимок — на место $EXPIRE_STATE_DIR/transfer одним rename:
+  # по его времени expire_watchdog видит, что таймер жив
+  mv -f "$tr" "$EXPIRE_STATE_DIR/transfer" 2>/dev/null || rm -f "$tr"
   while IFS=$'\t' read -r ev name arg text; do
     case "$ev" in
       CHANGED) _expire_sync ;;
@@ -63,10 +78,27 @@ traffic_tick() {  # [1 — записать базу сейчас]
   return 0
 }
 
-# Точка входа таймера (awg2-expire-check).
+# Точка входа таймера (awg2-expire-check). Конфиг сервера правят и вызовы
+# API (бот, панель) — под их замком; занят дольше 10 с — проход пропускается,
+# следующий через 15 с. Таймер при этом жив — сторожу это видно по времени
+# снимка. Долгая задача API (сборка модуля, установка) держит замок минутами:
+# сроки и лимиты ждут её не дольше EXPIRE_LOCK_MAX, дальше проход идёт без замка.
+EXPIRE_LOCK_MAX=120
 expire_check_run() {
-  local out ev name arg
+  local out ev name arg busy="$EXPIRE_STATE_DIR/lock_busy"
+  local EXPIRE_DEFER=1 EXPIRE_QUEUE=()
   [[ -f "$SERVER_CONF" ]] || return 0
+  mkdir -p "$STATE_DIR" "$EXPIRE_STATE_DIR"
+  exec 9>>"$STATE_DIR/api.lock" || return 0
+  if flock -w "${EXPIRE_LOCK_WAIT:-10}" 9; then
+    rm -f "$busy"
+  else
+    [[ -f "$busy" ]] || : > "$busy"
+    if (( $(date +%s) - $(stat -c %Y "$busy" 2>/dev/null || date +%s) < ${EXPIRE_LOCK_MAX:-120} )); then
+      [[ -f "$EXPIRE_STATE_DIR/transfer" ]] && touch "$EXPIRE_STATE_DIR/transfer"
+      return 0
+    fi
+  fi
   out=$(py expire-check "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$EXPIRE_STATE_DIR" 2>>"$EXPIRE_LOG") || out=""
   while IFS=$'\t' read -r ev name arg; do
     case "$ev" in
@@ -81,14 +113,26 @@ expire_check_run() {
     esac
   done <<< "$out"
   traffic_tick
+  exec 9>&-
+  EXPIRE_DEFER=""
+  # Telegram недоступен: curl по 8 с на каждого админа — бюджет 60 с, чтобы
+  # проход не затягивался; не ушедшее — в журнале
+  local i t0=$SECONDS
+  for (( i = 0; i < ${#EXPIRE_QUEUE[@]}; i++ )); do
+    if (( SECONDS - t0 >= ${EXPIRE_NOTIFY_BUDGET:-60} )); then
+      echo "$(date '+%F %T') уведомления: не отправлено $(( ${#EXPIRE_QUEUE[@]} - i )) — Telegram не отвечает" >> "$EXPIRE_LOG"
+      break
+    fi
+    _expire_notify "${EXPIRE_QUEUE[$i]}"
+  done
   return 0
 }
 
 expire_install() {
   mkdir -p "$EXPIRE_STATE_DIR"
   emit_script "$EXPIRE_BIN" 'expire_check_run' \
-    SERVER_CONF AWG_IF EXPIRE_SUSPEND_IP EXPIRE_STATE_DIR EXPIRE_LOG BOT_CONF BOT_ADMINS TRAFFIC_DB _PY_HELPER \
-    py _expire_notify _expire_esc _expire_sync traffic_tick expire_check_run || return 1
+    SERVER_CONF AWG_IF EXPIRE_SUSPEND_IP EXPIRE_STATE_DIR EXPIRE_LOG BOT_CONF BOT_ADMINS TRAFFIC_DB _PY_HELPER STATE_DIR EXPIRE_LOCK_MAX \
+    py _expire_notify _expire_esc _expire_sync _traffic_snapshot traffic_tick expire_check_run || return 1
   write_unit awg2-expire.service <<EOF
 [Unit]
 Description=AWG Toolza — сроки и трафик клиентов
@@ -229,7 +273,7 @@ do_expire_menu() {
     echo -e "  ${C}4)${N} Снять лимит трафика"
     echo -e "  ${C}5)${N} Обнулить счётчик лимита"
     echo -e "  ${C}6)${N} Трафик по дням"
-    echo -e "  ${R}7)${N} Удалить заблокированных"
+    echo -e "  ${R}7)${N} Удалить с истёкшим сроком"
     echo -e "  ${W}0)${N} ← Назад"
     read_choice c "${C}  Выбор [0-7]: ${N}" 0 7 0
     case "$c" in
@@ -250,8 +294,8 @@ do_expire_menu() {
       5) _pick_client || continue
          client_limit_reset "${CHOSEN%%$'\t'*}" || true ;;
       6) do_traffic_days || true; pause ;;
-      7) mapfile -t rows < <(clients_tsv | awk -F'\t' '$5 != "" {print $1}')
-         (( ${#rows[@]} )) || { info "Заблокированных нет"; continue; }
+      7) mapfile -t rows < <(clients_tsv | awk -F'\t' '$5 != "" && $8 != "traffic" {print $1}')
+         (( ${#rows[@]} )) || { info "Клиентов с истёкшим сроком нет"; continue; }
          warn "Будут удалены навсегда: ${rows[*]}"
          read_confirm "${R}  Подтверди (введи yes): ${N}" && clients_purge_blocked ;;
       0) return 0 ;;

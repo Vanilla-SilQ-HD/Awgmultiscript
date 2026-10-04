@@ -374,7 +374,10 @@ _api_traffic() {
   local tr name="" days=30
   case "${1:-}" in
     daily)
-      [[ "${2:-}" =~ ^[0-9]+$ ]] && days="$2" || { name="${2:-}"; [[ "${3:-}" =~ ^[0-9]+$ ]] && days="$3"; }
+      # Два аргумента — всегда «ИМЯ|all ДНЕЙ»: имя клиента может быть числом
+      if (( $# >= 3 )); then name="$2"; [[ "$3" =~ ^[0-9]+$ ]] && days="$3"
+      elif [[ "${2:-}" =~ ^[0-9]+$ ]]; then days="$2"
+      else name="${2:-}"; fi
       [[ "$name" == all ]] && name=""
       server_exists || { err "Сервер не создан"; return 1; }
       mktmp tr || return 1

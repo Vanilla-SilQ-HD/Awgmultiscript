@@ -686,7 +686,8 @@ r = api("client", "limit", "alice", "5G", "week")
 chk("лимит: неизвестный период", r.get("ok") is False, r)
 r = api("client", "limit-reset", "bob")
 chk("обнулить без лимита — ошибка", r.get("ok") is False, r)
-# Истёк и срок: блок переходит к сроку, снятие лимита его не снимает
+# Истёк и срок: пока лимит исчерпан, блок держит он; отпустил лимит — блок
+# переходит к сроку, и снимается уже сроком
 api("client", "limit", "alice", "1K")
 dump_with({"alice": (100 + 2**20 + 4096, 100), "bob": (10, 10)})
 tick()
@@ -694,11 +695,94 @@ chk("превысил лимит по ходу — блок таймером", c
 bash('py meta-set "$SERVER_CONF" alice expires 1')
 tick()
 a = cl("alice")
-chk("истёк срок у заблокированного за трафик — блок держит срок", a.get("blocked") and a.get("blocked_by") == "expire", a)
+chk("истёк срок у заблокированного за трафик — блок держит лимит", a.get("blocked") and a.get("blocked_by") == "traffic", a)
+r = api("client", "unexpire", "alice")
+a = cl("alice")
+chk("снять срок не снимает блок за трафик", r.get("ok") and a.get("blocked") and a.get("blocked_by") == "traffic"
+    and a.get("expires") is None and "лимит трафика" in r.get("log", ""), [r, a])
+rc, out, _ = bash('client_expire_set alice $(( $(date +%s) + 86400 )) >/dev/null; clients_tsv | grep "^alice"')
+chk("новый срок после истёкшего блок за трафик не снимает", "\t127.0.0.2/32\t" in out, repr(out))
+bash('py meta-set "$SERVER_CONF" alice expires 1')
+# «Истёкшие» удаляют только заблокированных сроком
+api("client", "add", "erin", "mimicry=none")
+bash('py meta-set "$SERVER_CONF" erin expires 1; py expire-check "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$EXPIRE_STATE_DIR" >/dev/null')
+# bob (истёк в начале раздела) нужен дальше — снимаем с него срок, чтобы purge его не тронул
+bash('py expire-clear "$SERVER_CONF" bob "$EXPIRE_SUSPEND_IP" >/dev/null')
+r = api("clients", "purge-blocked")
+names = [c["name"] for c in api("clients", "list").get("data") or []]
+chk("purge-blocked: истёкший удалён, заблокированный за трафик остался", r.get("ok") and "erin" not in names
+    and "alice" in names, [r, names])
 api("client", "limit", "alice", "off")
-chk("снятие лимита не снимает блок за срок", cl("alice").get("blocked") and cl("alice").get("limit") is None, cl("alice"))
+a = cl("alice")
+chk("снятие лимита у истёкшего — блок переходит к сроку", a.get("blocked") and a.get("blocked_by") == "expire"
+    and a.get("limit") is None, a)
 api("client", "unexpire", "alice")
 chk("снять срок — разблокировка", not cl("alice").get("blocked"), cl("alice"))
+# Лимит по новой базе (база потеряна): трафик до этой минуты в лимит не идёт
+bash('rm -f "$TRAFFIC_DB"')
+dump_with({"alice": (50 * 2**20, 50 * 2**20)})
+r = api("client", "limit", "alice", "10M")
+a = cl("alice")
+chk("лимит по новой базе: накопленное до учёта не считается", r.get("ok") and not a.get("blocked")
+    and a.get("used") == 0, [r, a])
+dump_with({"alice": (50 * 2**20 + 1000, 50 * 2**20)})
+tick()
+chk("лимит по новой базе: дальше — только прирост", cl("alice").get("used") == 1000, cl("alice"))
+api("client", "limit", "alice", "off")
+# Пустой снимок (awg0 лежит) не снимает «первый проход»
+bash('rm -f "$TRAFFIC_DB"')
+dump_with({})
+tick()
+dump_with({"alice": (7 * 2**20, 7 * 2**20)})
+tick()
+chk("пустой снимок: накопленное до учёта не идёт в сегодня", cl("alice").get("today") == 0, cl("alice"))
+rc, out, _ = bash('ls "$EXPIRE_STATE_DIR" | grep "^transfer"')
+chk("снимки счётчиков не остаются — только последний, для сторожа таймера", out.split() == ["transfer"], out)
+# Размер лимита: «500B» — не 500 ГБ; переполнение и не-ASCII цифры — ошибка
+rc, out, _ = bash('for v in 500B 500iB 2000000T 9999999T "١٢G" 0.0001K; do py size-parse "$v" >/dev/null 2>&1 && echo "$v"; done; '
+                  'for v in 500MB 1.5T 50 2GiB 1024T; do py size-parse "$v" >/dev/null 2>&1 || echo "!$v"; done')
+chk("размер лимита: B без единицы, > 1 ПБ, не-ASCII — отказ", out.strip() == "", repr(out))
+# traffic daily: имя клиента из цифр — это имя, а не число дней
+api("client", "add", "2024", "mimicry=none")
+r = api("traffic", "daily", "2024", "7")
+chk("api traffic daily ИМЯ-ЧИСЛО ДНЕЙ", r.get("ok") and r["data"]["name"] == "2024" and len(r["data"]["days"]) == 7
+    and "clients" not in r["data"], r)
+r = api("traffic", "daily", "all", "7")
+chk("api traffic daily all ДНЕЙ — сервер", r.get("ok") and r["data"]["name"] == "" and len(r["data"]["days"]) == 7, r)
+r = api("traffic", "daily", "14")
+chk("api traffic daily ДНЕЙ — сервер", r.get("ok") and r["data"]["name"] == "" and len(r["data"]["days"]) == 14, r)
+api("client", "del", "2024")
+# Таймер ждёт замок API: конфиг не правится одновременно с вызовом из бота
+api("client", "add", "frank", "mimicry=none")
+rc, out, _ = bash('mkdir -p "$STATE_DIR"; exec 7>>"$STATE_DIR/api.lock"; flock 7; '
+                  'py meta-set "$SERVER_CONF" frank expires 1; touch -d "-10 min" "$EXPIRE_STATE_DIR/transfer"; '
+                  '( exec 7>&-; EXPIRE_LOCK_WAIT=1 expire_check_run ); clients_tsv | grep "^frank"; '
+                  'echo "age=$(( $(date +%s) - $(stat -c %Y "$EXPIRE_STATE_DIR/transfer") ))"')
+chk("таймер: замок API занят — проход пропущен, но сторож видит, что таймер жив",
+    "\t127.0.0.2/32\t" not in out and int(re.search(r"age=(-?\d+)", out).group(1)) < 60, repr(out))
+# Долгая задача API: замок занят дольше EXPIRE_LOCK_MAX — проход идёт без него
+rc, out, _ = bash('exec 7>>"$STATE_DIR/api.lock"; flock 7; touch -d "-5 min" "$EXPIRE_STATE_DIR/lock_busy"; '
+                  '( exec 7>&-; EXPIRE_LOCK_WAIT=1 expire_check_run ); clients_tsv | grep "^frank"; '
+                  '[[ -f "$EXPIRE_STATE_DIR/lock_busy" ]] && echo BUSY-MARK')
+chk("таймер: замок занят дольше 2 минут — сроки не ждут, проход идёт", "\t127.0.0.2/32\t" in out, repr(out))
+bash('py expire-clear "$SERVER_CONF" frank "$EXPIRE_SUSPEND_IP" >/dev/null; rm -f "$EXPIRE_STATE_DIR/lock_busy"; '
+     'py meta-set "$SERVER_CONF" frank expires 1')
+# Сообщения в Telegram — после замка: иначе медленный Telegram держал бы замок API
+with open(os.path.join(ROOT, "bot.conf"), "w") as f:
+    f.write('BOT_TOKEN="1:AA"\nADMIN_ID=11, 22\n')
+SENT = os.path.join(TMP, "notify-lock")
+rc, out, _ = bash(f'curl() {{ cat >/dev/null; flock -n "$STATE_DIR/api.lock" true && echo FREE >> "{SENT}" || echo HELD >> "{SENT}"; }}; '
+                  'expire_check_run; clients_tsv | grep "^frank"')
+sent = open(SENT).read().split() if os.path.exists(SENT) else []
+# Telegram не отвечает: рассылка не дольше бюджета, остаток — в журнале
+bash('py expire-clear "$SERVER_CONF" frank "$EXPIRE_SUSPEND_IP" >/dev/null; py meta-set "$SERVER_CONF" frank expires 1')
+rc, out2, _ = bash(f'curl() {{ cat >/dev/null; echo X >> "{SENT}.2"; }}; EXPIRE_NOTIFY_BUDGET=0 expire_check_run; tail -1 "$EXPIRE_LOG"')
+os.remove(os.path.join(ROOT, "bot.conf"))
+chk("уведомления: бюджет времени исчерпан — дальше не шлём, в журнале сколько не ушло",
+    not os.path.exists(SENT + ".2") and "не отправлено 1" in out2, out2)
+chk("таймер: замок свободен — проход идёт; сообщения админам — уже без замка API",
+    "\t127.0.0.2/32\t" in out and sent and set(sent) == {"FREE"}, [repr(out), sent])
+api("client", "del", "frank")
 rc, out, _ = bash("traffic_tick; cat $EXPIRE_LOG | tail -3")
 # Блок за трафик делает скрипт таймера на диске, а не awg2: тот же сценарий через него
 api("client", "limit", "alice", "1M", "total")

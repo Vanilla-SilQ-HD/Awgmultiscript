@@ -3362,28 +3362,38 @@ client_expire_set() {  # имя unix-время
 
 # Снять срок; заблокированный клиент получает прежний адрес.
 client_expire_clear() {
+  local r
   client_exists "$1" || { err "Клиента $1 нет"; return 1; }
-  py expire-clear "$SERVER_CONF" "$1" "$EXPIRE_SUSPEND_IP" >/dev/null || return 1
+  r=$(py expire-clear "$SERVER_CONF" "$1" "$EXPIRE_SUSPEND_IP") || return 1
   _expire_apply
   ok "$1 — бессрочный"
+  [[ "$r" == traffic ]] && warn "$1 остаётся заблокирован: исчерпан лимит трафика"
+  return 0
 }
 
 # Лимит трафика: РАЗМЕР (50G, 500M) за месяц или всего; off — снять.
 # Применяется сразу: превысивший блокируется, уложившийся — разблокируется.
 client_limit_set() {  # имя размер|off [month|total]
-  local name="$1" size="$2" period="${3:-month}" v
+  local name="$1" size="$2" period="${3:-month}" v tr
   client_exists "$name" || { err "Клиента $name нет"; return 1; }
   [[ "$period" == month || "$period" == total ]] || { err "Период: month или total"; return 1; }
   expire_install
-  v=$(py limit-set "$SERVER_CONF" "$TRAFFIC_DB" "$name" "$size" "$period") || return 1
+  tr=$(_traffic_snapshot) || return 1
+  v=$(py limit-set "$SERVER_CONF" "$TRAFFIC_DB" "$name" "$size" "$period" "$tr" \
+      "$(cat "/sys/class/net/$AWG_IF/ifindex" 2>/dev/null)") || { rm -f "$tr"; return 1; }
+  rm -f "$tr"
   traffic_tick 1
   if [[ "$size" == off ]]; then ok "$name — без лимита трафика"
   else ok "Лимит $name: $v $([[ "$period" == month ]] && echo "в месяц" || echo "всего")"; fi
 }
 
 client_limit_reset() {  # имя
+  local tr
   client_exists "$1" || { err "Клиента $1 нет"; return 1; }
-  py limit-reset "$SERVER_CONF" "$TRAFFIC_DB" "$1" || return 1
+  tr=$(_traffic_snapshot) || return 1
+  py limit-reset "$SERVER_CONF" "$TRAFFIC_DB" "$1" "$tr" "$(cat "/sys/class/net/$AWG_IF/ifindex" 2>/dev/null)" \
+    || { rm -f "$tr"; return 1; }
+  rm -f "$tr"
   traffic_tick 1
   ok "Счётчик лимита $1 обнулён"
 }
@@ -3394,11 +3404,13 @@ limit_fmt() {  # метка limit (БАЙТ/период) использован
   echo "$(fmt_bytes "${2:-0}") из $(fmt_bytes "$n") $([[ "$p" == month ]] && echo "за месяц" || echo "всего")"
 }
 
+# Удалить клиентов с истёкшим сроком. Заблокированных за трафик не трогает:
+# они разблокируются сами в новом месяце или после смены лимита.
 clients_purge_blocked() {
   local pub n=0
   while IFS= read -r pub; do client_delete "$pub" && n=$((n + 1)); done \
-    < <(clients_tsv | awk -F'\t' '$5 != "" {print $2}')
-  ok "Удалено заблокированных: $n"
+    < <(clients_tsv | awk -F'\t' '$5 != "" && $8 != "traffic" {print $2}')
+  ok "Удалено с истёкшим сроком: $n"
 }
 
 # Архив всех конфигов → путь в EXPORT_PATH.
@@ -3717,6 +3729,9 @@ do_clients_menu() {
 # бота: таймер работает и тогда, когда сам бот остановлен.
 _expire_notify() {
   local token="" proxy="" id ids=() via=()
+  # Проход таймера под замком API: сообщения — после замка (curl до 8 с на
+  # каждого админа держал бы замок, и правки из бота и панели получали отказ)
+  if [[ -n "${EXPIRE_DEFER:-}" ]]; then EXPIRE_QUEUE+=("$1"); return 0; fi
   [[ -f "$BOT_CONF" ]] || return 0
   { read -r token; read -r proxy; mapfile -t ids; } < <(py tg-targets "$BOT_CONF" "$BOT_ADMINS" 2>/dev/null)
   [[ -n "$token" ]] && (( ${#ids[@]} )) || return 0
@@ -3747,13 +3762,25 @@ _expire_sync() {
 
 # Трафик клиентов: прирост счётчиков — в базу по дням, превысившие лимит
 # блокируются, в новом месяце (или после смены лимита) — разблокируются.
-traffic_tick() {  # [1 — записать базу сейчас]
-  local out ev name arg text tr="$EXPIRE_STATE_DIR/transfer" ifx=""
-  [[ -f "$SERVER_CONF" ]] || return 0
+# Снимок счётчиков — свой файл на каждый вызов: таймер и команда из меню
+# или API, писавшие в один файл, читали бы недописанные строки друг друга.
+_traffic_snapshot() {  # → путь к снимку в stdout
+  local tr
   mkdir -p "$EXPIRE_STATE_DIR"
+  tr=$(mktemp "$EXPIRE_STATE_DIR/transfer.XXXXXX") || return 1
   awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || : > "$tr"
+  printf '%s\n' "$tr"
+}
+
+traffic_tick() {  # [1 — записать базу сейчас]
+  local out ev name arg text tr ifx=""
+  [[ -f "$SERVER_CONF" ]] || return 0
+  tr=$(_traffic_snapshot) || return 0
   ifx=$(cat "/sys/class/net/$AWG_IF/ifindex" 2>/dev/null || true)
-  out=$(py traffic-tick "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$TRAFFIC_DB" "$tr" "$ifx" "${1:-0}" 2>>"$EXPIRE_LOG") || return 0
+  out=$(py traffic-tick "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$TRAFFIC_DB" "$tr" "$ifx" "${1:-0}" 2>>"$EXPIRE_LOG") || out=""
+  # Прочитанный снимок — на место $EXPIRE_STATE_DIR/transfer одним rename:
+  # по его времени expire_watchdog видит, что таймер жив
+  mv -f "$tr" "$EXPIRE_STATE_DIR/transfer" 2>/dev/null || rm -f "$tr"
   while IFS=$'\t' read -r ev name arg text; do
     case "$ev" in
       CHANGED) _expire_sync ;;
@@ -3772,10 +3799,27 @@ traffic_tick() {  # [1 — записать базу сейчас]
   return 0
 }
 
-# Точка входа таймера (awg2-expire-check).
+# Точка входа таймера (awg2-expire-check). Конфиг сервера правят и вызовы
+# API (бот, панель) — под их замком; занят дольше 10 с — проход пропускается,
+# следующий через 15 с. Таймер при этом жив — сторожу это видно по времени
+# снимка. Долгая задача API (сборка модуля, установка) держит замок минутами:
+# сроки и лимиты ждут её не дольше EXPIRE_LOCK_MAX, дальше проход идёт без замка.
+EXPIRE_LOCK_MAX=120
 expire_check_run() {
-  local out ev name arg
+  local out ev name arg busy="$EXPIRE_STATE_DIR/lock_busy"
+  local EXPIRE_DEFER=1 EXPIRE_QUEUE=()
   [[ -f "$SERVER_CONF" ]] || return 0
+  mkdir -p "$STATE_DIR" "$EXPIRE_STATE_DIR"
+  exec 9>>"$STATE_DIR/api.lock" || return 0
+  if flock -w "${EXPIRE_LOCK_WAIT:-10}" 9; then
+    rm -f "$busy"
+  else
+    [[ -f "$busy" ]] || : > "$busy"
+    if (( $(date +%s) - $(stat -c %Y "$busy" 2>/dev/null || date +%s) < ${EXPIRE_LOCK_MAX:-120} )); then
+      [[ -f "$EXPIRE_STATE_DIR/transfer" ]] && touch "$EXPIRE_STATE_DIR/transfer"
+      return 0
+    fi
+  fi
   out=$(py expire-check "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$EXPIRE_STATE_DIR" 2>>"$EXPIRE_LOG") || out=""
   while IFS=$'\t' read -r ev name arg; do
     case "$ev" in
@@ -3790,14 +3834,26 @@ expire_check_run() {
     esac
   done <<< "$out"
   traffic_tick
+  exec 9>&-
+  EXPIRE_DEFER=""
+  # Telegram недоступен: curl по 8 с на каждого админа — бюджет 60 с, чтобы
+  # проход не затягивался; не ушедшее — в журнале
+  local i t0=$SECONDS
+  for (( i = 0; i < ${#EXPIRE_QUEUE[@]}; i++ )); do
+    if (( SECONDS - t0 >= ${EXPIRE_NOTIFY_BUDGET:-60} )); then
+      echo "$(date '+%F %T') уведомления: не отправлено $(( ${#EXPIRE_QUEUE[@]} - i )) — Telegram не отвечает" >> "$EXPIRE_LOG"
+      break
+    fi
+    _expire_notify "${EXPIRE_QUEUE[$i]}"
+  done
   return 0
 }
 
 expire_install() {
   mkdir -p "$EXPIRE_STATE_DIR"
   emit_script "$EXPIRE_BIN" 'expire_check_run' \
-    SERVER_CONF AWG_IF EXPIRE_SUSPEND_IP EXPIRE_STATE_DIR EXPIRE_LOG BOT_CONF BOT_ADMINS TRAFFIC_DB _PY_HELPER \
-    py _expire_notify _expire_esc _expire_sync traffic_tick expire_check_run || return 1
+    SERVER_CONF AWG_IF EXPIRE_SUSPEND_IP EXPIRE_STATE_DIR EXPIRE_LOG BOT_CONF BOT_ADMINS TRAFFIC_DB _PY_HELPER STATE_DIR EXPIRE_LOCK_MAX \
+    py _expire_notify _expire_esc _expire_sync _traffic_snapshot traffic_tick expire_check_run || return 1
   write_unit awg2-expire.service <<EOF
 [Unit]
 Description=AWG Toolza — сроки и трафик клиентов
@@ -3938,7 +3994,7 @@ do_expire_menu() {
     echo -e "  ${C}4)${N} Снять лимит трафика"
     echo -e "  ${C}5)${N} Обнулить счётчик лимита"
     echo -e "  ${C}6)${N} Трафик по дням"
-    echo -e "  ${R}7)${N} Удалить заблокированных"
+    echo -e "  ${R}7)${N} Удалить с истёкшим сроком"
     echo -e "  ${W}0)${N} ← Назад"
     read_choice c "${C}  Выбор [0-7]: ${N}" 0 7 0
     case "$c" in
@@ -3959,8 +4015,8 @@ do_expire_menu() {
       5) _pick_client || continue
          client_limit_reset "${CHOSEN%%$'\t'*}" || true ;;
       6) do_traffic_days || true; pause ;;
-      7) mapfile -t rows < <(clients_tsv | awk -F'\t' '$5 != "" {print $1}')
-         (( ${#rows[@]} )) || { info "Заблокированных нет"; continue; }
+      7) mapfile -t rows < <(clients_tsv | awk -F'\t' '$5 != "" && $8 != "traffic" {print $1}')
+         (( ${#rows[@]} )) || { info "Клиентов с истёкшим сроком нет"; continue; }
          warn "Будут удалены навсегда: ${rows[*]}"
          read_confirm "${R}  Подтверди (введи yes): ${N}" && clients_purge_blocked ;;
       0) return 0 ;;
@@ -9829,7 +9885,10 @@ _api_traffic() {
   local tr name="" days=30
   case "${1:-}" in
     daily)
-      [[ "${2:-}" =~ ^[0-9]+$ ]] && days="$2" || { name="${2:-}"; [[ "${3:-}" =~ ^[0-9]+$ ]] && days="$3"; }
+      # Два аргумента — всегда «ИМЯ|all ДНЕЙ»: имя клиента может быть числом
+      if (( $# >= 3 )); then name="$2"; [[ "$3" =~ ^[0-9]+$ ]] && days="$3"
+      elif [[ "${2:-}" =~ ^[0-9]+$ ]]; then days="$2"
+      else name="${2:-}"; fi
       [[ "$name" == all ]] && name=""
       server_exists || { err "Сервер не создан"; return 1; }
       mktmp tr || return 1
@@ -12374,7 +12433,7 @@ if __name__ == "__main__":
 '
 # CPS_GENERATOR_END v2
 
-_PY_HELPER_SUM=e559fec39e53dfa3
+_PY_HELPER_SUM=13c2ff070fa6e540
 IFS= read -r -d '' _PY_HELPER <<'__AWG2_PY_HELPER__' || true
 """Встроенный помощник awg2: разбор и атомарная правка конфигов, JSON Xray,
 расчёты подсетей, разбор pcap. Вызывается как `py <команда> [аргументы]`.
@@ -12831,6 +12890,12 @@ def cmd_expire_clear(conf, name, suspend):
     if i < 0:
         die("клиент %s не найден" % name, 2)
     b = peers[i]
+    if peer_meta(b, "blocked_by") == "traffic":
+        # Блокировку держит лимит трафика: снимается только срок
+        peers[i] = set_meta(b, "expires", "")
+        write_atomic(conf, head + "".join(peers))
+        print("traffic")
+        return
     orig = peer_meta(b, "orig_ips")
     if orig and peer_field(b, "AllowedIPs") == suspend:
         b = re.sub(r"^([ \t]*AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + orig, b, count=1, flags=re.M | re.I)
@@ -12891,6 +12956,7 @@ def cmd_expire_check(conf, suspend, state_dir):
 DAYS_KEEP = 92
 TRAFFIC_SAVE_EVERY = 300
 SIZE_UNITS = {"": 1024 ** 3, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+SIZE_MAX = 1024 ** 5
 
 
 def fmt_bytes(n):
@@ -12903,12 +12969,13 @@ def fmt_bytes(n):
 
 
 def parse_size(text):
-    """«50G», «500M», «1.5T», «50» (гигабайты) → байты; None — не размер."""
-    m = re.match(r"^\s*(\d{1,7}(?:[.,]\d{1,3})?)\s*([KMGT]?)(?:i?B)?\s*$", text or "", re.I)
-    if not m:
+    """«50G», «500M», «1.5T», «50» (гигабайты) → байты; None — не размер.
+    «500B» без K/M/G/T — не гигабайты, а ошибка; больше 1 ПБ — тоже."""
+    m = re.match(r"^\s*(\d{1,7}(?:[.,]\d{1,3})?)\s*([KMGT]?)(i?B)?\s*$", text or "", re.I | re.A)
+    if not m or (m.group(3) and not m.group(2)):
         return None
     n = int(float(m.group(1).replace(",", ".")) * SIZE_UNITS[m.group(2).upper()])
-    return n if n > 0 else None
+    return n if 0 < n <= SIZE_MAX else None
 
 
 def parse_limit(value):
@@ -12953,6 +13020,10 @@ class Traffic:
         интерфейс (другой ifindex — awg0 пересоздан) или счётчик меньше
         прежнего — отсчёт с нуля. Самый первый проход только запоминает
         счётчики: накопленное до учёта к сегодняшнему дню не относится."""
+        if self.fresh and not counters:
+            # Счётчиков нет (интерфейс лежит) — запоминать нечего: иначе
+            # следующий проход посчитал бы всё накопленное до учёта
+            return
         today = time.strftime("%Y-%m-%d")
         last, total = self.d["last"], self.d["total"]
         reborn = bool(ifindex) and bool(self.ifindex) and ifindex != self.ifindex
@@ -13015,6 +13086,9 @@ class Traffic:
                 self.d[k] = {p: v for p, v in self.d[k].items() if p in alive}
         self.saved = int(time.time())
         data = dict(self.d, v=1, ifindex=self.ifindex, saved=self.saved)
+        if self.fresh:
+            # Счётчики ещё не запомнены: следующий проход — снова первый
+            del data["last"]
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         write_atomic(self.path, json.dumps(data, separators=(",", ":")))
 
@@ -13040,11 +13114,11 @@ def cmd_traffic_tick(conf, suspend, db, transfer, ifindex="", force_save="0"):
     """Проход таймера: прирост трафика в базу и проверка лимитов. События:
     CHANGED; LIMIT<TAB>имя<TAB>адрес<TAB>текст; WARN90<TAB>имя<TAB>текст;
     UNLIMIT<TAB>имя<TAB>текст."""
+    lock = _traffic_lock(db)
     try:
         text = read(conf)
     except OSError:
         return
-    lock = _traffic_lock(db)
     t = Traffic(db)
     t.apply(_read_transfer(transfer), ifindex)
     now = int(time.time())
@@ -13062,14 +13136,15 @@ def cmd_traffic_tick(conf, suspend, db, transfer, ifindex="", force_save="0"):
         expired = exp.isdigit() and now >= int(exp)
         used = t.used(pub, period) if limit else 0
         word = "%s из %s %s" % (fmt_bytes(used), fmt_bytes(limit), PERIOD_WORD.get(period, "")) if limit else ""
-        if by_traffic and expired:
-            # Истёк и срок: блокировку держит уже он, и снимается она сроком
-            peers[i] = set_meta(b, "blocked_by", "")
+        if by_traffic and (not limit or used < limit):
+            if expired:
+                # Лимит отпустил, но истёк срок: блокировку держит уже он,
+                # и снимается она сроком
+                peers[i] = set_meta(b, "blocked_by", "")
+            else:
+                peers[i] = _unblock(b, suspend)
+                events.append("UNLIMIT\t%s\t%s" % (name, word or "лимит снят"))
             changed = True
-        elif by_traffic and (not limit or used < limit):
-            peers[i] = _unblock(b, suspend)
-            changed = True
-            events.append("UNLIMIT\t%s\t%s" % (name, word or "лимит снят"))
         elif limit and used >= limit and aip != suspend:
             peers[i] = _block(b, suspend, aip, "traffic")
             changed = True
@@ -13102,9 +13177,17 @@ def _traffic_lock(db):
         return None
 
 
-def cmd_limit_set(conf, db, name, size, period="month"):
+def cmd_limit_set(conf, db, name, size, period="month", transfer="", ifindex=""):
     """Лимит клиенту: размер («50G»), off — снять. Лимит «всего» считается
-    с этой минуты; «за месяц» — с начала месяца."""
+    с этой минуты; «за месяц» — с начала месяца. transfer — снимок
+    `awg show transfer`: прирост до этой минуты в новый отсчёт не попадает."""
+    if size != "off":
+        n = parse_size(size)
+        if n is None:
+            die("размер не распознан: %s (пример: 50G, 500M)" % size)
+        if period not in PERIOD_WORD:
+            die("период: month или total")
+    lock = _traffic_lock(db)
     head, peers = split_peers(read(conf))
     i = find_peer(peers, name=name)
     if i < 0:
@@ -13113,27 +13196,24 @@ def cmd_limit_set(conf, db, name, size, period="month"):
         peers[i] = set_meta(peers[i], "limit", "")
         write_atomic(conf, head + "".join(peers))
         return
-    n = parse_size(size)
-    if n is None:
-        die("размер не распознан: %s (пример: 50G, 500M)" % size)
-    if period not in PERIOD_WORD:
-        die("период: month или total")
     pub = peer_field(peers[i], "PublicKey")
-    lock = _traffic_lock(db)
     t = Traffic(db)
+    if transfer:
+        t.apply(_read_transfer(transfer), ifindex)
     old, old_period = parse_limit(peer_meta(peers[i], "limit"))
     if period == "total" and old_period != "total":
         t.reset(pub, "total")
     t.d["warned"].pop(pub, None)
     t.save()
-    del lock
     peers[i] = set_meta(peers[i], "limit", "%d/%s" % (n, period))
     write_atomic(conf, head + "".join(peers))
+    del lock
     print(fmt_bytes(n))
 
 
-def cmd_limit_reset(conf, db, name):
+def cmd_limit_reset(conf, db, name, transfer="", ifindex=""):
     """Обнулить счётчик лимита (до конца периода)."""
+    lock = _traffic_lock(db)
     _, peers = split_peers(read(conf))
     i = find_peer(peers, name=name)
     if i < 0:
@@ -13141,8 +13221,9 @@ def cmd_limit_reset(conf, db, name):
     limit, period = parse_limit(peer_meta(peers[i], "limit"))
     if not limit:
         die("у клиента %s нет лимита" % name)
-    lock = _traffic_lock(db)
     t = Traffic(db)
+    if transfer:
+        t.apply(_read_transfer(transfer), ifindex)
     t.reset(peer_field(peers[i], "PublicKey"), period)
     t.save()
     del lock
@@ -14589,5 +14670,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=1b0afaca292f11e6
+_BUILD_SUM=c1c24201fc00c28a
 main "$@"

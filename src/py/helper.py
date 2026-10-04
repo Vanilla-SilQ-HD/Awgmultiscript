@@ -453,6 +453,12 @@ def cmd_expire_clear(conf, name, suspend):
     if i < 0:
         die("клиент %s не найден" % name, 2)
     b = peers[i]
+    if peer_meta(b, "blocked_by") == "traffic":
+        # Блокировку держит лимит трафика: снимается только срок
+        peers[i] = set_meta(b, "expires", "")
+        write_atomic(conf, head + "".join(peers))
+        print("traffic")
+        return
     orig = peer_meta(b, "orig_ips")
     if orig and peer_field(b, "AllowedIPs") == suspend:
         b = re.sub(r"^([ \t]*AllowedIPs\s*=\s*).+$", lambda m: m.group(1) + orig, b, count=1, flags=re.M | re.I)
@@ -513,6 +519,7 @@ def cmd_expire_check(conf, suspend, state_dir):
 DAYS_KEEP = 92
 TRAFFIC_SAVE_EVERY = 300
 SIZE_UNITS = {"": 1024 ** 3, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
+SIZE_MAX = 1024 ** 5
 
 
 def fmt_bytes(n):
@@ -525,12 +532,13 @@ def fmt_bytes(n):
 
 
 def parse_size(text):
-    """«50G», «500M», «1.5T», «50» (гигабайты) → байты; None — не размер."""
-    m = re.match(r"^\s*(\d{1,7}(?:[.,]\d{1,3})?)\s*([KMGT]?)(?:i?B)?\s*$", text or "", re.I)
-    if not m:
+    """«50G», «500M», «1.5T», «50» (гигабайты) → байты; None — не размер.
+    «500B» без K/M/G/T — не гигабайты, а ошибка; больше 1 ПБ — тоже."""
+    m = re.match(r"^\s*(\d{1,7}(?:[.,]\d{1,3})?)\s*([KMGT]?)(i?B)?\s*$", text or "", re.I | re.A)
+    if not m or (m.group(3) and not m.group(2)):
         return None
     n = int(float(m.group(1).replace(",", ".")) * SIZE_UNITS[m.group(2).upper()])
-    return n if n > 0 else None
+    return n if 0 < n <= SIZE_MAX else None
 
 
 def parse_limit(value):
@@ -575,6 +583,10 @@ class Traffic:
         интерфейс (другой ifindex — awg0 пересоздан) или счётчик меньше
         прежнего — отсчёт с нуля. Самый первый проход только запоминает
         счётчики: накопленное до учёта к сегодняшнему дню не относится."""
+        if self.fresh and not counters:
+            # Счётчиков нет (интерфейс лежит) — запоминать нечего: иначе
+            # следующий проход посчитал бы всё накопленное до учёта
+            return
         today = time.strftime("%Y-%m-%d")
         last, total = self.d["last"], self.d["total"]
         reborn = bool(ifindex) and bool(self.ifindex) and ifindex != self.ifindex
@@ -637,6 +649,9 @@ class Traffic:
                 self.d[k] = {p: v for p, v in self.d[k].items() if p in alive}
         self.saved = int(time.time())
         data = dict(self.d, v=1, ifindex=self.ifindex, saved=self.saved)
+        if self.fresh:
+            # Счётчики ещё не запомнены: следующий проход — снова первый
+            del data["last"]
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         write_atomic(self.path, json.dumps(data, separators=(",", ":")))
 
@@ -662,11 +677,11 @@ def cmd_traffic_tick(conf, suspend, db, transfer, ifindex="", force_save="0"):
     """Проход таймера: прирост трафика в базу и проверка лимитов. События:
     CHANGED; LIMIT<TAB>имя<TAB>адрес<TAB>текст; WARN90<TAB>имя<TAB>текст;
     UNLIMIT<TAB>имя<TAB>текст."""
+    lock = _traffic_lock(db)
     try:
         text = read(conf)
     except OSError:
         return
-    lock = _traffic_lock(db)
     t = Traffic(db)
     t.apply(_read_transfer(transfer), ifindex)
     now = int(time.time())
@@ -684,14 +699,15 @@ def cmd_traffic_tick(conf, suspend, db, transfer, ifindex="", force_save="0"):
         expired = exp.isdigit() and now >= int(exp)
         used = t.used(pub, period) if limit else 0
         word = "%s из %s %s" % (fmt_bytes(used), fmt_bytes(limit), PERIOD_WORD.get(period, "")) if limit else ""
-        if by_traffic and expired:
-            # Истёк и срок: блокировку держит уже он, и снимается она сроком
-            peers[i] = set_meta(b, "blocked_by", "")
+        if by_traffic and (not limit or used < limit):
+            if expired:
+                # Лимит отпустил, но истёк срок: блокировку держит уже он,
+                # и снимается она сроком
+                peers[i] = set_meta(b, "blocked_by", "")
+            else:
+                peers[i] = _unblock(b, suspend)
+                events.append("UNLIMIT\t%s\t%s" % (name, word or "лимит снят"))
             changed = True
-        elif by_traffic and (not limit or used < limit):
-            peers[i] = _unblock(b, suspend)
-            changed = True
-            events.append("UNLIMIT\t%s\t%s" % (name, word or "лимит снят"))
         elif limit and used >= limit and aip != suspend:
             peers[i] = _block(b, suspend, aip, "traffic")
             changed = True
@@ -724,9 +740,17 @@ def _traffic_lock(db):
         return None
 
 
-def cmd_limit_set(conf, db, name, size, period="month"):
+def cmd_limit_set(conf, db, name, size, period="month", transfer="", ifindex=""):
     """Лимит клиенту: размер («50G»), off — снять. Лимит «всего» считается
-    с этой минуты; «за месяц» — с начала месяца."""
+    с этой минуты; «за месяц» — с начала месяца. transfer — снимок
+    `awg show transfer`: прирост до этой минуты в новый отсчёт не попадает."""
+    if size != "off":
+        n = parse_size(size)
+        if n is None:
+            die("размер не распознан: %s (пример: 50G, 500M)" % size)
+        if period not in PERIOD_WORD:
+            die("период: month или total")
+    lock = _traffic_lock(db)
     head, peers = split_peers(read(conf))
     i = find_peer(peers, name=name)
     if i < 0:
@@ -735,27 +759,24 @@ def cmd_limit_set(conf, db, name, size, period="month"):
         peers[i] = set_meta(peers[i], "limit", "")
         write_atomic(conf, head + "".join(peers))
         return
-    n = parse_size(size)
-    if n is None:
-        die("размер не распознан: %s (пример: 50G, 500M)" % size)
-    if period not in PERIOD_WORD:
-        die("период: month или total")
     pub = peer_field(peers[i], "PublicKey")
-    lock = _traffic_lock(db)
     t = Traffic(db)
+    if transfer:
+        t.apply(_read_transfer(transfer), ifindex)
     old, old_period = parse_limit(peer_meta(peers[i], "limit"))
     if period == "total" and old_period != "total":
         t.reset(pub, "total")
     t.d["warned"].pop(pub, None)
     t.save()
-    del lock
     peers[i] = set_meta(peers[i], "limit", "%d/%s" % (n, period))
     write_atomic(conf, head + "".join(peers))
+    del lock
     print(fmt_bytes(n))
 
 
-def cmd_limit_reset(conf, db, name):
+def cmd_limit_reset(conf, db, name, transfer="", ifindex=""):
     """Обнулить счётчик лимита (до конца периода)."""
+    lock = _traffic_lock(db)
     _, peers = split_peers(read(conf))
     i = find_peer(peers, name=name)
     if i < 0:
@@ -763,8 +784,9 @@ def cmd_limit_reset(conf, db, name):
     limit, period = parse_limit(peer_meta(peers[i], "limit"))
     if not limit:
         die("у клиента %s нет лимита" % name)
-    lock = _traffic_lock(db)
     t = Traffic(db)
+    if transfer:
+        t.apply(_read_transfer(transfer), ifindex)
     t.reset(peer_field(peers[i], "PublicKey"), period)
     t.save()
     del lock
