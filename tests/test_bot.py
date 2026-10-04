@@ -616,6 +616,10 @@ async def run():
     text, buttons = screen(await press("cl:ls:alice|50G|month"))
     chk("лимит 50 ГБ в месяц — в карточке", "Лимит: 0 Б из 50.0 ГБ за месяц (0%)" in text, text)
     await press("cl:lp:alice|total")
+    text, _ = screen(await press("cl:lim:bob"))
+    chk("период, выбранный у одного клиента, другому не достаётся", "Период для новых значений: <b>за месяц</b>" in text, text)
+    text, _ = screen(await press("cl:lim:alice"))
+    chk("у своего клиента выбранный период остаётся", "Период для новых значений: <b>всего</b>" in text, text)
     text, buttons = screen(await press("cl:ls:alice|ask|total"))
     chk("свой размер — вопрос", "1.5T" in text, text)
     text, _ = screen(await say("1,5 тб"))
@@ -667,6 +671,19 @@ async def run():
         links = f.read()
     with open(LINKS, "w") as f:
         f.write(links.replace("awg0\n", ""))
+    # Сервер удалили (сброс), пока awg0 лежал: это не «снова работает»
+    st2 = {"down": 2, "down_since": int(time.time()) - 60, "down_sent": True, "boot": "boot-B"}
+
+    async def no_server(*args, **kw):
+        if args[:1] == ("status",):
+            return {"host": "vm1", "server": {"exists": False, "up": False}}
+        return await real_data(*args, **kw)
+    al.api.data = no_server
+    mark = len(SESSION.sent)
+    await al.tick(BOT, st2)
+    chk("сервер удалён, пока awg0 лежал, — без ложного «снова работает»",
+        not any("снова работает" in t for t in said(mark)) and "down_sent" not in st2, [said(mark), st2])
+    al.api.data = real_data
 
     async def fake_data(*args, **kw):
         if args[:1] == ("status",):
@@ -691,6 +708,15 @@ async def run():
     mark = len(SESSION.sent)
     await al.tick(BOT, st)
     chk("повторно о том же — молчит", not said(mark), said(mark))
+    admins.add(333, 111)
+    st.pop("cert", None)
+    mark = len(SESSION.sent)
+    await al.tick(BOT, st)
+    certs = [(m.chat_id, m.reply_markup) for n, m in SESSION.sent[mark:]
+             if n == "SendMessage" and "Сертификат" in (m.text or "")]
+    chk("сертификат: кнопка «Mini App» (раздел владельца) — только владельцу, админу — текст",
+        sorted(c for c, _ in certs) == [111, 333] and all((k is not None) == (c == 111) for c, k in certs), certs)
+    admins.remove(333, removed_by=111)
     al.set_enabled("disk", True)
     al.disk_pct = lambda: 80
     await al.tick(BOT, st)
@@ -720,6 +746,46 @@ async def run():
         and not any(f.endswith("_auto") for f in os.listdir(os.path.join(ROOT, "awg_backup"))), info)
     mark = len(SESSION.sent)
     chk("до срока — не повторяется", not await al.backup_due(BOT) and not docs(SESSION.sent[mark:]))
+    t0 = int(time.time()) - 86400 - 120
+    al.store.save(al.BACKUP_STATE, {"last": t0, "slot": t0, "ok": True})
+    res = await al.backup_due(BOT)
+    bst = al.store.load(al.BACKUP_STATE)
+    chk("расписание держится за слот, а не за момент проверки", res == "done" and bst["slot"] == t0 + 86400
+        and bst["last"] > t0 + 86400, bst)
+    real_deliver = al._deliver
+
+    async def undelivered(fn, uid):
+        return False
+    al._deliver = undelivered
+    before = al.backup_info()["last"]
+    res = await al.backup_due(BOT, force=True)
+    info = al.backup_info()
+    al._deliver = real_deliver
+    chk("автобэкап не дошёл ни до кого — неудача; время последнего удачного не тронуто, повтор через час",
+        res == "fail" and info["last"] == before and not info["ok"] and "не дошёл" in info["error"]
+        and info["next"] >= time.time() + 3500, [res, info])
+    chk("до повтора — не повторяется", await al.backup_due(BOT) == "")
+    bst = al.store.load(al.BACKUP_STATE)
+    year = int(time.time()) + 365 * 86400       # записано, когда часы ушли на год вперёд
+    al.store.save(al.BACKUP_STATE, {**bst, "slot": year, "retry_at": year + 3600})
+    res = await al.backup_due(BOT)
+    bst = al.store.load(al.BACKUP_STATE)
+    chk("слот и повтор «через год» (часы уходили вперёд) — не ждём, бэкап делается, слот — сейчас",
+        res == "done" and bst["slot"] <= time.time() and not bst.get("retry_at"), [res, bst])
+    # Бэкап делается до 300 с раньше слота, и следующий слот ложится чуть впереди:
+    # это не скачок часов, повторного бэкапа быть не должно
+    al.store.save(al.BACKUP_STATE, {**bst, "slot": int(time.time()) + 200, "last": int(time.time()) - 100})
+    mark = len(SESSION.sent)
+    chk("слот на 200 с впереди (бэкап был чуть раньше срока) — второго бэкапа нет",
+        await al.backup_due(BOT) == "" and not docs(SESSION.sent[mark:]))
+    real_call = al.api.call
+
+    async def busy_call(*a, **kw):
+        return al.api.Result(False, 75, error="Идёт другая операция")
+    al.api.call = busy_call
+    text, _ = screen(await press("abk:now"))
+    al.api.call = real_call
+    chk("«Сделать сейчас», пока идёт другая операция, — так и сказано", "другая операция" in text, text)
     admin = User(id=333, is_bot=False, first_name="Admin")
     admins.add(333, 111)
     denied = [alerts(await press(x, admin)) for x in ("abk", "abk:m:off", "ntf", "ntf:t:iface")]
@@ -753,9 +819,69 @@ async def run():
         await apimod.call("job", "status", "20990101-000000-0000")
         await apimod.call("status")
         chk("опрос задачи кэш не сбрасывает", sum(1 for x in runs if x[:1] == ("status",)) == 1, runs)
+        await apimod.call("traffic", "now")
+        await apimod.call("status")
+        chk("живая скорость (traffic now) кэш не сбрасывает", sum(1 for x in runs if x[:1] == ("status",)) == 1, runs)
         await apimod.call("client", "limit", "nobody", "1G")
         await apimod.call("status")
         chk("изменение сбрасывает кэш — следующее чтение свежее", sum(1 for x in runs if x[:1] == ("status",)) == 2, runs)
+        # Запись во время чтения: «свежий» вызов (после записи) заканчивается раньше
+        # «старого». Без счётчика поколений старый результат лёг бы в кэш поверх
+        # свежего; без сброса _inflight запрос после записи получил бы старый
+        evs, nums = [], []
+
+        async def numbered(*args, **kw):
+            runs.append(args)
+            n = len(nums) + 1
+            nums.append(n)
+            ev = asyncio.Event()
+            evs.append(ev)
+            await ev.wait()
+            return apimod.Result(True, 0, {"n": n})
+        apimod._run = numbered
+        apimod.invalidate()
+        runs.clear()
+        t1 = asyncio.ensure_future(apimod.call("status"))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        apimod.invalidate()                 # запись, пока чтение ещё идёт
+        t2 = asyncio.ensure_future(apimod.call("status"))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        for ev in reversed(evs):            # свежий — первым, старый — следом
+            ev.set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        r1, r2 = await asyncio.gather(t1, t2)
+        try:                                # лишний вызов ждал бы события вечно — это провал, а не зависание
+            r3 = await asyncio.wait_for(apimod.call("status"), 5)
+        except asyncio.TimeoutError:
+            r3 = apimod.Result(False, 124)
+        for ev in evs:
+            ev.set()
+        chk("чтение, начатое до записи: после неё — свой вызов, старое в кэш не легло",
+            (r1.data, r2.data, r3.data) == ({"n": 1}, {"n": 2}, {"n": 2}) and len(runs) == 2,
+            [r1.data, r2.data, r3.data, runs])
+
+        async def slow(*args, **kw):
+            runs.append(args)
+            if args[:1] == ("status",):
+                await gate.wait()
+            return await real_run(*args, **kw)
+        apimod._run = slow
+        gate = asyncio.Event()
+        apimod.invalidate()
+        t1 = asyncio.ensure_future(apimod.call("status"))
+        t2 = asyncio.ensure_future(apimod.call("status"))
+        await asyncio.sleep(0)
+        t1.cancel()
+        await asyncio.sleep(0)
+        gate.set()
+        try:
+            ok2 = (await t2).ok
+        except asyncio.CancelledError:
+            ok2 = False
+        chk("отмена одного из ждущих не отменяет вызов остальным", t1.cancelled() and ok2)
     finally:
         apimod._run, apimod.CACHE_TTL = real_run, 0.0
         apimod.invalidate()
@@ -943,6 +1069,8 @@ async def run():
         chk("…и сертификат тоже", st == 403, [st, body])
         st, body = await api_("/api/call", {"args": ["uninstall"]}, uid=333, extra={"owner": True, "web": True})
         chk("«owner» в данных Telegram не делает владельцем (метка только веб-панели)", st == 403, [st, body])
+        st, body = await api_("/api/call", {"args": ["backup", "create", "auto", "1"]}, uid=333)
+        chk("…и ротация автобэкапов («auto 1» стёрла бы все, кроме одного)", st == 403, [st, body])
         st, body = await api_("/api/bot/info", {}, uid=333)
         chk("панель: приглашённому — сводка бота без списка админов",
             st == 200 and body.get("owner") is False and "admins" not in body and body.get("invited") == 1, [st, body])

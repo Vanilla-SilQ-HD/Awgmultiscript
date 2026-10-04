@@ -1779,11 +1779,21 @@ route(/^\/client\/([^/]+)\/note$/, async (ctx, name) => {
     }) }, "Сохранить"));
 });
 
+// Лимит в поле — так, чтобы сохранение без правки дало те же байты (как
+// parse_size в awg2: int(число × единица)); «1.3G» из fmtBytes менял лимит
+const sizeText = (n) => {
+  for (const [u, m] of [["T", 2 ** 40], ["G", 2 ** 30], ["M", 2 ** 20], ["K", 1024]]) {
+    const s = String(+(n / m).toFixed(3));
+    if (n >= m && s.split(".")[0].length <= 7 && Math.trunc(parseFloat(s) * m) === n) return s + u;
+  }
+  return String(+(n / 2 ** 30).toFixed(3)) + "G";
+};
+
 route(/^\/client\/([^/]+)\/limit$/, async (ctx, name) => {
   await loadClients();
   const c = byName(name) || {};
   let period = c.period || "month";
-  const input = h("input", { placeholder: "50G", value: c.limit ? fmtBytes(c.limit).replace(/\.0 /, " ").replace(" ГБ", "G").replace(" ТБ", "T").replace(" МБ", "M") : "",
+  const input = h("input", { placeholder: "50G", value: c.limit ? sizeText(c.limit) : "",
     autocapitalize: "off", autocomplete: "off" });
   const seg = h("div");
   const drawSeg = () => seg.replaceChildren(segText([["month", "В месяц"], ["total", "Всего"]], period, (p) => { period = p; drawSeg(); }));
@@ -2737,7 +2747,10 @@ function autoBackupCard(a, redraw) {
         segText([3, 7, 14, 30].map((n) => [n, String(n)]), b.keep, (n) => set({ backup_keep: n }))),
       b.mode !== "off" && !WEB ? h("button", { class: "btn-block", style: "margin-top:8px", onclick: (ev) => busy(ev.currentTarget, async () => {
         toast("Делаю автобэкап…", 4000);
-        redraw(await post("/api/alerts", { backup_now: true })); haptic(); toast("💾 Автобэкап — в чате", 3000);
+        const r = await post("/api/alerts", { backup_now: true });
+        redraw(r); haptic();
+        toast({ done: "💾 Автобэкап — в чате", busy: "⏳ Идёт другая операция — повтори, когда она закончится",
+          fail: "❌ Автобэкап не удался — причина в чате, повтор через час" }[r.backup_now] || "Автобэкап не сделан", 4000);
       }) }, "💾 Сделать сейчас") : null,
     ] : null,
     hint((WEB ? "Автобэкап присылает Telegram-бот" + (S.me && S.me.tg_bot ? "" : " — он не установлен") + ". " : "")

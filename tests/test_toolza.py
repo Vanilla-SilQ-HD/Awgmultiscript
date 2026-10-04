@@ -1042,6 +1042,11 @@ chk("автобэкап: архив без каталога, старые авт
     r.get("ok") and r["data"]["path"].endswith("_auto.tar.gz") and len(autos) == 2
     and autos[0] == "awg2_backup_20200103_000000_auto.tar.gz" and os.path.basename(r["data"]["path"]) == autos[1]
     and not os.path.isdir(r["data"]["path"][:-7]) and os.path.exists(bk_path), [r, autos])
+rc, out, _ = bash('tar() { if [[ "$1" == -czf && "$2" == *_auto.tar.gz ]]; then echo partial > "$2"; return 1; fi; command tar "$@"; }; '
+                  'backup_create archive auto 2 2>&1; echo "rc=$?"')
+after = sorted(f for f in os.listdir(BKD) if "_auto" in f)
+chk("автобэкап: архив не записался — ошибка, ни обрезка, ни каталога с ключами, целые не тронуты",
+    "rc=1" in out and "Архив бэкапа не записан" in out and after == autos, [out[-300:], after])
 for f in autos:
     os.remove(os.path.join(BKD, f))
 r = api("backup", "inspect", bk_path)

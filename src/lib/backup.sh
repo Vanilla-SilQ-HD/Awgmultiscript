@@ -39,9 +39,14 @@ backup_create() {
     auto=1
     [[ "${3:-}" =~ ^[0-9]{1,3}$ ]] && (( 10#$3 >= 1 )) && keep=$((10#$3))
   fi
-  ts=$(date +%Y%m%d_%H%M%S)
-  dir="$BACKUP_DIR/awg2_backup_$ts"
-  (( auto )) && dir+="_auto"
+  # Имя — по секундам: второй бэкап в ту же секунду писал бы в тот же архив
+  while :; do
+    ts=$(date +%Y%m%d_%H%M%S)
+    dir="$BACKUP_DIR/awg2_backup_$ts"
+    (( auto )) && dir+="_auto"
+    [[ -e "$dir" || -e "$dir.tar.gz" ]] || break
+    sleep 1
+  done
   mkdir -p "$dir" && chmod 700 "$BACKUP_DIR" "$dir"
   if [[ -f "$SERVER_CONF" ]]; then cp -a "$SERVER_CONF" "$dir/awg0.conf"; n=$((n + 1)); ok "Сервер: awg0.conf"
   else warn "Серверного конфига нет"; fi
@@ -78,7 +83,16 @@ backup_create() {
   chmod -R go-rwx "$dir"
   BACKUP_PATH="$dir"
   if [[ "${1:-}" == archive ]]; then
-    tar -czf "$dir.tar.gz" -C "$BACKUP_DIR" "${dir##*/}" && chmod 600 "$dir.tar.gz" && BACKUP_PATH="$dir.tar.gz"
+    # Архив не записался (кончилось место) — обрезок не оставлять: в нём
+    # приватные ключи, а среди автобэкапов он вытеснил бы целые при ротации
+    if ! (umask 077 && tar -czf "$dir.tar.gz" -C "$BACKUP_DIR" "${dir##*/}"); then
+      rm -f "$dir.tar.gz"
+      (( auto )) && rm -rf "$dir"
+      err "Архив бэкапа не записан — проверь место на диске: df -h $BACKUP_DIR"
+      return 1
+    fi
+    chmod 600 "$dir.tar.gz"
+    BACKUP_PATH="$dir.tar.gz"
   fi
   if (( auto )) && [[ "$BACKUP_PATH" == *.tar.gz ]]; then
     rm -rf "$dir"

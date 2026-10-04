@@ -543,7 +543,9 @@ async def _lim(cb: CallbackQuery, state: FSMContext, name: str) -> None:
     if c is None:
         await card(cb, name)
         return
-    period = (await state.get_data()).get("lim_period") or c.get("period") or "month"
+    # Выбранный период помнится для этого клиента: другому он не достаётся
+    chosen, _, p = ((await state.get_data()).get("lim_period") or "").rpartition("|")
+    period = p if chosen == name and p in PERIOD else c.get("period") or "month"
     other = "total" if period == "month" else "month"
     await ui.render(cb, f"<b>📶 Лимит трафика: {esc(name)}</b>\n"
                         f"Сейчас: {limit_text(c) or 'без лимита'}\n"
@@ -563,7 +565,7 @@ async def _lim(cb: CallbackQuery, state: FSMContext, name: str) -> None:
 @act("lp")
 async def _lim_period(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     name, _, period = arg.partition("|")
-    await state.update_data(lim_period=period if period in PERIOD else "month")
+    await state.update_data(lim_period=f"{name}|{period if period in PERIOD else 'month'}")
     await _lim(cb, state, name)
 
 
