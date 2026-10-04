@@ -19,6 +19,7 @@ test_toolza.py — проверка собранного awg2 (dist/awg2.sh) б�
 Запуск:  python3 tests/test_toolza.py [путь/к/dist/awg2.sh]
 Выход:   0 — всё прошло, 1 — есть провалы.
 """
+import base64
 import os
 import sys
 import time
@@ -340,6 +341,20 @@ for k, link in LINKS_OK.items():
 rc, out, err = bash("py xray-link 'vless://0378c8eb-6544-478e-837d-c3599ef8e73d@v.example.site:443?security=tls&type=tcp&allowInsecure=1#v'")
 chk("allowInsecure не попадает в конфиг (Xray 26 его отвергает), с пояснением",
     rc == 0 and "allowInsecure" not in out and "pinSHA256" in err, [out, err])
+rc, out, _ = bash("py xray-link 'trojan://p:a@t.example.com:443?security=tls#t'")
+chk("trojan: пароль с двоеточием целиком", rc == 0 and json.loads(out)["settings"]["servers"][0]["password"] == "p:a", out)
+for k, link in {"vless :0": "vless://0378c8eb-6544-478e-837d-c3599ef8e73d@v.example.site:0?security=tls",
+                "hy2 :0": "hy2://pw@h.example.com:0", "ss :99999": "ss://YWVzLTI1Ni1nY206cGFzczEyMw@1.2.3.4:99999",
+                "ss не-ASCII порт": "ss://YWVzLTI1Ni1nY206cGFzczEyMw@1.2.3.4:\u0664\u0664\u0663",
+                "vmess порт abc": "vmess://" + base64.b64encode(b'{"add":"v.example.com","port":"abc","id":"x"}').decode(),
+                "hy2 salamander без пароля": "hy2://pw@h.example.com:443?obfs=salamander"}.items():
+    rc, out, err = bash(f"py xray-link '{link}'")
+    chk(f"ссылка {k} — отказ без трассировки", rc != 0 and "Traceback" not in err and not out.strip(), [out, err])
+rc, out, _ = bash("py xray-link 'ss://YWVzLTI1Ni1nY206cGFzczEyMw@1.2.3.4:000443'; py xray-link 'vmess://" +
+                  base64.b64encode(b'{"add":"v.example.com","port":443.0,"id":"x"}').decode() + "'")
+ports = [json.loads(ln).get("settings", {}) for ln in out.strip().splitlines() if ln.startswith("{")]
+chk("порт с ведущими нулями и vmess-порт 443.0 — принимаются как 443",
+    rc == 0 and [p.get("servers", p.get("vnext", [{}]))[0].get("port") for p in ports] == [443, 443], out)
 rc, out, err = bash("py xray-link 'hy2://pw@h.example.com:443?obfs=salamander&obfs-password=s3#x'")
 chk("Hysteria2 с salamander — finalmask", rc == 0 and json.loads(out)["streamSettings"]["finalmask"]
     == {"udp": [{"type": "salamander", "settings": {"password": "s3"}}]}, [out, err])
@@ -376,6 +391,54 @@ rc, out, _ = bash(XRAY_ENV + f"xray_del_tag {XT[1]} >/dev/null; cat \"$XRAY_PEER
 chk("удалён выход — его клиенты на выходе по умолчанию", IP1 in out.split() and "|" not in out, out)
 with open(XP, "w") as f:
     f.write(xp_saved)
+# Свой выход живёт и в конфиге Xray: выкл/вкл клиента без пересборки оставлял
+# правило по адресу — клиент шёл через прежний выход, а в списке — «по умолчанию»
+rc, out, _ = bash(XRAY_ENV + 'xray_is_up() { true; }; xray_restart() { echo RESTART; }; _tunnel_rules_refresh() { :; }; '
+                  f'tunnel_client xray {C1} off; tunnel_client xray {C1} on; cat "$XRAY_PEERS"; '
+                  'python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1]))[\'routing\'][\'rules\']))" "$XRAY_CONF"')
+rules = json.loads(out.strip().splitlines()[-1]) if out.strip() else []
+chk("Xray: выкл/вкл клиента со своим выходом — конфиг пересобран, правило по адресу снято",
+    out.count("RESTART") == 1 and IP1 in out.split() and f"{IP1}|" not in out
+    and not any(IP1 in (r.get("source") or []) for r in rules), out)
+with open(XP, "w") as f:
+    f.write("10.0.0.5|t.1\n10.0.0.6|tx1\n10.0.0.7\n10.0.0.8|t2\n")
+rc, out, _ = bash(XRAY_ENV + '_xray_peers_untag t.1 t2; cat "$XRAY_PEERS"')
+chk("выходы удалены (в т.ч. «Починить конфиг») — их клиенты на выходе по умолчанию, тег не как регулярка",
+    out.split() == ["2", "10.0.0.5", "10.0.0.6|tx1", "10.0.0.7", "10.0.0.8"], out)
+with open(XP, "w") as f:
+    f.write(xp_saved)
+# Заблокированный клиент остаётся в списках туннелей под своим адресом
+WP = os.path.join(ROOT, "warp.peers.test")
+with open(WP, "w") as f:
+    f.write(IP2 + "\n")
+rc, out, _ = bash(f'py meta-set "$SERVER_CONF" {C2} expires 1; py expire-check "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$EXPIRE_STATE_DIR" >/dev/null; '
+                  f'peers_sync "{WP}"; cat "{WP}"; clients_name_ip | grep "^{C2}|"; py expire-clear "$SERVER_CONF" {C2} "$EXPIRE_SUSPEND_IP" >/dev/null')
+chk("заблокированный клиент: в списке туннеля и в clients_name_ip — настоящий адрес", out.split() == [IP2, f"{C2}|{IP2}"], out)
+os.remove(WP)
+# Удаление заблокированного клиента: его настоящий адрес уходит из туннелей
+bash('client_create gina "" none "1.1.1.1, 1.0.0.1" "" >/dev/null 2>&1')
+rc, out, _ = bash('had=0; [[ -f "$WARP_PEERS" ]] && had=1 && cp "$WARP_PEERS" "$WARP_PEERS.sv"; '
+                  'ip=$(clients_name_ip | awk -F"|" \'$1 == "gina" {print $2}\'); echo "$ip" >> "$WARP_PEERS"; '
+                  'py meta-set "$SERVER_CONF" gina expires 1; py expire-check "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$EXPIRE_STATE_DIR" >/dev/null; '
+                  'client_delete "$(client_pub gina)" >/dev/null 2>&1; echo "ip=$ip"; grep -c "^$ip\(|\|$\)" "$WARP_PEERS" || true; '
+                  'if (( had )); then mv -f "$WARP_PEERS.sv" "$WARP_PEERS"; else rm -f "$WARP_PEERS"; fi')
+gip = re.search(r"ip=(\S+)", out)
+chk("удалён заблокированный клиент — его настоящий адрес убран из списка туннеля",
+    gip and gip.group(1).startswith("10.") and out.strip().splitlines()[-1] == "0", out)
+# Чужой тег входа tun («tun» из правленного руками конфига): общее правило
+# переставало узнаваться — дописывалось новое, старое вело в прежний выход
+XF = os.path.join(TMP, "xf.json")
+with open(XF, "w") as f:
+    json.dump({"inbounds": [{"protocol": "tun", "tag": "tun", "settings": {}}],
+               "outbounds": [{"protocol": "vless", "tag": "A"}, {"protocol": "vless", "tag": "B"},
+                             {"protocol": "freedom", "tag": "direct"}],
+               "routing": {"rules": [{"type": "field", "inboundTag": ["tun"], "outboundTag": "A"}]}}, f)
+rc, out, _ = bash(f'py xray-prepare "{XF}" native && py xray-main "{XF}" B && py xray-prepare "{XF}" native && py xray-main-get "{XF}"')
+xf = json.load(open(XF))
+mains = [r for r in xf["routing"]["rules"] if r.get("inboundTag")]
+chk("Xray: чужой тег tun — одно общее правило, выход по умолчанию меняется",
+    rc == 0 and out.strip() == "B" and len(mains) == 1 and mains[0] == {"type": "field", "inboundTag": ["tun-in"], "outboundTag": "B"}
+    and xf["inbounds"][0]["tag"] == "tun-in", [out, xf])
 bash("client_remove xc1 >/dev/null 2>&1")
 
 # ── 4. Служебные скрипты ──────────────────────────────────
@@ -1042,8 +1105,43 @@ chk("восстановление бэкапа с eth0 на сервер с ens3
 rc, out, _ = bash("AUTO_MODE=1; do_repair 2>&1")
 now_conf = open(conf).read()
 chk("«Проверить и починить» возвращает NAT на настоящий аплинк навсегда — в awg0.conf",
-    "ens3, а выход сервера — eth0" in out and "NAT перенесён на eth0" in out
+    "на ens3, такого интерфейса нет; выход сервера — eth0" in out and "NAT перенесён на eth0" in out
     and "-o eth0 -j MASQUERADE" in now_conf and "-o ens3" not in now_conf, out[-800:])
+# Интерфейс из awg0.conf на этом сервере есть — NAT через него выбран
+# сознательно: не переписывается и не перебивается правилом на аплинк
+open(conf, "w").write(eth0_conf.replace("-o eth0 ", "-o tun9 "))
+links_saved = open(LINKS).read()
+with open(LINKS, "a") as f:
+    f.write("tun9\n")
+open(CALLS, "w").close()
+rc, out, _ = bash('conf_uplink_sync; echo "rc=$?"; AUTO_MODE=1; do_repair 2>&1')
+now_conf = open(conf).read()
+chk("NAT на существующем интерфейсе — оставлен, проверяется на нём же",
+    "rc=1" in out and "оставляю как настроено" in out and "-o tun9 -j MASQUERADE" in now_conf
+    and "-o eth0 -j MASQUERADE" not in open(CALLS).read(), [out[-800:], open(CALLS).read()[-600:]])
+open(LINKS, "w").write(links_saved)
+BK_TUN9 = os.path.join(TMP, "bk_tun9")
+os.makedirs(BK_TUN9, exist_ok=True)
+with open(os.path.join(BK_TUN9, "awg0.conf"), "w") as f:
+    f.write(eth0_conf.replace("-o eth0 ", "-o tun9 "))
+with open(LINKS, "a") as f:
+    f.write("tun9\n")
+rc, out, _ = bash(f"AUTO_MODE=1; uplink_iface() {{ echo eth0; }}; backup_restore '{BK_TUN9}' 2>&1")
+chk("восстановление бэкапа: NAT на аплинк этого сервера, даже если интерфейс со старым именем здесь есть",
+    "tun9 → eth0" in out and "-o eth0 -j MASQUERADE" in open(conf).read(), out[-500:])
+open(LINKS, "w").write(links_saved)
+# awg0 поднят: опускается до правки (PostDown старого конфига снимает старое
+# правило NAT) и поднимается снова
+open(conf, "w").write(eth0_conf)
+with open(LINKS, "a") as f:
+    f.write("awg0\n")
+open(CALLS, "w").close()
+rc, out, _ = bash('uplink_iface() { echo ens3; }; conf_uplink_sync >/dev/null; echo "rc=$?"')
+cl_ = [ln for ln in open(CALLS).read().splitlines() if ln.startswith("awg-quick")]
+chk("смена аплинка на поднятом awg0: down до правки, потом up",
+    "rc=0" in out and len(cl_) == 2 and cl_[0].startswith("awg-quick down") and cl_[1].startswith("awg-quick up")
+    and "-o ens3 -j MASQUERADE" in open(conf).read(), [out, cl_])
+open(LINKS, "w").write(links_saved)
 open(conf, "w").write(orig_conf)
 
 # Хуки awg-quick выполняются от root. Свои команды Тулзы (1.x и 0.8) проходят,
@@ -1337,6 +1435,13 @@ rc, out, _ = bash(KG + 'mod_built_for() { true; }; kernel_gap; echo "[$(kernel_g
 chk("модуль собран под все ядра — пусто", out == "[]\n", out)
 rc, out, _ = bash(KG + 'mod_built_for() { [[ $1 == 6.8.0-100-generic ]]; }; components_summary')
 chk("шапка меню предупреждает о ядре без модуля", "6.8.0-110-generic" in out and "Пересобрать" in out, out)
+rc, out, _ = bash(KG + 'mod_built_for() { false; }; mod_loaded() { false; }; components_summary')
+chk("шапка: и работающее ядро без модуля не прячет более новое", "ядро 6.8.0-110-generic" in out
+    and "6.8.0-100-generic," not in out, out)
+chk("шапка: …и про работающее ядро без модуля тоже сказано", "работающее ядро 6.8.0-100-generic" in out, out)
+rc, out, _ = bash(KG + 'uname() { echo 6.8.0-1; }; installed_kernels() { printf "%s\\n" 6.8.0-1 6.8.0-10; }; '
+                  'mod_built_for() { [[ $1 == 6.8.0-1 ]]; }; components_summary')
+chk("шапка: 6.8.0-10 без модуля при работающем 6.8.0-1 — не префикс", "ядро 6.8.0-10" in out, out)
 r = api("status")
 chk("api status: components.kernel_gap", r.get("ok") and "kernel_gap" in (r["data"].get("components") or {}), r.get("data"))
 chk("api status: uptime — секунды работы системы", isinstance(r["data"].get("uptime"), int) and r["data"]["uptime"] > 0, r.get("data"))

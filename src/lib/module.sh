@@ -97,8 +97,11 @@ kernel_gap() {
 }
 
 # Одной строкой для сводок: «6.8.0-150» или «6.8.0-150 (нет заголовков)».
-kernel_gap_line() {
-  kernel_gap | sed 's/ нет-заголовков$/ (нет заголовков)/' | paste -sd, - | sed 's/,/, /g'
+# others — без работающего ядра (о нём говорит reboot_reason).
+kernel_gap_line() {  # [others]
+  local skip=""
+  [[ "${1:-}" == others ]] && skip=$(uname -r)
+  kernel_gap | awk -v r="$skip" 'r == "" || $1 != r' | sed 's/ нет-заголовков$/ (нет заголовков)/' | paste -sd, - | sed 's/,/, /g'
 }
 
 # Почему нужна перезагрузка (сервера или модуля). Пусто — не нужна.
@@ -142,7 +145,12 @@ proto_supported() {
     elif awg showconf "$AWG_IF" 2>/dev/null | grep -q "^$key"; then
       rc=0
     else
-      dev="awgprb$$"
+      # Проба, прерванная раньше (тайм-аут бота, kill), оставляла интерфейс
+      for dev in $(ip -o link show type amneziawg 2>/dev/null | awk -F': ' '{sub(/@.*/, "", $2); print $2}'); do
+        [[ "$dev" =~ ^awgprb([0-9]+)$ ]] && ! kill -0 "${BASH_REMATCH[1]}" 2>/dev/null \
+          && ip link del dev "$dev" &>/dev/null
+      done
+      dev="awgprb$BASHPID"
       if ip link add dev "$dev" type amneziawg 2>/dev/null; then
         tmp=$(mktemp)
         [[ -n "$val" ]] || val=$(awg genkey)
@@ -217,10 +225,13 @@ components_summary() {
   tag=$(mod_tag)
   reason=$(reboot_reason)
   upd=$(mod_update_available)
-  gap=$(kernel_gap_line)
-  if [[ -n "$gap" && "$gap" != "$(uname -r)"* ]]; then
+  # Работающее ядро без модуля — это reboot_reason; но и оно не должно
+  # прятать более новое ядро без модуля (раньше — проверка по префиксу)
+  gap=$(kernel_gap_line others)
+  if [[ -n "$gap" ]]; then
     echo -e "${R}${tag:-?} ▲ ядро $gap без модуля AWG${N} ${D}— после перезагрузки VPN не поднимется:${N}"
     echo -e "               ${D}Сервер → Модуль ядра → 5) Пересобрать${N}"
+    [[ -n "$reason" ]] && echo -e "               ${Y}▲ ${reason}${N}"
   elif [[ -n "$reason" ]]; then
     echo -e "${Y}${tag:-?} ▲ ${reason}${N}"
   elif [[ -n "$upd" ]]; then

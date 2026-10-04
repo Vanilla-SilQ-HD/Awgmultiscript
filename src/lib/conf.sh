@@ -164,10 +164,14 @@ clients_tsv() { server_exists || return 0; py peers "$SERVER_CONF"; }
 # табы схлопываются, и пустые колонки (срок, orig_ips) сдвигают соседние.
 clients_psv() { clients_tsv | tr '\t' '|'; }
 
-# «имя|ip» для меню туннелей — только клиенты с именем.
+# «имя|ip» для меню туннелей — только клиенты с именем. У заблокированного
+# AllowedIPs — адрес-заглушка, настоящий лежит в orig_ips: без этого
+# peers_sync выкидывал его из списков WARP/Xray/exit, и после разблокировки
+# клиент шёл мимо туннеля.
 clients_name_ip() {
-  local name aip _
-  while IFS='|' read -r name _ aip _ _ _; do
+  local name aip orig _
+  while IFS='|' read -r name _ aip _ orig _; do
+    [[ -n "$orig" ]] && aip="$orig"
     [[ -n "$name" && -n "$aip" ]] || continue
     echo "${name}|${aip%%/*}"
   done < <(clients_psv)

@@ -1128,6 +1128,28 @@ def _note_insecure():
                      "сертификату нужен pinSHA256 в ссылке\n")
 
 
+def _port_num(value, proto):
+    """Порт из ссылки: только ASCII-цифры, 1–65535; пусто — 443. Иначе
+    Xray получал порт 0 или 99999 (и отвергал весь конфиг), а «443» из
+    не-ASCII цифр падал трассировкой."""
+    if value in (None, ""):
+        return 443
+    if isinstance(value, float) and value.is_integer():     # vmess: "port": 443.0
+        value = int(value)
+    value = str(value)
+    if not re.fullmatch(r"[0-9]{1,9}", value) or not 1 <= int(value) <= 65535:
+        die("%s: неверный порт: %s" % (proto, value))
+    return int(value)
+
+
+def _url_port(u, proto):
+    """Порт из urlparse; «:0», «:99999» и не-цифры — ошибка, а не 443."""
+    _, sep, port = u.netloc.rpartition("@")[2].rpartition(":")
+    if not sep or "]" in port:
+        return 443
+    return _port_num(port, proto)
+
+
 def tag_for(host):
     return "proxy_" + re.sub(r"[^A-Za-z0-9]", "_", host or "server")
 
@@ -1147,6 +1169,7 @@ def _hy2_outbound(link):
         auth += ":" + urllib.parse.unquote(u.password)
     if not host or not auth:
         die("hysteria2: в ссылке нет адреса или пароля")
+    port = _url_port(u, "hysteria2")
     tls = {"serverName": get("sni") or host, "alpn": (get("alpn") or "h3").split(",")}
     if get("pinSHA256"):
         tls["pinnedPeerCertSha256"] = get("pinSHA256")
@@ -1160,11 +1183,13 @@ def _hy2_outbound(link):
         if get("obfs") != "salamander":
             sys.stderr.write("UNSUPPORTED:obfs=%s\n" % get("obfs"))
             die("hysteria2: обфускация %s не поддерживается" % get("obfs"))
-        ss["finalmask"] = {"udp": [{"type": "salamander", "settings": {"password": get("obfs-password") or ""}}]}
+        if not get("obfs-password"):
+            die("hysteria2: для salamander нужен obfs-password")
+        ss["finalmask"] = {"udp": [{"type": "salamander", "settings": {"password": get("obfs-password")}}]}
     if get("mport"):
-        sys.stderr.write("NOTE:порт-хоппинг (mport=%s) не переносится — только порт %d\n" % (get("mport"), u.port or 443))
+        sys.stderr.write("NOTE:порт-хоппинг (mport=%s) не переносится — только порт %d\n" % (get("mport"), port))
     return {"protocol": "hysteria", "tag": tag_for(host),
-            "settings": {"version": 2, "address": host, "port": u.port or 443}, "streamSettings": ss}
+            "settings": {"version": 2, "address": host, "port": port}, "streamSettings": ss}
 
 
 def _ss_outbound(link):
@@ -1192,13 +1217,14 @@ def _ss_outbound(link):
     method, _, password = cred.partition(":")
     host, _, port = hostport.rpartition(":")
     host = host.strip("[]")
-    if not (method and password and host and port.isdigit()):
+    if not (method and password and host and port):
         die("ss: нужен метод, пароль, адрес и порт")
+    port = _port_num(port, "ss")
     if "plugin=" in query:
         sys.stderr.write("UNSUPPORTED:ss-plugin\n")
         die("ss: плагины (obfs, v2ray-plugin) не поддерживаются")
     return {"protocol": "shadowsocks", "tag": tag_for(host),
-            "settings": {"servers": [{"address": host, "port": int(port), "method": method, "password": password}]}}
+            "settings": {"servers": [{"address": host, "port": port, "method": method, "password": password}]}}
 
 
 def cmd_xray_link(link):
@@ -1211,7 +1237,7 @@ def cmd_xray_link(link):
             return qs[k][0] if qs.get(k) else None
         host = u.hostname or ""
         ob = {"protocol": "vless", "tag": tag_for(host),
-              "settings": {"vnext": [{"address": host, "port": u.port or 443,
+              "settings": {"vnext": [{"address": host, "port": _url_port(u, "vless"),
                                       "users": [{"id": urllib.parse.unquote(u.username or ""),
                                                  "encryption": get("encryption") or "none",
                                                  "flow": get("flow") or ""}]}]},
@@ -1228,7 +1254,7 @@ def cmd_xray_link(link):
             return str(v) if v not in (None, "") else None
         host = str(data.get("add") or "")
         ob = {"protocol": "vmess", "tag": tag_for(host),
-              "settings": {"vnext": [{"address": host, "port": int(data.get("port") or 443),
+              "settings": {"vnext": [{"address": host, "port": _port_num(data.get("port"), "vmess"),
                                       "users": [{"id": data.get("id"),
                                                  "alterId": int(data.get("aid") or 0),
                                                  "security": data.get("scy") or "auto"}]}]},
@@ -1241,9 +1267,13 @@ def cmd_xray_link(link):
         def get(k):
             return qs[k][0] if qs.get(k) else None
         host = u.hostname or ""
+        # Пароль trojan — вся часть до «@»: «p:a@host» — это пароль «p:a»
+        password = urllib.parse.unquote(u.username or "")
+        if u.password is not None:
+            password += ":" + urllib.parse.unquote(u.password)
         ob = {"protocol": "trojan", "tag": tag_for(host),
-              "settings": {"servers": [{"address": host, "port": u.port or 443,
-                                        "password": urllib.parse.unquote(u.username or "")}]},
+              "settings": {"servers": [{"address": host, "port": _url_port(u, "trojan"),
+                                        "password": password}]},
               "streamSettings": {"network": get("type") or "tcp", "security": get("security") or "tls"}}
     elif link.startswith("ss://"):
         print(json.dumps(_ss_outbound(link)))
@@ -1522,13 +1552,19 @@ def cmd_xray_prepare(path, mode, peers=""):
     socks["listen"] = "127.0.0.1"
     socks["port"] = socks.get("port") or 10808
     tun = next((i for i in inb if i.get("protocol") == "tun"), None)
+    # Тег входа tun — всегда свой: с чужим («tun» из правленного руками или
+    # восстановленного конфига) общее правило переставало узнаваться, и
+    # каждый проход дописывал новое, а старое продолжало вести в прежний выход
+    known = set(KNOWN_IN)
+    if tun is not None and tun.get("tag"):
+        known.add(tun["tag"])
     if mode == "native":
         if tun is None:
             tun = {"protocol": "tun", "tag": "tun-in",
                    "settings": {"mtu": 1200, "stack": "gvisor", "address": ["172.16.250.1/30"]},
                    "sniffing": SNIFF}
             inb.insert(0, tun)
-        tun["tag"] = tun.get("tag") or "tun-in"
+        tun["tag"] = "tun-in"
         want = tun["tag"]
     else:
         inb = [i for i in inb if i.get("protocol") != "tun"]
@@ -1541,7 +1577,7 @@ def cmd_xray_prepare(path, mode, peers=""):
     touched = False
     for r in rules:
         tags = r.get("inboundTag")
-        if isinstance(tags, list) and any(t in KNOWN_IN for t in tags):
+        if isinstance(tags, list) and any(t in known for t in tags):
             r["inboundTag"] = [want]
             touched = True
     ptags = proxy_tags(conf)

@@ -283,7 +283,7 @@ backup_restore() {
   _restore_awg_files "$src"
   _restore_hooks "$SERVER_CONF" || return 1
   # Бэкап с другого VPS: NAT — на аплинк этого сервера
-  conf_uplink_sync || true
+  conf_uplink_sync force || true
   client_files_sync_suffix
   ok "Сервер и клиенты: $(client_files | wc -l) кл."
   _restore_warp "$src"

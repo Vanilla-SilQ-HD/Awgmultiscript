@@ -44,7 +44,10 @@ client_add() {
 # Удаляет пира по ключу: из конфига, из ядра, файл клиента и списки туннелей.
 client_delete() {
   local pub="$1" name ip
-  ip=$(clients_tsv | awk -F'\t' -v k="$pub" '$2 == k {split($3, a, "/"); print a[1]; exit}')
+  # У заблокированного в AllowedIPs заглушка 127.0.0.2, настоящий адрес — в
+  # orig_ips: иначе его строки в туннелях и ip rule оставались, а адрес
+  # доставался новому клиенту — вместе с чужим туннелем и выходом Xray
+  ip=$(clients_tsv | awk -F'\t' -v k="$pub" '$2 == k {split($5 != "" ? $5 : $3, a, "/"); print a[1]; exit}')
   name=$(py peer-del "$SERVER_CONF" "$pub") || return 1
   iface_up && awg set "$AWG_IF" peer "$pub" remove 2>/dev/null
   [[ -n "$name" ]] && rm -f "$CLIENT_DIR/${name}_awg2.conf" "$CLIENT_DIR/${name}_awg3.conf"

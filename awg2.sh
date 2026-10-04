@@ -1058,10 +1058,14 @@ clients_tsv() { server_exists || return 0; py peers "$SERVER_CONF"; }
 # табы схлопываются, и пустые колонки (срок, orig_ips) сдвигают соседние.
 clients_psv() { clients_tsv | tr '\t' '|'; }
 
-# «имя|ip» для меню туннелей — только клиенты с именем.
+# «имя|ip» для меню туннелей — только клиенты с именем. У заблокированного
+# AllowedIPs — адрес-заглушка, настоящий лежит в orig_ips: без этого
+# peers_sync выкидывал его из списков WARP/Xray/exit, и после разблокировки
+# клиент шёл мимо туннеля.
 clients_name_ip() {
-  local name aip _
-  while IFS='|' read -r name _ aip _ _ _; do
+  local name aip orig _
+  while IFS='|' read -r name _ aip _ orig _; do
+    [[ -n "$orig" ]] && aip="$orig"
     [[ -n "$name" && -n "$aip" ]] || continue
     echo "${name}|${aip%%/*}"
   done < <(clients_psv)
@@ -1206,8 +1210,11 @@ kernel_gap() {
 }
 
 # Одной строкой для сводок: «6.8.0-150» или «6.8.0-150 (нет заголовков)».
-kernel_gap_line() {
-  kernel_gap | sed 's/ нет-заголовков$/ (нет заголовков)/' | paste -sd, - | sed 's/,/, /g'
+# others — без работающего ядра (о нём говорит reboot_reason).
+kernel_gap_line() {  # [others]
+  local skip=""
+  [[ "${1:-}" == others ]] && skip=$(uname -r)
+  kernel_gap | awk -v r="$skip" 'r == "" || $1 != r' | sed 's/ нет-заголовков$/ (нет заголовков)/' | paste -sd, - | sed 's/,/, /g'
 }
 
 # Почему нужна перезагрузка (сервера или модуля). Пусто — не нужна.
@@ -1251,7 +1258,12 @@ proto_supported() {
     elif awg showconf "$AWG_IF" 2>/dev/null | grep -q "^$key"; then
       rc=0
     else
-      dev="awgprb$$"
+      # Проба, прерванная раньше (тайм-аут бота, kill), оставляла интерфейс
+      for dev in $(ip -o link show type amneziawg 2>/dev/null | awk -F': ' '{sub(/@.*/, "", $2); print $2}'); do
+        [[ "$dev" =~ ^awgprb([0-9]+)$ ]] && ! kill -0 "${BASH_REMATCH[1]}" 2>/dev/null \
+          && ip link del dev "$dev" &>/dev/null
+      done
+      dev="awgprb$BASHPID"
       if ip link add dev "$dev" type amneziawg 2>/dev/null; then
         tmp=$(mktemp)
         [[ -n "$val" ]] || val=$(awg genkey)
@@ -1326,10 +1338,13 @@ components_summary() {
   tag=$(mod_tag)
   reason=$(reboot_reason)
   upd=$(mod_update_available)
-  gap=$(kernel_gap_line)
-  if [[ -n "$gap" && "$gap" != "$(uname -r)"* ]]; then
+  # Работающее ядро без модуля — это reboot_reason; но и оно не должно
+  # прятать более новое ядро без модуля (раньше — проверка по префиксу)
+  gap=$(kernel_gap_line others)
+  if [[ -n "$gap" ]]; then
     echo -e "${R}${tag:-?} ▲ ядро $gap без модуля AWG${N} ${D}— после перезагрузки VPN не поднимется:${N}"
     echo -e "               ${D}Сервер → Модуль ядра → 5) Пересобрать${N}"
+    [[ -n "$reason" ]] && echo -e "               ${Y}▲ ${reason}${N}"
   elif [[ -n "$reason" ]]; then
     echo -e "${Y}${tag:-?} ▲ ${reason}${N}"
   elif [[ -n "$upd" ]]; then
@@ -2469,14 +2484,26 @@ conf_uplink() {
 # Сервер восстановлен на другом VPS (или интерфейс переименован): у аплинка
 # другое имя (ens3 вместо eth0) — клиенты подключаются, но без NAT остаются
 # без интернета. Правило NAT в PostUp/PostDown переводится на аплинк этого
-# сервера. 0 — awg0.conf поправлен (нужен перезапуск awg0).
-conf_uplink_sync() {
-  local old dev
+# сервера. Для «Проверить и починить» — только если прежнего интерфейса здесь
+# нет: есть — значит NAT через него выбран сознательно (второй аплинк,
+# туннель). Восстановление бэкапа (force) переносит всегда: интерфейс с тем
+# же именем на новом VPS может быть совсем другим (приватный eth0). Поднятый
+# awg0 опускается до правки — его PostDown снимает старое правило NAT, иначе
+# оно оставалось в iptables — и поднимается снова. 0 — awg0.conf поправлен.
+conf_uplink_sync() {  # [force]
+  local old dev up=0 rc=0
   old=$(conf_uplink) || return 1
   dev=$(uplink_iface) || return 1
   [[ "$old" != "$dev" ]] || return 1
-  sed -i -E "/^Post(Up|Down) *=/ s#(POSTROUTING -s [^ ]+ -o )${old//./\\.}( -j MASQUERADE)#\1$dev\2#g" "$SERVER_CONF" || return 1
-  [[ "$(conf_uplink)" == "$dev" ]] || return 1
+  [[ "${1:-}" != force ]] && ip link show "$old" &>/dev/null && return 1
+  if iface_up; then
+    up=1
+    awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true
+  fi
+  sed -i -E "/^Post(Up|Down) *=/ s#(POSTROUTING -s [^ ]+ -o )${old//./\\.}( -j MASQUERADE)#\1$dev\2#g" "$SERVER_CONF" \
+    && [[ "$(conf_uplink)" == "$dev" ]] || rc=1
+  (( up )) && { awg_up_diag || rc=1; }
+  (( rc )) && return 1
   info "Внешний интерфейс сервера: $old → $dev (NAT в $SERVER_CONF)"
   log_info "NAT awg0: $old → $dev"
 }
@@ -2900,9 +2927,16 @@ do_repair() {
   dev=$(uplink_iface || true); net=$(server_net || true)
   old=$(conf_uplink || true)
   if [[ -n "$dev" && -n "$old" && "$old" != "$dev" ]]; then
-    _issue "NAT в awg0.conf — на $old, а выход сервера — $dev"
-    conf_uplink_sync && server_restart && _fixed "NAT перенесён на $dev"
+    if ip link show "$old" &>/dev/null; then
+      info "NAT в awg0.conf — на $old (маршрут по умолчанию — через $dev): оставляю как настроено"
+    else
+      _issue "NAT в awg0.conf — на $old, такого интерфейса нет; выход сервера — $dev"
+      conf_uplink_sync && _fixed "NAT перенесён на $dev"
+    fi
   fi
+  # NAT проверяется на интерфейсе из awg0.conf: выбранный сознательно не
+  # перебивается правилом на аплинк по умолчанию
+  old=$(conf_uplink || true); [[ -n "$old" ]] && ip link show "$old" &>/dev/null && dev="$old"
   if [[ -n "$dev" && -n "$net" ]]; then
     if iptables -t nat -C POSTROUTING -s "$net" -o "$dev" -j MASQUERADE 2>/dev/null; then ok "NAT на $dev"
     else _issue "Нет NAT для $net на $dev"; ipt_add -t nat POSTROUTING -s "$net" -o "$dev" -j MASQUERADE && _fixed "NAT добавлен"; fi
@@ -3280,7 +3314,10 @@ client_add() {
 # Удаляет пира по ключу: из конфига, из ядра, файл клиента и списки туннелей.
 client_delete() {
   local pub="$1" name ip
-  ip=$(clients_tsv | awk -F'\t' -v k="$pub" '$2 == k {split($3, a, "/"); print a[1]; exit}')
+  # У заблокированного в AllowedIPs заглушка 127.0.0.2, настоящий адрес — в
+  # orig_ips: иначе его строки в туннелях и ip rule оставались, а адрес
+  # доставался новому клиенту — вместе с чужим туннелем и выходом Xray
+  ip=$(clients_tsv | awk -F'\t' -v k="$pub" '$2 == k {split($5 != "" ? $5 : $3, a, "/"); print a[1]; exit}')
   name=$(py peer-del "$SERVER_CONF" "$pub") || return 1
   iface_up && awg set "$AWG_IF" peer "$pub" remove 2>/dev/null
   [[ -n "$name" ]] && rm -f "$CLIENT_DIR/${name}_awg2.conf" "$CLIENT_DIR/${name}_awg3.conf"
@@ -4103,6 +4140,26 @@ peers_sync() {
   mv -f "$f.tmp" "$f"
 }
 
+# Все клиенты через туннель; строки «IP|выход» (свой выход Xray) остаются.
+peers_all() {  # файл
+  local ip
+  mkdir -p "$(dirname "$1")"
+  clients_name_ip | cut -d'|' -f2 | while IFS= read -r ip; do
+    grep -E "^${ip//./\\.}(\||$)" "$1" 2>/dev/null | head -1 | grep . || echo "$ip"
+  done > "$1.new"
+  mv -f "$1.new" "$1"
+}
+
+# Свои выходы клиентов Xray живут в конфиге самого Xray (правила по адресу):
+# изменились — без пересборки конфига клиент оставался на прежнем выходе,
+# хотя список показывал «по умолчанию» или «напрямую».
+_xray_outs() { grep -F '|' "$XRAY_PEERS" 2>/dev/null | sort; }
+_xray_outs_apply() {  # прежний вывод _xray_outs
+  [[ "$(_xray_outs)" != "$1" ]] && xray_is_up || return 0
+  _xray_prepare || return 1
+  info "Перезапускаю туннель"; xray_restart
+}
+
 peers_seed() {
   [[ -f "$1" ]] && return 0
   mkdir -p "$(dirname "$1")"
@@ -4267,7 +4324,7 @@ _tunnel_rules_refresh() {  # файл устройство таблица
 
 # tunnel_client warp|xray ИМЯ|all|none on|off
 tunnel_client() {
-  local file dev table ip
+  local file dev table ip outs
   case "$1" in
     warp) file="$WARP_PEERS"; dev="$WARP_IF"; table="$WARP_TABLE" ;;
     xray) file="$XRAY_PEERS"; dev="$XRAY_IF"; table="$XRAY_TABLE" ;;
@@ -4275,11 +4332,9 @@ tunnel_client() {
   esac
   mkdir -p "$(dirname "$file")"
   peers_sync "$file"
+  outs=$(_xray_outs)
   case "$2" in
-    # Строки «IP|выход» (свой выход Xray) при включении всех остаются как есть
-    all) clients_name_ip | cut -d'|' -f2 | while IFS= read -r ip; do
-           grep -E "^${ip//./\\.}(\||$)" "$file" 2>/dev/null | head -1 | grep . || echo "$ip"
-         done > "$file.new"; mv -f "$file.new" "$file" ;;
+    all) peers_all "$file" ;;
     none) : > "$file" ;;
     *) ip=$(clients_name_ip | awk -F'|' -v n="$2" '$1 == n {print $2; exit}')
        [[ -n "$ip" ]] || { err "Клиента $2 нет"; return 1; }
@@ -4289,12 +4344,15 @@ tunnel_client() {
   esac
   _tunnel_rules_refresh "$file" "$dev" "$table"
   ok "Клиенты ${1^^}: $(grep -c . "$file" || true) через туннель"
+  if [[ "$1" == xray ]]; then _xray_outs_apply "$outs" || return 1; fi
+  return 0
 }
 # tunnel_peers_menu ЗАГОЛОВОК ФАЙЛ УСТРОЙСТВО ТАБЛИЦА
 tunnel_peers_menu() {
-  local title="$1" file="$2" dev="$3" table="$4" rows=() i c name ip
+  local title="$1" file="$2" dev="$3" table="$4" rows=() i c name ip outs
   while true; do
     peers_sync "$file"
+    outs=$(_xray_outs)
     mapfile -t rows < <(clients_name_ip)
     (( ${#rows[@]} )) || { warn "Клиентов нет"; return 0; }
     echo ""
@@ -4310,12 +4368,13 @@ tunnel_peers_menu() {
     read_choice c "${C}  Номер — вкл/выкл: ${N}" 0 "${#rows[@]}" 0 "a|n"
     case "$c" in
       0) return 0 ;;
-      a) clients_name_ip | cut -d'|' -f2 > "$file" ;;
+      a) peers_all "$file" ;;
       n) : > "$file" ;;
       *) ip="${rows[$((c - 1))]#*|}"
          if peers_has "$file" "$ip"; then peers_del "$file" "$ip"; else peers_add "$file" "$ip"; fi ;;
     esac
     _tunnel_rules_refresh "$file" "$dev" "$table"
+    [[ "$file" == "$XRAY_PEERS" ]] && { _xray_outs_apply "$outs" || true; }
   done
 }
 
@@ -5707,13 +5766,21 @@ xray_del_outbound() {
   xray_del_tag "$CHOSEN"
 }
 
+# Клиенты удалённых выходов — на выход по умолчанию; печатает, сколько их.
+_xray_peers_untag() {  # тег...
+  local f="$XRAY_PEERS"
+  [[ -f "$f" ]] || { echo 0; return 0; }
+  awk -F'|' 'NR == FNR {d[$0] = 1; next} NF > 1 && ($2 in d) {c++} END {print c + 0}' \
+    <(printf '%s\n' "$@") "$f"
+  awk -F'|' 'NR == FNR {d[$0] = 1; next} NF > 1 && ($2 in d) {print $1; next} {print}' \
+    <(printf '%s\n' "$@") "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
+}
+
 xray_del_tag() {  # тег
   local n
   xray_tags | grep -qxF "$1" || { err "Выхода $1 нет"; return 1; }
   py xray-del "$XRAY_CONF" "$1"
-  # Клиенты удалённого выхода — на выход по умолчанию
-  n=$(grep -c "|$1\$" "$XRAY_PEERS" 2>/dev/null || true)
-  [[ -f "$XRAY_PEERS" ]] && sed -i "s/|$(sed 's/[.[\*^$/]/\\&/g' <<< "$1")\$//" "$XRAY_PEERS"
+  n=$(_xray_peers_untag "$1")
   _xray_prepare
   ok "Выход $1 удалён"
   (( ${n:-0} )) && info "Его клиенты ($n) — теперь на выходе по умолчанию"
@@ -6117,7 +6184,10 @@ xray_bad_outbounds() {
 xray_fix() {
   local bad=()
   mapfile -t bad < <(xray_bad_outbounds)
-  (( ${#bad[@]} )) && py xray-del "$XRAY_CONF" "${bad[@]}"
+  if (( ${#bad[@]} )); then
+    py xray-del "$XRAY_CONF" "${bad[@]}"
+    _xray_peers_untag "${bad[@]}" >/dev/null
+  fi
   _xray_prepare
   if xray_test >/dev/null; then ok "Конфиг принят Xray${bad[*]:+, убраны: ${bad[*]}}"
   else err "Конфиг всё ещё отвергается"; return 1; fi
@@ -8044,7 +8114,7 @@ backup_restore() {
   _restore_awg_files "$src"
   _restore_hooks "$SERVER_CONF" || return 1
   # Бэкап с другого VPS: NAT — на аплинк этого сервера
-  conf_uplink_sync || true
+  conf_uplink_sync force || true
   client_files_sync_suffix
   ok "Сервер и клиенты: $(client_files | wc -l) кл."
   _restore_warp "$src"
@@ -12433,7 +12503,7 @@ if __name__ == "__main__":
 '
 # CPS_GENERATOR_END v2
 
-_PY_HELPER_SUM=13c2ff070fa6e540
+_PY_HELPER_SUM=62e45320bbc3fe67
 IFS= read -r -d '' _PY_HELPER <<'__AWG2_PY_HELPER__' || true
 """Встроенный помощник awg2: разбор и атомарная правка конфигов, JSON Xray,
 расчёты подсетей, разбор pcap. Вызывается как `py <команда> [аргументы]`.
@@ -13565,6 +13635,28 @@ def _note_insecure():
                      "сертификату нужен pinSHA256 в ссылке\n")
 
 
+def _port_num(value, proto):
+    """Порт из ссылки: только ASCII-цифры, 1–65535; пусто — 443. Иначе
+    Xray получал порт 0 или 99999 (и отвергал весь конфиг), а «443» из
+    не-ASCII цифр падал трассировкой."""
+    if value in (None, ""):
+        return 443
+    if isinstance(value, float) and value.is_integer():     # vmess: "port": 443.0
+        value = int(value)
+    value = str(value)
+    if not re.fullmatch(r"[0-9]{1,9}", value) or not 1 <= int(value) <= 65535:
+        die("%s: неверный порт: %s" % (proto, value))
+    return int(value)
+
+
+def _url_port(u, proto):
+    """Порт из urlparse; «:0», «:99999» и не-цифры — ошибка, а не 443."""
+    _, sep, port = u.netloc.rpartition("@")[2].rpartition(":")
+    if not sep or "]" in port:
+        return 443
+    return _port_num(port, proto)
+
+
 def tag_for(host):
     return "proxy_" + re.sub(r"[^A-Za-z0-9]", "_", host or "server")
 
@@ -13584,6 +13676,7 @@ def _hy2_outbound(link):
         auth += ":" + urllib.parse.unquote(u.password)
     if not host or not auth:
         die("hysteria2: в ссылке нет адреса или пароля")
+    port = _url_port(u, "hysteria2")
     tls = {"serverName": get("sni") or host, "alpn": (get("alpn") or "h3").split(",")}
     if get("pinSHA256"):
         tls["pinnedPeerCertSha256"] = get("pinSHA256")
@@ -13597,11 +13690,13 @@ def _hy2_outbound(link):
         if get("obfs") != "salamander":
             sys.stderr.write("UNSUPPORTED:obfs=%s\n" % get("obfs"))
             die("hysteria2: обфускация %s не поддерживается" % get("obfs"))
-        ss["finalmask"] = {"udp": [{"type": "salamander", "settings": {"password": get("obfs-password") or ""}}]}
+        if not get("obfs-password"):
+            die("hysteria2: для salamander нужен obfs-password")
+        ss["finalmask"] = {"udp": [{"type": "salamander", "settings": {"password": get("obfs-password")}}]}
     if get("mport"):
-        sys.stderr.write("NOTE:порт-хоппинг (mport=%s) не переносится — только порт %d\n" % (get("mport"), u.port or 443))
+        sys.stderr.write("NOTE:порт-хоппинг (mport=%s) не переносится — только порт %d\n" % (get("mport"), port))
     return {"protocol": "hysteria", "tag": tag_for(host),
-            "settings": {"version": 2, "address": host, "port": u.port or 443}, "streamSettings": ss}
+            "settings": {"version": 2, "address": host, "port": port}, "streamSettings": ss}
 
 
 def _ss_outbound(link):
@@ -13629,13 +13724,14 @@ def _ss_outbound(link):
     method, _, password = cred.partition(":")
     host, _, port = hostport.rpartition(":")
     host = host.strip("[]")
-    if not (method and password and host and port.isdigit()):
+    if not (method and password and host and port):
         die("ss: нужен метод, пароль, адрес и порт")
+    port = _port_num(port, "ss")
     if "plugin=" in query:
         sys.stderr.write("UNSUPPORTED:ss-plugin\n")
         die("ss: плагины (obfs, v2ray-plugin) не поддерживаются")
     return {"protocol": "shadowsocks", "tag": tag_for(host),
-            "settings": {"servers": [{"address": host, "port": int(port), "method": method, "password": password}]}}
+            "settings": {"servers": [{"address": host, "port": port, "method": method, "password": password}]}}
 
 
 def cmd_xray_link(link):
@@ -13648,7 +13744,7 @@ def cmd_xray_link(link):
             return qs[k][0] if qs.get(k) else None
         host = u.hostname or ""
         ob = {"protocol": "vless", "tag": tag_for(host),
-              "settings": {"vnext": [{"address": host, "port": u.port or 443,
+              "settings": {"vnext": [{"address": host, "port": _url_port(u, "vless"),
                                       "users": [{"id": urllib.parse.unquote(u.username or ""),
                                                  "encryption": get("encryption") or "none",
                                                  "flow": get("flow") or ""}]}]},
@@ -13665,7 +13761,7 @@ def cmd_xray_link(link):
             return str(v) if v not in (None, "") else None
         host = str(data.get("add") or "")
         ob = {"protocol": "vmess", "tag": tag_for(host),
-              "settings": {"vnext": [{"address": host, "port": int(data.get("port") or 443),
+              "settings": {"vnext": [{"address": host, "port": _port_num(data.get("port"), "vmess"),
                                       "users": [{"id": data.get("id"),
                                                  "alterId": int(data.get("aid") or 0),
                                                  "security": data.get("scy") or "auto"}]}]},
@@ -13678,9 +13774,13 @@ def cmd_xray_link(link):
         def get(k):
             return qs[k][0] if qs.get(k) else None
         host = u.hostname or ""
+        # Пароль trojan — вся часть до «@»: «p:a@host» — это пароль «p:a»
+        password = urllib.parse.unquote(u.username or "")
+        if u.password is not None:
+            password += ":" + urllib.parse.unquote(u.password)
         ob = {"protocol": "trojan", "tag": tag_for(host),
-              "settings": {"servers": [{"address": host, "port": u.port or 443,
-                                        "password": urllib.parse.unquote(u.username or "")}]},
+              "settings": {"servers": [{"address": host, "port": _url_port(u, "trojan"),
+                                        "password": password}]},
               "streamSettings": {"network": get("type") or "tcp", "security": get("security") or "tls"}}
     elif link.startswith("ss://"):
         print(json.dumps(_ss_outbound(link)))
@@ -13959,13 +14059,19 @@ def cmd_xray_prepare(path, mode, peers=""):
     socks["listen"] = "127.0.0.1"
     socks["port"] = socks.get("port") or 10808
     tun = next((i for i in inb if i.get("protocol") == "tun"), None)
+    # Тег входа tun — всегда свой: с чужим («tun» из правленного руками или
+    # восстановленного конфига) общее правило переставало узнаваться, и
+    # каждый проход дописывал новое, а старое продолжало вести в прежний выход
+    known = set(KNOWN_IN)
+    if tun is not None and tun.get("tag"):
+        known.add(tun["tag"])
     if mode == "native":
         if tun is None:
             tun = {"protocol": "tun", "tag": "tun-in",
                    "settings": {"mtu": 1200, "stack": "gvisor", "address": ["172.16.250.1/30"]},
                    "sniffing": SNIFF}
             inb.insert(0, tun)
-        tun["tag"] = tun.get("tag") or "tun-in"
+        tun["tag"] = "tun-in"
         want = tun["tag"]
     else:
         inb = [i for i in inb if i.get("protocol") != "tun"]
@@ -13978,7 +14084,7 @@ def cmd_xray_prepare(path, mode, peers=""):
     touched = False
     for r in rules:
         tags = r.get("inboundTag")
-        if isinstance(tags, list) and any(t in KNOWN_IN for t in tags):
+        if isinstance(tags, list) and any(t in known for t in tags):
             r["inboundTag"] = [want]
             touched = True
     ptags = proxy_tags(conf)
@@ -14670,5 +14776,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=c1c24201fc00c28a
+_BUILD_SUM=e069ecac5b387263
 main "$@"

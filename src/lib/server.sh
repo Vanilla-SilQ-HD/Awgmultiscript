@@ -258,14 +258,26 @@ conf_uplink() {
 # Сервер восстановлен на другом VPS (или интерфейс переименован): у аплинка
 # другое имя (ens3 вместо eth0) — клиенты подключаются, но без NAT остаются
 # без интернета. Правило NAT в PostUp/PostDown переводится на аплинк этого
-# сервера. 0 — awg0.conf поправлен (нужен перезапуск awg0).
-conf_uplink_sync() {
-  local old dev
+# сервера. Для «Проверить и починить» — только если прежнего интерфейса здесь
+# нет: есть — значит NAT через него выбран сознательно (второй аплинк,
+# туннель). Восстановление бэкапа (force) переносит всегда: интерфейс с тем
+# же именем на новом VPS может быть совсем другим (приватный eth0). Поднятый
+# awg0 опускается до правки — его PostDown снимает старое правило NAT, иначе
+# оно оставалось в iptables — и поднимается снова. 0 — awg0.conf поправлен.
+conf_uplink_sync() {  # [force]
+  local old dev up=0 rc=0
   old=$(conf_uplink) || return 1
   dev=$(uplink_iface) || return 1
   [[ "$old" != "$dev" ]] || return 1
-  sed -i -E "/^Post(Up|Down) *=/ s#(POSTROUTING -s [^ ]+ -o )${old//./\\.}( -j MASQUERADE)#\1$dev\2#g" "$SERVER_CONF" || return 1
-  [[ "$(conf_uplink)" == "$dev" ]] || return 1
+  [[ "${1:-}" != force ]] && ip link show "$old" &>/dev/null && return 1
+  if iface_up; then
+    up=1
+    awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true
+  fi
+  sed -i -E "/^Post(Up|Down) *=/ s#(POSTROUTING -s [^ ]+ -o )${old//./\\.}( -j MASQUERADE)#\1$dev\2#g" "$SERVER_CONF" \
+    && [[ "$(conf_uplink)" == "$dev" ]] || rc=1
+  (( up )) && { awg_up_diag || rc=1; }
+  (( rc )) && return 1
   info "Внешний интерфейс сервера: $old → $dev (NAT в $SERVER_CONF)"
   log_info "NAT awg0: $old → $dev"
 }
@@ -689,9 +701,16 @@ do_repair() {
   dev=$(uplink_iface || true); net=$(server_net || true)
   old=$(conf_uplink || true)
   if [[ -n "$dev" && -n "$old" && "$old" != "$dev" ]]; then
-    _issue "NAT в awg0.conf — на $old, а выход сервера — $dev"
-    conf_uplink_sync && server_restart && _fixed "NAT перенесён на $dev"
+    if ip link show "$old" &>/dev/null; then
+      info "NAT в awg0.conf — на $old (маршрут по умолчанию — через $dev): оставляю как настроено"
+    else
+      _issue "NAT в awg0.conf — на $old, такого интерфейса нет; выход сервера — $dev"
+      conf_uplink_sync && _fixed "NAT перенесён на $dev"
+    fi
   fi
+  # NAT проверяется на интерфейсе из awg0.conf: выбранный сознательно не
+  # перебивается правилом на аплинк по умолчанию
+  old=$(conf_uplink || true); [[ -n "$old" ]] && ip link show "$old" &>/dev/null && dev="$old"
   if [[ -n "$dev" && -n "$net" ]]; then
     if iptables -t nat -C POSTROUTING -s "$net" -o "$dev" -j MASQUERADE 2>/dev/null; then ok "NAT на $dev"
     else _issue "Нет NAT для $net на $dev"; ipt_add -t nat POSTROUTING -s "$net" -o "$dev" -j MASQUERADE && _fixed "NAT добавлен"; fi
