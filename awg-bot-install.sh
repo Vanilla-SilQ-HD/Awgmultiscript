@@ -10,6 +10,9 @@
 #      (без терминала — ошибка: спросить некого);
 #   4. пишет службу awg-bot и запускает её.
 # Настройки, админы, заметки и мониторинг (/var/lib/awg-bot) сохраняются.
+#
+# --web-only — только код и venv для веб-панели (awg-web): без токена, без
+# службы бота. Бот, если он уже стоит, перезапускается на новом коде.
 set -euo pipefail
 
 REPO_URL="${AWG_REPO_URL:-https://github.com/pumbaX/awg-multi-script}"
@@ -28,8 +31,10 @@ info() { echo -e "${C}  → $*${N}"; }
 (( EUID == 0 )) || { err "Нужен root: sudo awg2 → Telegram-бот"; exit 1; }
 
 SRC="${BOT_SRC:-}"
+WEB_ONLY=0
 while (( $# )); do
   case "$1" in
+    --web-only) WEB_ONLY=1; shift ;;
     --src) SRC="${2:-}"; shift 2 ;;
     --src=*) SRC="${1#--src=}"; shift ;;
     *) shift ;;
@@ -45,7 +50,8 @@ bot_dir() {
   else return 1; fi
 }
 
-echo -e "${W}━━━ Telegram-бот AWG Toolza ━━━${N}"
+if (( WEB_ONLY )); then echo -e "${W}━━━ Веб-панель AWG Toolza: код и зависимости ━━━${N}"
+else echo -e "${W}━━━ Telegram-бот AWG Toolza ━━━${N}"; fi
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -68,7 +74,7 @@ if ! python3 -c 'import venv, ensurepip' 2>/dev/null; then
   fi
 fi
 
-systemctl stop awg-bot 2>/dev/null || true
+(( WEB_ONLY )) || systemctl stop awg-bot 2>/dev/null || true
 mkdir -p "$DEST"
 rm -rf "$DEST/awgbot"
 cp -r "$SRC/awgbot" "$DEST/"
@@ -87,6 +93,19 @@ if ! "$DEST/venv/bin/pip" install -q --disable-pip-version-check --retries 10 --
   exit 1
 fi
 ok "Код и зависимости: $DEST"
+
+# Веб-панель живёт на том же коде — перезапуск на новом
+restart_web() {
+  if systemctl is-enabled --quiet awg-web 2>/dev/null; then
+    systemctl restart awg-web && ok "Веб-панель перезапущена на новом коде"
+  fi
+  return 0
+}
+if (( WEB_ONLY )); then
+  if [[ -f "$UNIT" ]]; then systemctl restart awg-bot && ok "Бот перезапущен на новом коде"; fi
+  restart_web
+  exit 0
+fi
 
 touch "$CONF"; chmod 600 "$CONF"
 # Бот старого образца писал ADMIN_CHAT_ID — переносим в ADMIN_ID
@@ -136,6 +155,7 @@ systemctl restart awg-bot
 sleep 3
 if systemctl is-active --quiet awg-bot; then
   ok "Бот запущен — открой его в Telegram и нажми /start"
+  restart_web
 else
   err "Бот не запустился: journalctl -u awg-bot -n 30"
   exit 1

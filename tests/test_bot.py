@@ -876,9 +876,9 @@ async def run():
 
     token = BOT.token
 
-    def init_data(uid, auth=None, tamper=False, signature=False):
+    def init_data(uid, auth=None, tamper=False, signature=False, extra=None):
         fields = {"auth_date": str(int(auth or time.time())), "query_id": "AAHd",
-                  "user": json.dumps({"id": uid, "first_name": "Max"}, separators=(",", ":"))}
+                  "user": json.dumps({"id": uid, "first_name": "Max", **(extra or {})}, separators=(",", ":"))}
         if signature:
             fields["signature"] = "c2ln"
         secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
@@ -920,8 +920,8 @@ async def run():
         chk("сводка сервера через Mini App", st == 200 and body.get("version") and "server" in body, [st, str(body)[:200]])
 
         # ── API панели ──
-        async def api_(path, data, uid=111):
-            async with http.post(base + path, json=data, headers={"Authorization": "tma " + init_data(uid)}) as r:
+        async def api_(path, data, uid=111, extra=None):
+            async with http.post(base + path, json=data, headers={"Authorization": "tma " + init_data(uid, extra=extra)}) as r:
                 return r.status, await r.json(content_type=None)
 
         async with http.get(base + "/app.js") as r:
@@ -941,6 +941,8 @@ async def run():
         chk("приглашённому админу владельческое закрыто", st == 403 and "владелец" in body.get("error", ""), [st, body])
         st, body = await api_("/api/call", {"args": ["cert", "remove"]}, uid=333)
         chk("…и сертификат тоже", st == 403, [st, body])
+        st, body = await api_("/api/call", {"args": ["uninstall"]}, uid=333, extra={"owner": True, "web": True})
+        chk("«owner» в данных Telegram не делает владельцем (метка только веб-панели)", st == 403, [st, body])
         st, body = await api_("/api/bot/info", {}, uid=333)
         chk("панель: приглашённому — сводка бота без списка админов",
             st == 200 and body.get("owner") is False and "admins" not in body and body.get("invited") == 1, [st, body])
@@ -997,6 +999,8 @@ async def run():
         chk("панель: «отправить в чат» — файл и QR владельцу",
             st == 200 and [n for n, m in SESSION.sent[mark:] if getattr(m, "chat_id", None) == 111]
             == ["SendDocument", "SendPhoto"], [n for n, _ in SESSION.sent[mark:]])
+        st, body = await api_("/api/send", {"what": "conf_zip", "name": "panel2"})
+        chk("панель: ZIP с конфигом — только скачиванием в веб-панели, не в чат", st == 400, [st, body])
         st, body = await api_("/api/job", {"args": ["clients", "bulk", "pj:2", "mimicry=none"]})
         jid = (body.get("data") or {}).get("id")
         for _ in range(100):

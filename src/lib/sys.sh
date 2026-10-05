@@ -122,12 +122,29 @@ write_unit() {
   write_file "/etc/systemd/system/$1" 644 && systemctl daemon-reload
 }
 
+# Таймер в состоянии «active (elapsed)» больше не сработает никогда, хотя
+# is-active отвечает «active». Так глох таймер сроков и лимитов (v1.2.0-1.2.2):
+# с Persistent=true systemd при старте таймера берёт время прошлого запуска
+# из метки в /var/lib/systemd/timers, считает OnBootSec прошедшим, а
+# OnUnitActiveSec отсчитывать не от чего — служба после переустановки ещё не
+# запускалась. Такой таймер — перезапустить без метки: сработает сразу,
+# дальше по расписанию.
+timer_heal() {
+  local u st
+  for u in "$@"; do
+    st=$(systemctl show -p SubState --value "$u" 2>/dev/null)
+    [[ "$st" == waiting || "$st" == running ]] && continue
+    rm -f "/var/lib/systemd/timers/stamp-$u"
+    systemctl restart "$u" &>/dev/null || true
+  done
+}
+
 remove_unit() {
   local u
   for u in "$@"; do
     systemctl disable --now "$u" >/dev/null 2>&1 || true
     systemctl reset-failed "$u" >/dev/null 2>&1 || true
-    rm -f "/etc/systemd/system/$u"
+    rm -f "/etc/systemd/system/$u" "/var/lib/systemd/timers/stamp-$u"
   done
   systemctl daemon-reload 2>/dev/null || true
 }

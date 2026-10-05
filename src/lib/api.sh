@@ -79,6 +79,7 @@ _api_status() {
     _kv version "$VERSION_SHOW"; _kv api:n "$API_VERSION"
     _kv channel "$UPDATE_CHANNEL"; _kv update "$(update_available || true)"
     _kv host "$(hostname)"; _kv ip "$(public_ip_cached)"
+    _kv uptime:n "$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)"
     _kv os "$OS_LABEL"; _kv kernel "$(uname -r)"
     _kv components.installed:b "$(_b command -v awg)"
     _kv components.module "$(mod_tag)"; _kv components.tools "$(tools_tag)"
@@ -379,7 +380,13 @@ _api_traffic() {
       mktmp tr || return 1
       awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || true
       py traffic-daily "$SERVER_CONF" "$TRAFFIC_DB" "$tr" "$name" "$days" > "$API_DATA" ;;
-    *) _api_usage "traffic daily [ИМЯ|all] [ДНЕЙ]" ;;
+    now)
+      # Счётчики прямо сейчас — панель считает по ним живую скорость
+      server_exists || { err "Сервер не создан"; return 1; }
+      mktmp tr || return 1
+      awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || true
+      py traffic-now "$SERVER_CONF" "$tr" > "$API_DATA" ;;
+    *) _api_usage "traffic daily [ИМЯ|all] [ДНЕЙ] | now" ;;
   esac
 }
 
@@ -874,7 +881,7 @@ _api_readonly() {
     *" status"|*" info"|*" report"|*" tags"|*" backups"|*" list"|*" conf"|*" inspect") return 0 ;;
     "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|\
     "bot proxy"|"bot webapp"|"update check"|"update changelog"|"module check"|"cert "|"cert find"|\
-    "traffic daily") return 0 ;;
+    "traffic daily"|"traffic now") return 0 ;;
   esac
   return 1
 }
@@ -964,6 +971,7 @@ api_main() {
     err "Не удалось поставить базовые пакеты (curl, iptables, iproute2)"; rc=1
   else
     helpers_refresh || true
+    expire_watchdog || true
     if _api_readonly "${API_ARGS[@]}"; then
       api_dispatch "${API_ARGS[@]}" || rc=$?
     else

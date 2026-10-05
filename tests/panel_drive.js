@@ -21,7 +21,9 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
   page.setDefaultTimeout(15000);
   const errors = [];
   page.on("pageerror", (e) => errors.push("pageerror: " + e));
-  page.on("console", (m) => { if (m.type() === "error" && !/telegram\.org|ERR_FAILED/.test(m.text())) errors.push("console: " + m.text()); });
+  // Адрес упавшего запроса — в сообщении: «Failed to load resource» сам его не называет
+  page.on("console", (m) => { if (m.type() === "error" && !/telegram\.org|ERR_FAILED/.test(m.text()))
+    errors.push("console: " + m.text() + ((m.location() || {}).url ? " " + m.location().url : "")); });
   const base = `https://127.0.0.1:${port}/`;
   const shot = async (name) => { await page.waitForTimeout(500); await page.screenshot({ path: `${out}/${name}.png`, fullPage: true }); };
   const noNull = async () => {
@@ -52,21 +54,22 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.evaluate(() => { window.__log = window.__log.filter((l) => !l.startsWith("alert:")); });
   };
 
-  await step("главная", async () => {
-    await nav("/", ".tile");
+  await step("обзор", async () => {
+    await nav("/", ".head h1");
     const t = await page.evaluate(() => document.documentElement.dataset.theme);
     if (t !== theme) throw new Error(`тема ${t}, а Telegram — ${theme}`);
-    await page.waitForSelector(".top .ver");
-    if (await page.locator("h1").count()) throw new Error("на главной остался заголовок");
-    if (await page.locator(".top .chan").count()) throw new Error("плашка «бета» на стабильном канале");
+    await page.waitForSelector(".top .lockup");
+    await page.waitForSelector(".top .lock img");                    // знак в шапке — на телефоне и в Mini App
+    if (/beta/.test(await page.getAttribute(".top .lockup", "aria-label"))) throw new Error("пометка «бета» на стабильном канале");
+    if (await page.locator("#tabbar a").count() !== 5) throw new Error("ждали нижнюю панель: 4 раздела и «Ещё»");
     await shot("01-home");
   });
 
   if (profile === "none") {
     // Сервера ещё нет: мастер создания целиком, первый клиент — сразу QR
     await step("главная без сервера", async () => {
-      await page.waitForSelector("text=не создан");
-      await page.click(".tile >> text=Сервер"); await page.waitForSelector("text=Создать сервер"); await shot("11-server-none");
+      await page.waitForSelector("h1 >> text=Сервер не создан");
+      await page.click("#tabbar a:has-text('Сервер')"); await page.waitForSelector("text=Создать сервер"); await shot("11-server-none");
     });
     await step("мастер создания", async () => {
       await page.click("button:has-text('Создать сервер')");
@@ -105,7 +108,27 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await browser.close();
     return;
   }
-  await step("список", async () => { await nav("/clients", "[data-name]"); await page.waitForSelector(".sgrid"); await shot("02-clients"); });
+  await step("обзор: маршруты (схема и список), живая скорость, события", async () => {
+    await nav("/", ".topo svg .node[data-c=alice]");
+    await page.waitForSelector(".topo svg .node[data-srv]");
+    await page.waitForSelector(".rseg button.on:has-text('схема')");
+    // Список: полоса долей, выходы, клиенты чипами; выбор запоминается
+    await page.click(".rseg button:has-text('список')");
+    await page.waitForSelector(".rlist .rx .cchip >> text=\"alice\"");
+    await page.waitForSelector(".rbar i");
+    if (await page.$(".topo")) throw new Error("в списке осталась схема");
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".rseg button.on:has-text('список')");
+    await page.click(".rseg button:has-text('схема')");
+    await page.waitForSelector(".topo svg .node[data-c=alice]");
+    await page.waitForSelector(".kpis .kpi >> nth=3");
+    // Скорость — по двум замерам счётчиков awg0 (раз в 3 с)
+    await page.waitForFunction(() => { const el = document.querySelector(".live .big .dn span"); return el && el.textContent !== "—"; },
+      null, { timeout: 15000 });
+    await page.click(".topo svg .node[data-c=alice]");
+    await page.waitForURL(/#\/client\/alice$/);
+  });
+  await step("список", async () => { await nav("/clients", "[data-name]"); await page.waitForSelector(".head h1 >> text=Клиенты"); await shot("02-clients"); });
   await step("поиск", async () => {
     await page.fill("input[type=search]", "анн");
     const n = await page.locator("[data-name]").count();
@@ -151,7 +174,10 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.waitForSelector(".kv >> text=нет");
   });
   await step("QR", async () => { await page.click("text=Конфиг и QR"); await page.waitForSelector("img.qr"); await shot("04-qr"); });
-  await step("в чат", async () => { await page.click("text=Отправить файл в чат"); await page.waitForSelector(".toast"); });
+  await step("в чат (одна кнопка, без ZIP — он только в веб-панели)", async () => {
+    if (await page.$(".confbtns") || await page.$("button:has-text('ZIP')")) throw new Error("в Mini App кнопка ZIP");
+    await page.click("text=Отправить файл в чат"); await page.waitForSelector(".toast >> text=Файл и QR");
+  });
   await step("срок", async () => {
     await nav("/client/alice", "text=Срок");
     await page.click(".actions button:has-text('Срок')"); await page.waitForSelector(".sheet"); await shot("05-expire-sheet");
@@ -175,7 +201,7 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
   });
   await step("выбрать и удалить", async () => {
     await nav("/clients", "[data-name]");
-    await page.click(".toolbar button:has-text('Выбрать')");
+    await page.click(".ctools button:has-text('Выбрать')");
     await page.click("[data-name=t-001] .name"); await page.click("[data-name=t-002] .name");
     await shot("08-select");
     await page.click(".bar >> text=Удалить");
@@ -309,57 +335,66 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
   await step("тема вручную", async () => {
     const before = await page.evaluate(() => document.documentElement.dataset.theme);
     await page.click(".top button[aria-label='Тема']");
+    await page.waitForSelector(".drawer.on >> text=Тема");
+    await page.click(`.drawer.on .chip:has-text('${before === "dark" ? "Светлая" : "Тёмная"}')`);
     await page.reload({ waitUntil: "domcontentloaded" }); await page.waitForSelector("h1");
     const after = await page.evaluate(() => document.documentElement.dataset.theme);
     if (after === before) throw new Error("тема не сменилась или не запомнилась");
     await page.click(".top button[aria-label='Тема']");
+    await page.click(".drawer.on .chip:has-text('Как Telegram')");
+    if (await page.evaluate(() => document.documentElement.dataset.theme) !== theme) throw new Error("«Как Telegram» не вернуло тему Telegram");
+    await page.click(".drawer.on button:has-text('Готово')");
   });
 
-  await step("вид панели: размер и жирность", async () => {
-    await page.click(".top button[aria-label='Вид']");
-    await page.waitForSelector(".sheet >> text=Вид панели");
-    await page.click(".sheet .seg button:has-text('Жирнее')");
-    await page.$eval(".sheet input[type=range]", (r) => { r.value = "90"; r.dispatchEvent(new Event("input")); r.dispatchEvent(new Event("change")); });
-    await page.waitForSelector(".sheet >> text=Размер — 90%");
+  await step("тема: акцент, скругление, масштаб, клетка", async () => {
+    const grid = () => page.evaluate(() => document.body.classList.contains("grid-bg"));
+    if (await grid()) throw new Error("клетка на фоне включена по умолчанию");
+    await page.click(".top button[aria-label='Тема']");
+    await page.click(".drawer.on .tg[aria-label='Клетка на фоне']");
+    await page.waitForSelector(".drawer.on .tg[aria-checked=true] .switch.on");
+    if (!await grid()) throw new Error("клетка не включилась");
+    await page.click(".drawer.on .swt[aria-label='Океан']");
+    await page.$eval(".drawer.on input[aria-label='Масштаб']", (r) => { r.value = "90"; r.dispatchEvent(new Event("input")); });
+    await page.$eval(".drawer.on input[aria-label='Скругление углов']", (r) => { r.value = "4"; r.dispatchEvent(new Event("input")); });
+    await page.waitForSelector(".drawer.on .swt.on[aria-label='Океан']");
     await shot("25-look");
-    const look = await page.evaluate(() => [document.documentElement.dataset.weight, document.documentElement.style.zoom]);
-    if (look[0] !== "bold" || look[1] !== "0.9") throw new Error("жирность/размер не применились: " + look);
+    const look = () => page.evaluate(() => { const st = document.documentElement.style;
+      return [st.getPropertyValue("--acc").trim(), st.zoom, st.getPropertyValue("--rb").trim()]; });
+    const a = await look();
+    if (!/^hsl\(198/.test(a[0]) || a[1] !== "0.9" || a[2] !== "4px") throw new Error("акцент/масштаб/скругление не применились: " + a);
     await page.reload({ waitUntil: "domcontentloaded" }); await page.waitForSelector("h1");
-    const kept = await page.evaluate(() => [document.documentElement.dataset.weight, document.documentElement.style.zoom]);
-    if (kept.join() !== look.join()) throw new Error("не запомнилось: " + kept);
-    await page.click(".top button[aria-label='Вид']");
-    await page.click(".sheet button:has-text('Сбросить')");
-    await page.click(".sheet button:has-text('Готово')");
-    const reset = await page.evaluate(() => [document.documentElement.dataset.weight, document.documentElement.style.zoom]);
-    if (reset[0] !== "normal" || reset[1] !== "") throw new Error("сброс не сработал: " + reset);
+    const kept = await look();
+    if (kept.join() !== a.join()) throw new Error("не запомнилось: " + kept);
+    if (!await grid()) throw new Error("клетка не запомнилась");
+    await page.click(".top button[aria-label='Тема']");
+    await page.click(".drawer.on button:has-text('Сбросить')");
+    await page.click(".drawer.on button:has-text('Готово')");
+    const reset = await look();
+    if (reset[0] !== "" || reset[1] !== "" || reset[2] !== "16px" || await grid()) throw new Error("сброс не сработал: " + reset);
   });
 
-  await step("вид главной", async () => {
-    await nav("/", ".grid .tile");
-    for (const [label, sel] of [["Компакт", ".card.list .item"], ["Иконки", ".igrid .ic"], ["Карточки", ".grid .tile"],
-      ["Иконки", ".igrid .ic"]]) {
-      await page.click(`.h2row .seg button[aria-label='${label}']`);
-      await page.waitForSelector(`#app ${sel}`);
-      await page.waitForSelector(`.h2row .seg button.on[aria-label='${label}']`);
-    }
-    await page.reload({ waitUntil: "domcontentloaded" }); await page.waitForSelector("#app .igrid .ic");
-    await shot("26-home-icons");
-    await page.click(".top button[aria-label='Вид']");
-    await page.waitForSelector(".sheet .seg button.on:has-text('Иконки')");
-    await page.click(".sheet .seg button:has-text('Компакт')");
-    await page.waitForSelector("#app .card.list .item");
-    await shot("27-home-compact");
-    await page.click(".sheet button:has-text('Сбросить')");
-    await page.waitForSelector("#app .grid .tile");
-    await page.click(".sheet button:has-text('Готово')");
+  await step("«Ещё»: остальные разделы снизу", async () => {
+    await nav("/", ".head h1");
+    await page.click("#tabbar a:has-text('Ещё')");
+    await page.waitForSelector("#more.on .mg a >> nth=7");
+    await shot("26-more");
+    await page.click("#more .mg a:has-text('Бэкапы')");
+    await page.waitForURL(/#\/backup$/);
+    await page.waitForSelector("#tabbar a.on:has-text('Ещё')");      // раздел из «Ещё» — подсвечено «Ещё»
+  });
+
+  await step("палитра команд", async () => {
+    await page.click(".top .kbar");
+    await page.waitForSelector(".pal.on input");
+    await page.keyboard.type("сервер");
+    await page.waitForSelector(".pal li.on:has-text('Сервер')");
+    await page.keyboard.press("Enter");
+    await page.waitForURL(/#\/server$/);
   });
 
   // ── Диагностика ──
-  await step("главная: трафик — свёрнут, по клиентам и линией", async () => {
-    await nav("/", "[data-name=traffic]");
-    if (await page.locator("[data-name=traffic] .chart").count()) throw new Error("карточка трафика должна быть свёрнута");
-    await page.waitForSelector("[data-name=traffic] .trf-head .spark path");
-    await page.click("[data-name=traffic] .trf-head");
+  await step("обзор: трафик за 14 дней — по клиентам и линией", async () => {
+    await nav("/", "[data-name=traffic] .chart");
     await page.waitForSelector("[data-name=traffic] .chips button.on >> text=Все");
     if (await page.locator("[data-name=traffic] .chart .bar").count() !== 2) throw new Error("«Все»: ждали столбцы двух клиентов");
     const cap = await page.textContent("[data-name=traffic] .chart .cap");
@@ -370,8 +405,8 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await nav("/", "[data-name=traffic] .chart.line");
     if (!(await page.textContent("[data-name=traffic] .chips button.on")).includes("bob")) throw new Error("выбор клиента не запомнился");
     await shot("01c-traffic-client");
-    await page.click("[data-name=traffic] .trf-head");
-    if (await page.locator("[data-name=traffic] .chart").count()) throw new Error("не свернулась");
+    await page.click("[data-name=traffic] .chips button >> text=Все");
+    await page.waitForSelector("[data-name=traffic] .chart .bar");
   });
   await step("диагностика", async () => { await nav("/diag", "text=Система"); await shot("40-diag"); });
   await step("домены мимикрии", async () => {
@@ -453,18 +488,21 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await shot("48-update-available");
   });
   await step("стрелка ↑ у версии в шапке", async () => {
-    await page.waitForSelector(".top .ver .upd");
-    if ((await page.getAttribute(".top .ver", "title")) !== "Доступна v9.9.9") throw new Error("у стрелки нет подсказки с версией");
-    await nav("/", ".top .ver .upd");
+    await page.waitForSelector(".top .lockup text >> text=↑");
+    if (!/доступна v9\.9\.9/.test(await page.getAttribute(".top .lock", "title"))) throw new Error("у стрелки нет подсказки с версией");
+    await page.waitForSelector("#tabbar .tdot");                       // точка на «Ещё»: обновление — там
+    await nav("/", ".top .lockup");
     await shot("48b-update-arrow");
-    await page.click(".top .ver");
+    await page.click(".top .lock");
     await page.waitForURL(/#\/update$/);
     await page.waitForSelector("text=Канал");
   });
   await step("бета-канал", async () => {
     await page.click("button:has-text('Бета-канал')");
     await page.waitForSelector("text=бета — ранние сборки");
-    await page.waitForSelector(".top .chan >> text=бета");
+    await page.waitForFunction(() => /beta/.test(document.querySelector(".top .lockup").getAttribute("aria-label")));
+    await page.waitForSelector(".top .lockup text >> text=BETA");
+    await shot("48c-beta");
     if (/null|undefined/.test(await page.textContent(".top"))) throw new Error("в шапке «null»");
   });
   // ── WG + обфускатор ──
@@ -509,8 +547,8 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await shot("52a-alerts");
   });
   await step("меню бота в чат", async () => {
-    await page.click(".top button[aria-label='Разделы']");
-    await page.click(".sheet >> text=Меню бота в чат");
+    await page.click("#tabbar a:has-text('Ещё')");
+    await page.click("#more .mg a:has-text('Меню бота')");
     await page.waitForFunction(() => window.__log.includes("close"));
   });
   await step("админы: отозвать", async () => {
@@ -546,10 +584,15 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await shot("56-app");
     await page.click("button:has-text('На IP')");
     await page.waitForSelector("h1:has-text('Сертификат на IP') .pill.ok", { timeout: 60000 });
+    // Сервер Mini App перезапускается через секунду после выпуска — дальше идём, когда он снова на месте
+    await page.waitForTimeout(3000);
   });
-  await step("главная: все разделы в панели", async () => {
-    await nav("/", ".tile");
-    if (await page.locator(".tile.soon").count() !== 0) throw new Error("остались плитки «скоро»");
+  await step("все разделы — в нижней панели и «Ещё»", async () => {
+    await nav("/", ".head h1");
+    const labels = await page.evaluate(() => [...document.querySelectorAll("#tabbar a, #more .mg a")].map((a) => a.textContent.trim()));
+    for (const t of ["Обзор", "Клиенты", "Туннели", "Сервер", "Диагностика", "Обновление", "Бэкапы", "Обфускатор", "Бот", "Тема"]) {
+      if (!labels.some((l) => l.startsWith(t))) throw new Error("нет раздела " + t + ": " + labels.join(", "));
+    }
   });
 
   const log = await page.evaluate(() => window.__log);

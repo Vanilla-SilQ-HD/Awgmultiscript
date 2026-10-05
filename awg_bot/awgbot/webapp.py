@@ -206,7 +206,8 @@ class MiniApp:
         if not access.authorized(int(user["id"])):
             log.warning("Mini App: отказ в доступе %s", user.get("id"))
             raise web.HTTPForbidden(text=json.dumps({"error": "Нет доступа"}), content_type="application/json")
-        return user
+        # «owner»/«web» ставит только веб-панель — из данных Telegram их не берём
+        return {k: v for k, v in user.items() if k not in ("owner", "web")}
 
     @staticmethod
     async def _index(request: web.Request) -> web.StreamResponse:

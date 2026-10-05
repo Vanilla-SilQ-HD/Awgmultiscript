@@ -67,6 +67,7 @@ main() {
   update_channel_init
   base_deps
   helpers_refresh || true
+  expire_watchdog || true
 
   case "${1:-}" in
     --status) do_status; exit 0 ;;

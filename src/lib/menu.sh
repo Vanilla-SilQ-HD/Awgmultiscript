@@ -100,8 +100,9 @@ main_menu() {
     echo -e "  ${R}7)${N} Удаление        ${D}— очистка${N}"
     echo -e "  ${M}8)${N} Обновление      ${D}— $(update_channel_label)${N}"
     echo -e "  ${C}9)${N} WG + обфускатор ${D}— $(wgobf_installed && echo "установлен" || echo "как Phobos")${N}"
+    echo -e "  ${C}w)${N} Веб-панель      ${D}— $(web_installed && { web_active && echo "работает" || echo "остановлена"; } || echo "в браузере")${N}"
     echo -e "  ${W}0)${N} Выход"
-    read_choice c "${C}  Выбор [0-9]: ${N}" 0 9
+    read_choice c "${C}  Выбор [0-9, w]: ${N}" 0 9 "" "w"
     case "$c" in
       1) do_server_menu ;;
       2) _need_server && { do_clients_menu || true; } ;;
@@ -112,6 +113,7 @@ main_menu() {
       7) do_danger_menu ;;
       8) do_update_menu ;;
       9) do_wgobf_menu ;;
+      w) do_web_menu ;;
       0) echo -e "\n  ${G}В путь!${N} ${D}t.me/awgToolza${N}\n"; return 0 ;;
     esac
   done

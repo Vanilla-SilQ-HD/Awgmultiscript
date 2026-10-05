@@ -59,6 +59,7 @@ webapp_port() {
 
 webapp_fw() {
   local p
+  [[ -f "/etc/systemd/system/$BOT_UNIT" ]] || return 0
   p=$(webapp_port)
   [[ "$p" == off ]] || ufw_allow "$p/tcp" awg-webapp
   return 0
@@ -322,10 +323,16 @@ bot_uninstall() {
     cp -a "$BOT_CONF" "$saved" || saved=""
   fi
   systemctl disable --now "$BOT_UNIT" &>/dev/null || true
-  for p in "${BOT_ARTIFACTS[@]}"; do rm -rf "$p"; done
+  local arts=("${BOT_ARTIFACTS[@]}")
+  # Код, venv и заметки нужны веб-панели — с ней остаются
+  if web_installed; then
+    arts=(); for p in "${BOT_ARTIFACTS[@]}"; do [[ "$p" == "$BOT_DIR" || "$p" == /var/lib/awg-bot ]] || arts+=("$p"); done
+    info "Код бота остаётся — на нём работает веб-панель"
+  fi
+  for p in "${arts[@]}"; do rm -rf "$p"; done
   systemctl daemon-reload
   systemctl reset-failed "$BOT_UNIT" &>/dev/null || true
-  for p in "${BOT_ARTIFACTS[@]}"; do [[ -e "$p" ]] && left+=("$p"); done
+  for p in "${arts[@]}"; do [[ -e "$p" ]] && left+=("$p"); done
   if (( ${#left[@]} )); then warn "Не удалось удалить: ${left[*]}"; else ok "Бот удалён"; fi
   [[ -n "$saved" ]] && info "Конфиг с токеном сохранён: $saved"
   log_info "бот удалён"

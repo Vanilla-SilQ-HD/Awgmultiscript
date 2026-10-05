@@ -138,8 +138,6 @@ EXITS_SCRIPT="/usr/local/bin/awg2-exits-routing.sh"
 
 # ── Срок действия клиентов ────────────────────────────────
 EXPIRE_BIN="/usr/local/bin/awg2-expire-check"
-EXPIRE_SERVICE="/etc/systemd/system/awg2-expire.service"
-EXPIRE_TIMER="/etc/systemd/system/awg2-expire.timer"
 EXPIRE_STATE_DIR="/var/lib/awg2-expire"
 EXPIRE_LOG="/var/log/awg2-expire.log"
 EXPIRE_SUSPEND_IP="127.0.0.2/32"
@@ -167,6 +165,11 @@ BOT_CONF="/etc/awg-bot.conf"
 BOT_ADMINS="/var/lib/awg-bot/admins.json"   # приглашённые админы (ведёт бот)
 BOT_DIR="/opt/awg-bot"
 BOT_UNIT="awg-bot.service"
+# Веб-панель (awgbot.web): конфиг с хешем пароля, журнал входов, самоподписанный сертификат
+WEB_CONF="/etc/awg-web.conf"
+WEB_UNIT="awg-web.service"
+WEB_LOG="/var/log/awg-web.log"
+WEB_DIR="/etc/awg-web"
 BOT_PROXY_SCHEMES="http https socks4 socks5 socks5h iface"
 WEBAPP_PORT_DEFAULT=8443                    # Mini App бота (WEBAPP_PORT в BOT_CONF)
 

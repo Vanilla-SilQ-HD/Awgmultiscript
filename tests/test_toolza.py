@@ -635,6 +635,14 @@ chk("api traffic daily ИМЯ ДНЕЙ", r.get("ok") and len(r["data"]["days"]) 
     and "clients" not in r["data"], r)
 r = api("traffic", "daily", "nobody")
 chk("api traffic daily — нет клиента", r.get("ok") is False, r)
+db_before = bash('cat "$TRAFFIC_DB" 2>/dev/null')[1]
+r = api("traffic", "now")
+d = r.get("data") or {}
+chk("api traffic now — счётчики клиентов по именам и время для живой скорости",
+    r.get("ok") and isinstance(d.get("ts"), (int, float)) and d.get("ts") > 1e9
+    and isinstance((d.get("peers") or {}).get("alice"), list) and len(d["peers"]["alice"]) == 2, r)
+db_after = bash('cat "$TRAFFIC_DB" 2>/dev/null')[1]
+chk("api traffic now — база трафика не пишется", db_before == db_after)
 r = api("client", "limit", "alice", "2G", "total")
 chk("лимит «всего» считается с этой минуты", r.get("ok") and cl("alice").get("used") == 0
     and cl("alice").get("period") == "total", cl("alice"))
@@ -664,6 +672,39 @@ chk("снятие лимита не снимает блок за срок", cl("
 api("client", "unexpire", "alice")
 chk("снять срок — разблокировка", not cl("alice").get("blocked"), cl("alice"))
 rc, out, _ = bash("traffic_tick; cat $EXPIRE_LOG | tail -3")
+# Блок за трафик делает скрипт таймера на диске, а не awg2: тот же сценарий через него
+api("client", "limit", "alice", "1M", "total")
+dump_with({"alice": (100 + 3 * 2**20, 100), "bob": (10, 10)})
+# Окружение как у службы systemd: без HOME, USER, TERM, локали
+reset_calls()
+r = subprocess.run(["bash", SCR("EXPIRE_BIN")], capture_output=True, text=True, timeout=60, cwd="/",
+                   env={k: v for k, v in ENV.items() if k in ("PATH", "CALLS", "LINKS", "ACTIVE", "IPT_SAVE", "AWG_DUMP")})
+chk("скрипт таймера в окружении systemd — без ошибок", r.returncode == 0 and not r.stderr.strip()
+    and "awg show awg0 transfer" in calls(), [r.returncode, r.stderr[-400:]])
+chk("превысил лимит — блок скриптом таймера", cl("alice").get("blocked_by") == "traffic", cl("alice"))
+with open(os.path.join(ROOT, "units", "awg2-expire.timer")) as f:
+    unit = f.read()
+chk("таймер сроков: каждые 15 с по часам, без Persistent и отсчёта от прошлого запуска",
+    "OnCalendar=*-*-* *:*:00/15" in unit and "AccuracySec=1s" in unit and "Persistent" not in unit
+    and "OnUnitActiveSec" not in unit, unit)
+with open(os.path.join(ROOT, "units", "awg2-expire.service")) as f:
+    chk("служба таймера: без «Starting/Finished» в журнале каждые 15 с", "LogLevelMax=notice" in f.read())
+reset_calls()
+bash('touch -d "-10 min" "$EXPIRE_STATE_DIR/transfer"; EXPIRE_STALE=300 expire_watchdog')
+c = calls()
+chk("сторож: таймер молчит 10 минут — ставит заново, перезапускает и сразу делает проход",
+    "systemctl restart awg2-expire.timer" in c and "systemctl start --no-block awg2-expire.service" in c, c)
+with open(os.path.join(ROOT, "expire.log")) as f:
+    chk("сторож: запись в журнале сроков", "watchdog: таймер молчал" in f.read())
+reset_calls()
+bash('EXPIRE_STALE=300 expire_watchdog')
+chk("сторож: таймер жив — не трогает", "awg2-expire" not in calls(), calls())
+reset_calls()
+bash('systemctl() { echo "systemctl $*" >> "$CALLS"; [[ "$1" == show ]] && echo "$ST"; return 0; }; '
+     'ST=elapsed timer_heal awg2-expire.timer; ST=waiting timer_heal awg2-expire.timer; ST=running timer_heal awg2-expire.timer')
+chk("заглохший таймер (elapsed) перезапускается, рабочий — не трогается",
+    calls().count("systemctl restart awg2-expire.timer") == 1, calls())
+api("client", "limit", "alice", "off")
 os.remove(AWG_DUMP)
 # Предупреждение о длине I1-I5 — по каждому клиенту отдельно, не суммой по всем
 for n in ("l1", "l2"):
@@ -779,6 +820,8 @@ r = api("client", "del", "t-001", env={"API_LOCK_WAIT": "1"})
 chk("занятая очередь — rc 75", r.get("ok") is False and r["rc"] == 75 and "другая операция" in r["error"], r)
 r = api("clients", "list")
 chk("чтение мимо очереди", r.get("ok") is True, r)
+r = api("traffic", "now", env={"API_LOCK_WAIT": "1"})
+chk("живая скорость (traffic now) — мимо очереди", r.get("ok") is True, r)
 holder.kill()
 holder.wait()
 
@@ -1134,6 +1177,7 @@ rc, out, _ = bash(KG + 'mod_built_for() { [[ $1 == 6.8.0-100-generic ]]; }; comp
 chk("шапка меню предупреждает о ядре без модуля", "6.8.0-110-generic" in out and "Пересобрать" in out, out)
 r = api("status")
 chk("api status: components.kernel_gap", r.get("ok") and "kernel_gap" in (r["data"].get("components") or {}), r.get("data"))
+chk("api status: uptime — секунды работы системы", isinstance(r["data"].get("uptime"), int) and r["data"]["uptime"] > 0, r.get("data"))
 
 print("Домен мимикрии по региону")
 STUBSCAN = 'scan_domains() { shift; SCAN_OK=("$@"); }; '
@@ -1267,5 +1311,38 @@ mark, _, rest = out.strip().partition("\n--")
 bsum, _, ver = rest.partition("--")
 chk("служебные скрипты пересобираются и для новой сборки той же версии",
     len(bsum) == 16 and ver.startswith("v1.") and mark == f"{ver} {bsum}", out)
+
+print("\n── Веб-панель (awg2) ──")
+WEBC = os.path.join(TMP, "awg-web.conf")
+WEBPRE = (f'WEB_CONF="{WEBC}"; WEB_LOG="{TMP}/awg-web.log"; WEB_DIR="{TMP}/awg-web"; BOT_DIR="{TMP}/awg-bot"; '
+          'web_code_ready() { return 0; }; AUTO_MODE=0; ')
+with open(ACTIVE, "a") as f:
+    f.write("awg-web.service\n")
+rc, out, _ = bash(WEBPRE + "web_install 2>&1; echo rc=$?", stdin="admin2\nSuperSecret123\nSuperSecret123\n")
+out = re.sub(r"\x1b\[[0-9;]*m", "", out)
+conf = dict(ln.split("=", 1) for ln in open(WEBC).read().split("\n") if "=" in ln)
+unit = open(os.path.join(ROOT, "units", "awg-web.service")).read()
+chk("установка: логин, хеш scrypt вместо пароля, случайные порт и путь, конфиг 600",
+    "rc=0" in out and conf.get("WEB_USER") == "admin2" and conf.get("WEB_PASS", "").startswith("scrypt$16384$8$1$")
+    and 20000 <= int(conf.get("WEB_PORT", 0)) < 60000 and re.fullmatch(r"[A-Za-z0-9]{14}", conf.get("WEB_PATH", ""))
+    and os.stat(WEBC).st_mode & 0o777 == 0o600 and "SuperSecret123" not in open(WEBC).read(), [out[-500:], conf])
+chk("введённый пароль на экран не выводится, адрес с портом и секретным путём — выводится",
+    "SuperSecret123" not in out and f":{conf.get('WEB_PORT')}/{conf.get('WEB_PATH')}/" in out, out[-500:])
+chk("служба awg-web: python -m awgbot.web из кода бота, конфиг и журнал панели",
+    "ExecStart=" in unit and "-m awgbot.web" in unit and f"AWG_WEB_CONF={WEBC}" in unit, unit)
+old_hash = conf["WEB_PASS"]
+rc, out, _ = bash(WEBPRE + "web_install 2>&1", stdin="\n\n")
+out = re.sub(r"\x1b\[[0-9;]*m", "", out)
+m = re.search(r"Пароль: ([A-Za-z0-9]{18}) ", out)
+conf2 = dict(ln.split("=", 1) for ln in open(WEBC).read().split("\n") if "=" in ln)
+chk("Enter вместо пароля — сгенерирован и показан один раз; порт и путь прежние",
+    m and conf2["WEB_PASS"] != old_hash and conf2["WEB_PORT"] == conf["WEB_PORT"] and conf2["WEB_PATH"] == conf["WEB_PATH"],
+    out[-500:])
+rc, out, _ = bash(WEBPRE + "printf '%s' 'Пароль 123' | py web-hash")
+chk("хеш пароля: соль каждый раз новая", out.strip().startswith("scrypt$") and out.strip() != conf2["WEB_PASS"], out)
+rc, out, _ = bash(WEBPRE + "main_menu", stdin="0\n")
+chk("главное меню: пункт w) Веб-панель", "w)" in out and "Веб-панель" in out, out[-600:])
+rc, out, _ = bash(WEBPRE + f'remove_unit() {{ rm -f "{ROOT}/units/$1"; }}; ' + "web_remove quiet 2>&1; ls " + f'"{WEBC}" 2>&1; ls "{ROOT}/units/awg-web.service" 2>&1')
+chk("удаление: конфиг и служба убраны", "No such file" in out and out.count("No such file") == 2, out)
 
 summary()

@@ -505,7 +505,7 @@ def cmd_expire_check(conf, suspend, state_dir):
 
 # ── Трафик клиентов и лимиты ──
 # Счётчики `awg show transfer` живут, пока поднят интерфейс, поэтому таймер
-# раз в минуту складывает их прирост в базу: по дням (DAYS_KEEP дней) и за
+# каждые 15 с складывает их прирост в базу: по дням (DAYS_KEEP дней) и за
 # всё время. Ключ — публичный ключ: переименование историю не теряет.
 # Лимит — метка пира «# limit=БАЙТ/month|total»; превысивший блокируется
 # как истёкший (AllowedIPs → suspend), с меткой «# blocked_by=traffic» — по
@@ -797,6 +797,18 @@ def cmd_traffic_daily(conf, db, transfer, name="", days="30"):
                 rows.append({"name": n or p[:8], "rx": sum(r), "tx": sum(s)})
         out["clients"] = sorted(rows, key=lambda c: -(c["rx"] + c["tx"]))
     print(json.dumps(out, ensure_ascii=False))
+
+
+def cmd_traffic_now(conf, transfer):
+    """Счётчики awg0 сейчас — для живой скорости в панели: время (с долями
+    секунды) и {имя: [приём, отдача]}. Только чтение, база трафика не трогается."""
+    _, peers = split_peers(read(conf))
+    names = {peer_field(b, "PublicKey"): peer_name(b) for b in peers if peer_field(b, "PublicKey")}
+    out = {}
+    for pub, (rx, tx) in _read_transfer(transfer).items():
+        if pub in names:
+            out[names[pub] or pub[:8]] = [rx, tx]
+    print(json.dumps({"ts": round(time.time(), 3), "peers": out}, ensure_ascii=False))
 
 
 def cmd_traffic_rows(conf, db, transfer):
@@ -2075,6 +2087,18 @@ def cmd_safe_untar(archive, dest):
         die("в архиве нет файлов")
 
 
+def cmd_web_hash():
+    """Пароль веб-панели (stdin) → scrypt-хеш в формате awgbot.web.hash_password."""
+    import base64
+    import hashlib
+    pw = sys.stdin.read()
+    if not pw:
+        die("пустой пароль")
+    salt = os.urandom(16)
+    dk = hashlib.scrypt(pw.encode(), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+    print("scrypt$%d$%d$%d$%s$%s" % (2 ** 14, 8, 1, base64.b64encode(salt).decode(), base64.b64encode(dk).decode()))
+
+
 COMMANDS = {
     "peers": cmd_peers, "meta-set": cmd_meta_set, "peer-del": cmd_peer_del,
     "peer-rename": cmd_peer_rename, "peers-clear": cmd_peers_clear,
@@ -2082,9 +2106,10 @@ COMMANDS = {
     "i-replace": cmd_i_replace,
     "expire-set": cmd_expire_set, "expire-clear": cmd_expire_clear,
     "expire-check": cmd_expire_check,
-    "traffic-tick": cmd_traffic_tick, "traffic-daily": cmd_traffic_daily,
+    "traffic-tick": cmd_traffic_tick, "traffic-daily": cmd_traffic_daily, "traffic-now": cmd_traffic_now,
     "traffic-rows": cmd_traffic_rows, "traffic-report": cmd_traffic_report,
     "limit-set": cmd_limit_set, "limit-reset": cmd_limit_reset, "size-parse": cmd_size_parse,
+    "web-hash": cmd_web_hash,
     "net-of": cmd_net_of, "pick-net": cmd_pick_net, "net-overlaps": cmd_net_overlaps,
     "allowed-except": cmd_allowed_except,
     "rand-key": cmd_rand_key, "phobos-link": cmd_phobos_link, "exit-conf-fix": cmd_exit_conf_fix,

@@ -89,7 +89,7 @@ expire_install() {
   emit_script "$EXPIRE_BIN" 'expire_check_run' \
     SERVER_CONF AWG_IF EXPIRE_SUSPEND_IP EXPIRE_STATE_DIR EXPIRE_LOG BOT_CONF BOT_ADMINS TRAFFIC_DB _PY_HELPER \
     py _expire_notify _expire_esc _expire_sync traffic_tick expire_check_run || return 1
-  write_file "$EXPIRE_SERVICE" 644 <<EOF
+  write_unit awg2-expire.service <<EOF
 [Unit]
 Description=AWG Toolza — сроки и трафик клиентов
 After=awg-quick@awg0.service network-online.target
@@ -97,22 +97,47 @@ After=awg-quick@awg0.service network-online.target
 [Service]
 Type=oneshot
 ExecStart=$EXPIRE_BIN
+# Запуск каждые 15 с: «Starting/Finished» в журнал не пишем, сбои — пишем
+LogLevelMax=notice
 EOF
-  write_file "$EXPIRE_TIMER" 644 <<'EOF'
+  # Каждые 15 секунд по часам: превысивший лимит блокируется не позже чем
+  # через 15 с (что успеет скачать за это время — перерасход). Прежний
+  # OnUnitActiveSec отсчитывал от прошлого запуска службы и после
+  # переустановки сервера мог не сработать больше никогда (см. timer_heal);
+  # расписание по часам от истории не зависит.
+  write_unit awg2-expire.timer <<'EOF'
 [Unit]
 Description=AWG Toolza — таймер сроков и трафика клиентов
 
 [Timer]
-OnBootSec=30s
-OnUnitActiveSec=1min
-AccuracySec=10s
-Persistent=true
+OnCalendar=*-*-* *:*:00/15
+AccuracySec=1s
 
 [Install]
 WantedBy=timers.target
 EOF
-  systemctl daemon-reload
   systemctl enable --now awg2-expire.timer &>/dev/null || warn "Таймер сроков не запустился: systemctl status awg2-expire.timer"
+  timer_heal awg2-expire.timer
+}
+
+# Сторож таймера: каждый проход таймера пишет счётчики в $EXPIRE_STATE_DIR/transfer.
+# Файл старше 5 минут — таймер молчит, и сроки с лимитами не блокируют: поставить
+# таймер заново, перезапустить и сразу сделать проход. Зовётся при каждом запуске
+# awg2 (меню, бот, панель) — стоит одного stat.
+EXPIRE_STALE=300
+expire_watchdog() {
+  local tr="$EXPIRE_STATE_DIR/transfer" age
+  server_exists || return 0
+  [[ -f "$tr" ]] || return 0            # таймер ещё ни разу не проходил — поставит expire_install
+  age=$(( $(date +%s) - $(stat -c %Y "$tr" 2>/dev/null || echo 0) ))
+  (( age < EXPIRE_STALE )) && return 0
+  mkdir -p "$(dirname "$EXPIRE_LOG")"
+  echo "$(date '+%F %T') watchdog: таймер молчал ${age}с — перезапуск" >> "$EXPIRE_LOG"
+  log_warn "таймер сроков и лимитов молчал ${age}с — перезапуск"
+  touch "$tr"                           # параллельные вызовы awg2 не перезапускают его разом
+  expire_install &>/dev/null
+  systemctl restart awg2-expire.timer &>/dev/null || true
+  systemctl start --no-block awg2-expire.service &>/dev/null || true
 }
 
 expire_remove() {
@@ -167,7 +192,7 @@ do_traffic_days() {
   echo ""
   hdr "Трафик по дням"
   py traffic-report "$SERVER_CONF" "$TRAFFIC_DB" "$tr" 14 | sed 's/^/  /'
-  [[ -f "$TRAFFIC_DB" ]] || info "Учёт идёт с момента установки $VERSION — данные копятся раз в минуту"
+  [[ -f "$TRAFFIC_DB" ]] || info "Учёт идёт с момента установки $VERSION — данные копятся каждые 15 секунд"
 }
 
 do_expire_menu() {

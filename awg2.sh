@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.2.2"
+VERSION="v1.2.3"
 # Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
 # в сравнении версий не участвует. У выпущенной сборки пусто.
 BUILD=""
@@ -466,8 +466,6 @@ EXITS_SCRIPT="/usr/local/bin/awg2-exits-routing.sh"
 
 # ── Срок действия клиентов ────────────────────────────────
 EXPIRE_BIN="/usr/local/bin/awg2-expire-check"
-EXPIRE_SERVICE="/etc/systemd/system/awg2-expire.service"
-EXPIRE_TIMER="/etc/systemd/system/awg2-expire.timer"
 EXPIRE_STATE_DIR="/var/lib/awg2-expire"
 EXPIRE_LOG="/var/log/awg2-expire.log"
 EXPIRE_SUSPEND_IP="127.0.0.2/32"
@@ -495,6 +493,11 @@ BOT_CONF="/etc/awg-bot.conf"
 BOT_ADMINS="/var/lib/awg-bot/admins.json"   # приглашённые админы (ведёт бот)
 BOT_DIR="/opt/awg-bot"
 BOT_UNIT="awg-bot.service"
+# Веб-панель (awgbot.web): конфиг с хешем пароля, журнал входов, самоподписанный сертификат
+WEB_CONF="/etc/awg-web.conf"
+WEB_UNIT="awg-web.service"
+WEB_LOG="/var/log/awg-web.log"
+WEB_DIR="/etc/awg-web"
 BOT_PROXY_SCHEMES="http https socks4 socks5 socks5h iface"
 WEBAPP_PORT_DEFAULT=8443                    # Mini App бота (WEBAPP_PORT в BOT_CONF)
 
@@ -640,12 +643,29 @@ write_unit() {
   write_file "/etc/systemd/system/$1" 644 && systemctl daemon-reload
 }
 
+# Таймер в состоянии «active (elapsed)» больше не сработает никогда, хотя
+# is-active отвечает «active». Так глох таймер сроков и лимитов (v1.2.0-1.2.2):
+# с Persistent=true systemd при старте таймера берёт время прошлого запуска
+# из метки в /var/lib/systemd/timers, считает OnBootSec прошедшим, а
+# OnUnitActiveSec отсчитывать не от чего — служба после переустановки ещё не
+# запускалась. Такой таймер — перезапустить без метки: сработает сразу,
+# дальше по расписанию.
+timer_heal() {
+  local u st
+  for u in "$@"; do
+    st=$(systemctl show -p SubState --value "$u" 2>/dev/null)
+    [[ "$st" == waiting || "$st" == running ]] && continue
+    rm -f "/var/lib/systemd/timers/stamp-$u"
+    systemctl restart "$u" &>/dev/null || true
+  done
+}
+
 remove_unit() {
   local u
   for u in "$@"; do
     systemctl disable --now "$u" >/dev/null 2>&1 || true
     systemctl reset-failed "$u" >/dev/null 2>&1 || true
-    rm -f "/etc/systemd/system/$u"
+    rm -f "/etc/systemd/system/$u" "/var/lib/systemd/timers/stamp-$u"
   done
   systemctl daemon-reload 2>/dev/null || true
 }
@@ -3774,7 +3794,7 @@ expire_install() {
   emit_script "$EXPIRE_BIN" 'expire_check_run' \
     SERVER_CONF AWG_IF EXPIRE_SUSPEND_IP EXPIRE_STATE_DIR EXPIRE_LOG BOT_CONF BOT_ADMINS TRAFFIC_DB _PY_HELPER \
     py _expire_notify _expire_esc _expire_sync traffic_tick expire_check_run || return 1
-  write_file "$EXPIRE_SERVICE" 644 <<EOF
+  write_unit awg2-expire.service <<EOF
 [Unit]
 Description=AWG Toolza — сроки и трафик клиентов
 After=awg-quick@awg0.service network-online.target
@@ -3782,22 +3802,47 @@ After=awg-quick@awg0.service network-online.target
 [Service]
 Type=oneshot
 ExecStart=$EXPIRE_BIN
+# Запуск каждые 15 с: «Starting/Finished» в журнал не пишем, сбои — пишем
+LogLevelMax=notice
 EOF
-  write_file "$EXPIRE_TIMER" 644 <<'EOF'
+  # Каждые 15 секунд по часам: превысивший лимит блокируется не позже чем
+  # через 15 с (что успеет скачать за это время — перерасход). Прежний
+  # OnUnitActiveSec отсчитывал от прошлого запуска службы и после
+  # переустановки сервера мог не сработать больше никогда (см. timer_heal);
+  # расписание по часам от истории не зависит.
+  write_unit awg2-expire.timer <<'EOF'
 [Unit]
 Description=AWG Toolza — таймер сроков и трафика клиентов
 
 [Timer]
-OnBootSec=30s
-OnUnitActiveSec=1min
-AccuracySec=10s
-Persistent=true
+OnCalendar=*-*-* *:*:00/15
+AccuracySec=1s
 
 [Install]
 WantedBy=timers.target
 EOF
-  systemctl daemon-reload
   systemctl enable --now awg2-expire.timer &>/dev/null || warn "Таймер сроков не запустился: systemctl status awg2-expire.timer"
+  timer_heal awg2-expire.timer
+}
+
+# Сторож таймера: каждый проход таймера пишет счётчики в $EXPIRE_STATE_DIR/transfer.
+# Файл старше 5 минут — таймер молчит, и сроки с лимитами не блокируют: поставить
+# таймер заново, перезапустить и сразу сделать проход. Зовётся при каждом запуске
+# awg2 (меню, бот, панель) — стоит одного stat.
+EXPIRE_STALE=300
+expire_watchdog() {
+  local tr="$EXPIRE_STATE_DIR/transfer" age
+  server_exists || return 0
+  [[ -f "$tr" ]] || return 0            # таймер ещё ни разу не проходил — поставит expire_install
+  age=$(( $(date +%s) - $(stat -c %Y "$tr" 2>/dev/null || echo 0) ))
+  (( age < EXPIRE_STALE )) && return 0
+  mkdir -p "$(dirname "$EXPIRE_LOG")"
+  echo "$(date '+%F %T') watchdog: таймер молчал ${age}с — перезапуск" >> "$EXPIRE_LOG"
+  log_warn "таймер сроков и лимитов молчал ${age}с — перезапуск"
+  touch "$tr"                           # параллельные вызовы awg2 не перезапускают его разом
+  expire_install &>/dev/null
+  systemctl restart awg2-expire.timer &>/dev/null || true
+  systemctl start --no-block awg2-expire.service &>/dev/null || true
 }
 
 expire_remove() {
@@ -3852,7 +3897,7 @@ do_traffic_days() {
   echo ""
   hdr "Трафик по дням"
   py traffic-report "$SERVER_CONF" "$TRAFFIC_DB" "$tr" 14 | sed 's/^/  /'
-  [[ -f "$TRAFFIC_DB" ]] || info "Учёт идёт с момента установки $VERSION — данные копятся раз в минуту"
+  [[ -f "$TRAFFIC_DB" ]] || info "Учёт идёт с момента установки $VERSION — данные копятся каждые 15 секунд"
 }
 
 do_expire_menu() {
@@ -8276,6 +8321,7 @@ webapp_port() {
 
 webapp_fw() {
   local p
+  [[ -f "/etc/systemd/system/$BOT_UNIT" ]] || return 0
   p=$(webapp_port)
   [[ "$p" == off ]] || ufw_allow "$p/tcp" awg-webapp
   return 0
@@ -8539,10 +8585,16 @@ bot_uninstall() {
     cp -a "$BOT_CONF" "$saved" || saved=""
   fi
   systemctl disable --now "$BOT_UNIT" &>/dev/null || true
-  for p in "${BOT_ARTIFACTS[@]}"; do rm -rf "$p"; done
+  local arts=("${BOT_ARTIFACTS[@]}")
+  # Код, venv и заметки нужны веб-панели — с ней остаются
+  if web_installed; then
+    arts=(); for p in "${BOT_ARTIFACTS[@]}"; do [[ "$p" == "$BOT_DIR" || "$p" == /var/lib/awg-bot ]] || arts+=("$p"); done
+    info "Код бота остаётся — на нём работает веб-панель"
+  fi
+  for p in "${arts[@]}"; do rm -rf "$p"; done
   systemctl daemon-reload
   systemctl reset-failed "$BOT_UNIT" &>/dev/null || true
-  for p in "${BOT_ARTIFACTS[@]}"; do [[ -e "$p" ]] && left+=("$p"); done
+  for p in "${arts[@]}"; do [[ -e "$p" ]] && left+=("$p"); done
   if (( ${#left[@]} )); then warn "Не удалось удалить: ${left[*]}"; else ok "Бот удалён"; fi
   [[ -n "$saved" ]] && info "Конфиг с токеном сохранён: $saved"
   log_info "бот удалён"
@@ -8584,6 +8636,251 @@ do_bot_menu() {
       6) bot_proxy_menu || true ;;
       7) bot_uninstall || true ;;
       8) do_webapp_menu || true; continue ;;
+      0) return 0 ;;
+    esac
+    pause
+  done
+}
+
+# ═════ web ═════
+# Веб-панель: та же панель, что Mini App бота, но в браузере по логину и
+# паролю (служба awg-web, код — awg_bot: python -m awgbot.web). Telegram-бот
+# ей не нужен: код и venv ставит тот же установщик с --web-only.
+#
+# Адрес — https://IP-или-домен:порт/<секретный путь>/; всё остальное на этом
+# порту — 404. Пароль хранится только хешем scrypt в $WEB_CONF (600).
+# Сертификат — тот же, что у Mini App (/etc/awg2/cert: Let's Encrypt на IP или
+# домен, готовый сертификат сервера); его нет — самоподписанный.
+
+web_installed() { [[ -f "/etc/systemd/system/$WEB_UNIT" ]]; }
+web_active() { unit_active "$WEB_UNIT"; }
+web_code_ready() { [[ -x "$BOT_VENV_PY" && -f "$BOT_DIR/awgbot/web.py" ]]; }
+
+web_conf_get() { sed -n "s/^$1=//p" "$WEB_CONF" 2>/dev/null | tail -1; }
+web_conf_set() {  # KEY значение
+  { grep -v "^$1=" "$WEB_CONF" 2>/dev/null || true; echo "$1=$2"; } | write_file "$WEB_CONF" 600
+}
+
+web_host() { if cert_installed; then cert_get name; else public_ip_cached; fi; }
+web_url() {
+  local p path
+  p=$(web_conf_get WEB_PORT); path=$(web_conf_get WEB_PATH)
+  [[ -n "$p" && -n "$path" ]] || return 1
+  echo "https://$(web_host):$p/$path/"
+}
+
+web_random_path() { tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 14; }
+web_port_busy() { ss -Hltn "sport = :$1" 2>/dev/null | grep -q .; }
+web_random_port() {
+  local p i
+  for (( i = 0; i < 50; i++ )); do
+    p=$(( RANDOM % 40000 + 20000 ))
+    web_port_busy "$p" || { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+# Пароль без эха; EOF — пусто
+_read_secret() {
+  local __var="$1" __v=""
+  _flush_stdin
+  IFS= read -rs -p "$(echo -e "$2")" __v || __v=""
+  echo >&2
+  printf -v "$__var" '%s' "$__v"
+}
+
+# Спросить пароль (Enter — сгенерировать) → WEB_NEW_HASH; сгенерированный — в WEB_PASS_SHOWN
+web_ask_password() {
+  local a b
+  WEB_PASS_SHOWN="" WEB_NEW_HASH=""
+  while true; do
+    _read_secret a "${C}  Пароль (от 10 символов, Enter — сгенерировать): ${N}"
+    if [[ -z "$a" ]]; then
+      a=$(tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 18)
+      WEB_PASS_SHOWN="$a"
+      break
+    fi
+    (( ${#a} >= 10 )) || { warn "Нужно не меньше 10 символов"; continue; }
+    _read_secret b "${C}  Ещё раз: ${N}"
+    [[ "$a" == "$b" ]] && break
+    warn "Пароли не совпали"
+  done
+  WEB_NEW_HASH=$(printf '%s' "$a" | py web-hash) && [[ "$WEB_NEW_HASH" == scrypt\$* ]]
+}
+
+# Код и venv панели: из распакованного архива (рядом, /root, /home) или из
+# канала обновлений. Бот при этом не ставится и не трогается.
+web_code_install() {
+  local src installer
+  src=$(_bot_local_src || true)
+  if [[ -n "$src" && -f "$src/awgbot/web.py" && -f "${src%/awg_bot}/awg-bot-install.sh" ]]; then
+    info "Код панели: $src"
+    bash "${src%/awg_bot}/awg-bot-install.sh" --src "$src" --web-only
+    return
+  fi
+  mktmp installer || return 1
+  curl -fsSL "$BOT_INSTALL_URL" -o "$installer" || { err "Не скачался установщик: $BOT_INSTALL_URL"; return 1; }
+  if ! grep -q -- '--web-only' "$installer"; then
+    err "В канале $(update_channel_label) веб-панели ещё нет — поставь её из архива с панелью"
+    return 1
+  fi
+  AWG_REPO_URL="https://github.com/$UPDATE_REPO" bash "$installer" --web-only
+}
+
+web_write_unit() {
+  write_unit "$WEB_UNIT" <<EOF
+[Unit]
+Description=AWG Toolza — веб-панель
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$BOT_DIR
+ExecStart=$BOT_VENV_PY -m awgbot.web
+Environment=AWG_WEB_CONF=$WEB_CONF AWG_WEB_LOG=$WEB_LOG AWG2_BIN=$SCRIPT_PATH AWG_BOT_CONF=$BOT_CONF PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+web_restart() {
+  local i
+  systemctl enable "$WEB_UNIT" &>/dev/null || true
+  systemctl restart "$WEB_UNIT" || true
+  for (( i = 0; i < 8; i++ )); do sleep 1; web_active && break; done
+  if web_active; then ok "Веб-панель работает"
+  else err "Веб-панель не запустилась: journalctl -u ${WEB_UNIT%.service} -n 30"; return 1; fi
+}
+
+web_show_access() {
+  success_box "Веб-панель: $(web_url)"
+  echo -e "  Логин : ${W}$(web_conf_get WEB_USER)${N}"
+  [[ -n "${WEB_PASS_SHOWN:-}" ]] && echo -e "  Пароль: ${W}$WEB_PASS_SHOWN${N} ${D}— сохрани: на сервере только хеш, больше не покажу${N}"
+  cert_installed || warn "Сертификата нет — панель на самоподписанном, браузер предупредит. Настоящий: пункты «Сертификат»"
+  return 0
+}
+
+web_install() {
+  local user v port path
+  if ! web_code_ready; then
+    web_code_install || return 1
+    web_code_ready || { err "Код веб-панели не установился (нет $BOT_DIR/awgbot/web.py)"; return 1; }
+  fi
+  user=$(web_conf_get WEB_USER)
+  while true; do
+    read_line v "${C}  Логин [Enter = ${user:-admin}]: ${N}"
+    v="${v:-${user:-admin}}"
+    [[ "$v" =~ ^[A-Za-z0-9._-]{3,32}$ ]] && break
+    warn "Логин: 3-32 символа — латиница, цифры, . _ -"
+  done
+  user="$v"
+  web_ask_password || { err "Пароль не захеширован"; return 1; }
+  port=$(web_conf_get WEB_PORT); [[ -n "$port" ]] || port=$(web_random_port) || { err "Нет свободного порта"; return 1; }
+  path=$(web_conf_get WEB_PATH); [[ -n "$path" ]] || path=$(web_random_path)
+  web_conf_set WEB_USER "$user"
+  web_conf_set WEB_PASS "$WEB_NEW_HASH"
+  web_conf_set WEB_PORT "$port"
+  web_conf_set WEB_PATH "$path"
+  ufw_allow "$port/tcp" awg-web
+  web_write_unit
+  web_restart || return 1
+  log_info "веб-панель установлена: порт $port"
+  web_show_access
+}
+
+web_set_port() {
+  local v old
+  old=$(web_conf_get WEB_PORT)
+  read_line v "${C}  Порт (1024-65535, Enter — случайный): ${N}"
+  [[ -n "$v" ]] || v=$(web_random_port) || return 1
+  [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1024 && v <= 65535 )) || { err "Порт: 1024-65535"; return 1; }
+  [[ "$v" == "$old" ]] && return 0
+  web_port_busy "$v" && { err "Порт $v занят"; return 1; }
+  [[ "$v" == "$(server_port 2>/dev/null)" || "$v" == "$(webapp_port)" ]] && { err "Порт $v занят AWG или Mini App"; return 1; }
+  web_conf_set WEB_PORT "$v"
+  ufw_delete_matching awg-web
+  ufw_allow "$v/tcp" awg-web
+  web_restart && web_show_access
+}
+
+web_remove() {
+  if [[ "${1:-}" != quiet ]]; then
+    read_confirm "${R}  Удалить веб-панель? (введи yes): ${N}" || return 0
+  fi
+  remove_unit "$WEB_UNIT"
+  systemctl daemon-reload
+  rm -rf "$WEB_CONF" "$WEB_DIR" "$WEB_LOG"
+  ufw_delete_matching awg-web
+  # Код и venv ставились только ради панели — бот их не использует
+  if [[ ! -f "/etc/systemd/system/$BOT_UNIT" ]]; then rm -rf "$BOT_DIR" /var/lib/awg-bot; fi
+  ok "Веб-панель удалена"
+  log_info "веб-панель удалена"
+}
+
+do_web_menu() {
+  local c v n st
+  while true; do
+    echo ""
+    hdr "Веб-панель"
+    echo -e "  ${D}Все разделы Тулзы в браузере — вход по логину и паролю, без Telegram.${N}"
+    if ! web_installed; then
+      echo -e "  Статус     : ${D}не установлена${N}"
+      echo ""
+      echo -e "  ${G}1)${N} Установить"
+      echo -e "  ${W}0)${N} ← Назад"
+      read_choice c "${C}  Выбор [0-1]: ${N}" 0 1 0
+      case "$c" in
+        1) web_install || true ;;
+        0) return 0 ;;
+      esac
+      pause
+      continue
+    fi
+    if web_active; then st="${G}● работает${N}"; else st="${R}○ остановлена${N}"; fi
+    echo -e "  Статус     : $st"
+    echo -e "  Адрес      : ${W}$(web_url)${N}"
+    echo -e "  Логин      : $(web_conf_get WEB_USER)"
+    if cert_installed; then echo -e "  Сертификат : $(cert_state_line)"
+    else echo -e "  Сертификат : ${Y}самоподписанный${N} ${D}— браузер предупреждает; настоящий — пункты 6-8${N}"; fi
+    echo ""
+    n=$(cert_find | grep -c . || true)
+    echo -e "  ${C}1)${N} Перезапустить"
+    echo -e "  ${C}2)${N} Сменить пароль"
+    echo -e "  ${C}3)${N} Сменить логин"
+    echo -e "  ${C}4)${N} Порт ${D}— $(web_conf_get WEB_PORT)${N}"
+    echo -e "  ${C}5)${N} Новый секретный путь ${D}— старый адрес перестанет открываться${N}"
+    echo -e "  ${C}6)${N} Сертификат на IP ${D}— Let's Encrypt, $(public_ip_cached)${N}"
+    echo -e "  ${C}7)${N} Сертификат на домен"
+    echo -e "  ${C}8)${N} Готовый сертификат сервера ${D}— найдено $n${N}"
+    echo -e "  ${C}9)${N} Журнал входов"
+    echo -e "  ${C}s)${N} $(web_active && echo "Остановить" || echo "Запустить")"
+    echo -e "  ${C}u)${N} Обновить код панели ${D}— из архива или канала${N}"
+    echo -e "  ${R}d)${N} Удалить веб-панель"
+    echo -e "  ${W}0)${N} ← Назад"
+    read_choice c "${C}  Выбор: ${N}" 0 9 0 "s|u|d"
+    case "$c" in
+      1) web_restart || true ;;
+      2) web_ask_password && web_conf_set WEB_PASS "$WEB_NEW_HASH" && web_restart \
+           && { ok "Пароль сменён, все сессии завершены"; [[ -n "$WEB_PASS_SHOWN" ]] \
+           && echo -e "  Пароль: ${W}$WEB_PASS_SHOWN${N} ${D}— сохрани, больше не покажу${N}"; } ;;
+      3) read_line v "${C}  Новый логин: ${N}"
+         if [[ "$v" =~ ^[A-Za-z0-9._-]{3,32}$ ]]; then web_conf_set WEB_USER "$v" && web_restart && ok "Логин: $v"
+         elif [[ -n "$v" ]]; then warn "Логин: 3-32 символа — латиница, цифры, . _ -"; fi ;;
+      4) web_set_port || true ;;
+      5) web_conf_set WEB_PATH "$(web_random_path)" && web_restart && web_show_access ;;
+      6) _cert_issue_menu ip ;;
+      7) read_line v "${C}  Домен (A-запись → $(public_ip_cached)): ${N}"
+         [[ -n "$v" ]] && _cert_issue_menu domain "$v" ;;
+      8) _cert_use_menu ;;
+      9) if [[ -s "$WEB_LOG" ]]; then tail -n 30 "$WEB_LOG"; else info "Журнал пуст"; fi ;;
+      s) if web_active; then systemctl disable --now "$WEB_UNIT" &>/dev/null && ok "Веб-панель остановлена"
+         else web_restart || true; fi ;;
+      u) web_code_install && web_restart || true ;;
+      d) web_remove; return 0 ;;
       0) return 0 ;;
     esac
     pause
@@ -8663,7 +8960,7 @@ toolza_unpacked() {
 }
 
 do_uninstall() {
-  local del_bot=n del_wgobf=n del_self=n del_src=n opts src=()
+  local del_bot=n del_wgobf=n del_web=n del_self=n del_src=n opts src=()
   hdr "Удаление AWG Toolza"
   warn "Будет удалено:"
   echo -e "  ${R}—${N} сервер awg0, его клиенты и автозапуск"
@@ -8672,11 +8969,13 @@ do_uninstall() {
   echo -e "  ${R}—${N} таймер сроков клиентов, правила UFW с меткой AmneziaWG"
   bot_installed && echo -e "  ${R}—${N} Telegram-бот ${D}(спрошу отдельно)${N}"
   wgobf_installed && echo -e "  ${R}—${N} WG + обфускатор ${D}(спрошу отдельно)${N}"
+  web_installed && echo -e "  ${R}—${N} веб-панель ${D}(спрошу отдельно)${N}"
   echo -e "  ${R}—${N} сам скрипт $SCRIPT_PATH ${D}(спрошу отдельно)${N}"
   echo -e "  ${D}Перед удалением делается полный бэкап в $BACKUP_DIR — он остаётся.${N}"
   read_confirm "${R}  Подтверди удаление (введи yes): ${N}" || return 0
   bot_installed && read_yesno del_bot "  Удалить и Telegram-бота? [Y/n]: " y
   wgobf_installed && read_yesno del_wgobf "  Удалить и WG + обфускатор? [Y/n]: " y
+  web_installed && read_yesno del_web "  Удалить и веб-панель? [Y/n]: " y
   read_yesno del_self "  Удалить сам скрипт awg2? [Y/n]: " y
   mapfile -t src < <(toolza_unpacked)
   if (( ${#src[@]} )); then
@@ -8687,6 +8986,7 @@ do_uninstall() {
   opts=()
   [[ "$del_bot" == y ]] && opts+=(bot)
   [[ "$del_wgobf" == y ]] && opts+=(wgobf)
+  [[ "$del_web" == y ]] && opts+=(web)
   [[ "$del_self" == y ]] && opts+=(self)
   uninstall_all "${opts[@]}"
   if [[ "$del_src" == y ]]; then
@@ -8699,9 +8999,9 @@ do_uninstall() {
 # uninstall_all [bot] [wgobf] [self] — без вопросов; полный бэкап делается всегда.
 UNINSTALLED_SELF=0
 uninstall_all() {
-  local v o del_bot=n del_wgobf=n del_self=n
+  local v o del_bot=n del_wgobf=n del_web=n del_self=n
   for o in "$@"; do
-    case "$o" in bot) del_bot=y ;; wgobf) del_wgobf=y ;; self) del_self=y ;; esac
+    case "$o" in bot) del_bot=y ;; wgobf) del_wgobf=y ;; web) del_web=y ;; self) del_self=y ;; esac
   done
 
   server_exists && do_backup
@@ -8732,11 +9032,15 @@ uninstall_all() {
   ufw_delete_matching AmneziaWG
   if [[ "$del_wgobf" == y ]]; then wgobf_remove quiet
   elif wgobf_installed; then info "WG + обфускатор оставлен и продолжит работать сам"; fi
+  if [[ "$del_web" == y ]] && web_installed; then web_remove quiet
+  elif web_installed; then info "Веб-панель оставлена — сервера AWG в ней больше нет"; fi
   if [[ "$del_bot" == y ]]; then
     bot_uninstall quiet
-    # Сертификат нужен только Mini App бота
-    [[ -f "$CERT_STATE" || -d "$CERT_DIR" ]] && cert_remove &>/dev/null
-    rm -rf "$ACME_DIR" "$ACME_HOME"
+    # Сертификат — для Mini App бота и веб-панели
+    if ! web_installed; then
+      [[ -f "$CERT_STATE" || -d "$CERT_DIR" ]] && cert_remove &>/dev/null
+      rm -rf "$ACME_DIR" "$ACME_HOME"
+    fi
   fi
   log_info "полное удаление"
   if [[ "$del_self" != y ]]; then
@@ -9047,8 +9351,9 @@ main_menu() {
     echo -e "  ${R}7)${N} Удаление        ${D}— очистка${N}"
     echo -e "  ${M}8)${N} Обновление      ${D}— $(update_channel_label)${N}"
     echo -e "  ${C}9)${N} WG + обфускатор ${D}— $(wgobf_installed && echo "установлен" || echo "как Phobos")${N}"
+    echo -e "  ${C}w)${N} Веб-панель      ${D}— $(web_installed && { web_active && echo "работает" || echo "остановлена"; } || echo "в браузере")${N}"
     echo -e "  ${W}0)${N} Выход"
-    read_choice c "${C}  Выбор [0-9]: ${N}" 0 9
+    read_choice c "${C}  Выбор [0-9, w]: ${N}" 0 9 "" "w"
     case "$c" in
       1) do_server_menu ;;
       2) _need_server && { do_clients_menu || true; } ;;
@@ -9059,6 +9364,7 @@ main_menu() {
       7) do_danger_menu ;;
       8) do_update_menu ;;
       9) do_wgobf_menu ;;
+      w) do_web_menu ;;
       0) echo -e "\n  ${G}В путь!${N} ${D}t.me/awgToolza${N}\n"; return 0 ;;
     esac
   done
@@ -9146,6 +9452,7 @@ _api_status() {
     _kv version "$VERSION_SHOW"; _kv api:n "$API_VERSION"
     _kv channel "$UPDATE_CHANNEL"; _kv update "$(update_available || true)"
     _kv host "$(hostname)"; _kv ip "$(public_ip_cached)"
+    _kv uptime:n "$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)"
     _kv os "$OS_LABEL"; _kv kernel "$(uname -r)"
     _kv components.installed:b "$(_b command -v awg)"
     _kv components.module "$(mod_tag)"; _kv components.tools "$(tools_tag)"
@@ -9446,7 +9753,13 @@ _api_traffic() {
       mktmp tr || return 1
       awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || true
       py traffic-daily "$SERVER_CONF" "$TRAFFIC_DB" "$tr" "$name" "$days" > "$API_DATA" ;;
-    *) _api_usage "traffic daily [ИМЯ|all] [ДНЕЙ]" ;;
+    now)
+      # Счётчики прямо сейчас — панель считает по ним живую скорость
+      server_exists || { err "Сервер не создан"; return 1; }
+      mktmp tr || return 1
+      awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || true
+      py traffic-now "$SERVER_CONF" "$tr" > "$API_DATA" ;;
+    *) _api_usage "traffic daily [ИМЯ|all] [ДНЕЙ] | now" ;;
   esac
 }
 
@@ -9941,7 +10254,7 @@ _api_readonly() {
     *" status"|*" info"|*" report"|*" tags"|*" backups"|*" list"|*" conf"|*" inspect") return 0 ;;
     "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|\
     "bot proxy"|"bot webapp"|"update check"|"update changelog"|"module check"|"cert "|"cert find"|\
-    "traffic daily") return 0 ;;
+    "traffic daily"|"traffic now") return 0 ;;
   esac
   return 1
 }
@@ -10031,6 +10344,7 @@ api_main() {
     err "Не удалось поставить базовые пакеты (curl, iptables, iproute2)"; rc=1
   else
     helpers_refresh || true
+    expire_watchdog || true
     if _api_readonly "${API_ARGS[@]}"; then
       api_dispatch "${API_ARGS[@]}" || rc=$?
     else
@@ -10120,6 +10434,7 @@ main() {
   update_channel_init
   base_deps
   helpers_refresh || true
+  expire_watchdog || true
 
   case "${1:-}" in
     --status) do_status; exit 0 ;;
@@ -11976,7 +12291,7 @@ if __name__ == "__main__":
 '
 # CPS_GENERATOR_END v2
 
-_PY_HELPER_SUM=856e2d5c3a10cc05
+_PY_HELPER_SUM=d1ed9ac893e06acc
 IFS= read -r -d '' _PY_HELPER <<'__AWG2_PY_HELPER__' || true
 """Встроенный помощник awg2: разбор и атомарная правка конфигов, JSON Xray,
 расчёты подсетей, разбор pcap. Вызывается как `py <команда> [аргументы]`.
@@ -12485,7 +12800,7 @@ def cmd_expire_check(conf, suspend, state_dir):
 
 # ── Трафик клиентов и лимиты ──
 # Счётчики `awg show transfer` живут, пока поднят интерфейс, поэтому таймер
-# раз в минуту складывает их прирост в базу: по дням (DAYS_KEEP дней) и за
+# каждые 15 с складывает их прирост в базу: по дням (DAYS_KEEP дней) и за
 # всё время. Ключ — публичный ключ: переименование историю не теряет.
 # Лимит — метка пира «# limit=БАЙТ/month|total»; превысивший блокируется
 # как истёкший (AllowedIPs → suspend), с меткой «# blocked_by=traffic» — по
@@ -12777,6 +13092,18 @@ def cmd_traffic_daily(conf, db, transfer, name="", days="30"):
                 rows.append({"name": n or p[:8], "rx": sum(r), "tx": sum(s)})
         out["clients"] = sorted(rows, key=lambda c: -(c["rx"] + c["tx"]))
     print(json.dumps(out, ensure_ascii=False))
+
+
+def cmd_traffic_now(conf, transfer):
+    """Счётчики awg0 сейчас — для живой скорости в панели: время (с долями
+    секунды) и {имя: [приём, отдача]}. Только чтение, база трафика не трогается."""
+    _, peers = split_peers(read(conf))
+    names = {peer_field(b, "PublicKey"): peer_name(b) for b in peers if peer_field(b, "PublicKey")}
+    out = {}
+    for pub, (rx, tx) in _read_transfer(transfer).items():
+        if pub in names:
+            out[names[pub] or pub[:8]] = [rx, tx]
+    print(json.dumps({"ts": round(time.time(), 3), "peers": out}, ensure_ascii=False))
 
 
 def cmd_traffic_rows(conf, db, transfer):
@@ -14055,6 +14382,18 @@ def cmd_safe_untar(archive, dest):
         die("в архиве нет файлов")
 
 
+def cmd_web_hash():
+    """Пароль веб-панели (stdin) → scrypt-хеш в формате awgbot.web.hash_password."""
+    import base64
+    import hashlib
+    pw = sys.stdin.read()
+    if not pw:
+        die("пустой пароль")
+    salt = os.urandom(16)
+    dk = hashlib.scrypt(pw.encode(), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+    print("scrypt$%d$%d$%d$%s$%s" % (2 ** 14, 8, 1, base64.b64encode(salt).decode(), base64.b64encode(dk).decode()))
+
+
 COMMANDS = {
     "peers": cmd_peers, "meta-set": cmd_meta_set, "peer-del": cmd_peer_del,
     "peer-rename": cmd_peer_rename, "peers-clear": cmd_peers_clear,
@@ -14062,9 +14401,10 @@ COMMANDS = {
     "i-replace": cmd_i_replace,
     "expire-set": cmd_expire_set, "expire-clear": cmd_expire_clear,
     "expire-check": cmd_expire_check,
-    "traffic-tick": cmd_traffic_tick, "traffic-daily": cmd_traffic_daily,
+    "traffic-tick": cmd_traffic_tick, "traffic-daily": cmd_traffic_daily, "traffic-now": cmd_traffic_now,
     "traffic-rows": cmd_traffic_rows, "traffic-report": cmd_traffic_report,
     "limit-set": cmd_limit_set, "limit-reset": cmd_limit_reset, "size-parse": cmd_size_parse,
+    "web-hash": cmd_web_hash,
     "net-of": cmd_net_of, "pick-net": cmd_pick_net, "net-overlaps": cmd_net_overlaps,
     "allowed-except": cmd_allowed_except,
     "rand-key": cmd_rand_key, "phobos-link": cmd_phobos_link, "exit-conf-fix": cmd_exit_conf_fix,
@@ -14101,5 +14441,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=c925c07047020619
+_BUILD_SUM=166fe9cd8ae9e212
 main "$@"
