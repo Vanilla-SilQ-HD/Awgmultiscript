@@ -389,6 +389,7 @@
   .topo .lbl2 { font: 500 10.5px var(--mono); fill: var(--muted); }
   .topo .link { fill: none; stroke-width: 1.6; opacity: .55; transition: opacity .15s; }
   .topo .link.off { stroke-dasharray: 3 5; opacity: .25; }
+  .topo .link.idle { opacity: .35; }
   .topo .flow { fill: none; stroke-width: 2.6; stroke-linecap: round; stroke-dasharray: 1 14; animation: flow linear infinite; }
   @keyframes flow { to { stroke-dashoffset: -150; } }
   @media (prefers-reduced-motion: reduce) { .topo .flow { animation: none; } }

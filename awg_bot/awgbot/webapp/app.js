@@ -1047,10 +1047,21 @@ function topology(el, rows, mdl, srvLabel) {
   // Клиентов больше, чем влезает, — схема той же высоты, а столбец клиентов
   // листается внутри неё (колесо, тачпад, палец); awg0 и выходы стоят на месте
   const scroll = shown.length > MAXC;
+  const cname = (c) => (c.name.length > 16 ? c.name.slice(0, 15) + "…" : c.name);
   const exits = mdl.ex.filter((e) => e.id !== "direct" || shown.some((c) => mdl.of[c.name] === "direct") || mdl.ex.length === 1);
-  const row = narrow ? 36 : 46, Hc = Math.max(scroll ? MAXC : shown.length, exits.length, 2) * row + 24;
+  const row = narrow ? 44 : 46, Hc = Math.max(scroll ? MAXC : shown.length, exits.length, 2) * row + 24;
   const cap = scroll ? 22 : 0, Hh = Hc + cap;
-  const cx = narrow ? 104 : 190, sx = W / 2, exX = W - (narrow ? 96 : 200), sy = Hc / 2;
+  const exLabel = (e) => (narrow ? (e.short.length > 10 ? e.short.slice(0, 9) + "…" : e.short) : exitLabel(e));
+  // На телефоне поля под подписи — по самой длинной подписи, остальное — линиям
+  let cx = 190, exX = W - 200;
+  if (narrow) {
+    const tw = topology.tw || (topology.tw = document.createElement("canvas").getContext("2d"));
+    tw.font = `600 12px ${(getComputedStyle(document.documentElement).getPropertyValue("--sans") || "system-ui").trim()}`;
+    const widest = (list) => Math.max(0, ...list.map((t) => tw.measureText(t).width));
+    cx = Math.round(Math.min(130, Math.max(64, widest(shown.map((c) => cname(c))) + 26)));
+    exX = Math.round(W - Math.min(116, Math.max(54, widest(exits.map(exLabel)) + 28)));
+  }
+  const sx = narrow ? Math.round((cx + 9 + exX - 11) / 2) : W / 2, sy = Hc / 2;
   const spread = (i, k) => 12 + row / 2 + i * (Hc - 24 - row) / ((k - 1) || 1) + (k === 1 ? (Hc - 24 - row) / 2 : 0);
   const cy = (i) => (scroll ? 12 + row / 2 + i * row : spread(i, shown.length)), ey = (i) => spread(i, exits.length);
   const sw = narrow ? 66 : 124, sh = narrow ? 72 : 96;
@@ -1059,7 +1070,6 @@ function topology(el, rows, mdl, srvLabel) {
   const sum = {}, maxT = Math.max(1, ...rows.map((c) => c.today || 0));
   rows.forEach((c) => { const e = mdl.of[c.name]; sum[e] = (sum[e] || 0) + (c.today || 0); });
   const maxE = Math.max(1, ...Object.values(sum));
-  const cname = (c) => (c.name.length > 16 ? c.name.slice(0, 15) + "…" : c.name);
   const csub = (c) => (c.blocked ? blockedWord(c) : c.online ? `${fmtBytes(c.today || 0)} сегодня` : c.handshake ? `${fmtDur(c.ago)} назад` : "не подключался");
   const ctitle = (c) => `${c.name} → ${mdl.get(mdl.of[c.name]).name}`;
   // Линии клиент → awg0 (у листаемого столбца — только видимых клиентов)
@@ -1074,11 +1084,14 @@ function topology(el, rows, mdl, srvLabel) {
     });
     return p;
   };
+  // Толщина линии к выходу — трафик за сегодня; бегущие точки — только пока через
+  // выход идёт кто-то в сети (никого нет — линия стоит)
+  const used = new Set(rows.filter((c) => c.online && !c.blocked).map((c) => mdl.of[c.name]));
   let s = "";
   exits.forEach((e, j) => {
     const d = bez(sx + sw / 2, sy, exX - 11, ey(j)), t = (sum[e.id] || 0) / maxE;
-    s += `<path class="link" data-e="${esc(e.id)}" d="${d}" stroke="${e.c}" style="stroke-width:${(1.4 + t * 2.4).toFixed(1)}"/>`;
-    if (sum[e.id]) s += `<path class="flow" data-e="${esc(e.id)}" d="${d}" stroke="${e.c}" style="animation-duration:${(5.5 - t * 3.5).toFixed(1)}s"/>`;
+    s += `<path class="link${used.has(e.id) ? "" : " idle"}" data-e="${esc(e.id)}" d="${d}" stroke="${e.c}" style="stroke-width:${(1.4 + t * 2.4).toFixed(1)}"/>`;
+    if (used.has(e.id)) s += `<path class="flow" data-e="${esc(e.id)}" d="${d}" stroke="${e.c}" style="animation-duration:${(5.5 - t * 3.5).toFixed(1)}s"/>`;
   });
   if (!scroll) {
     s += links(0);
@@ -1097,7 +1110,6 @@ function topology(el, rows, mdl, srvLabel) {
     <image x="${sx - 18}" y="${sy - sh / 2 + 8}" width="36" height="36" href="${TZ_ICON}"/>
     <text class="lbl" x="${sx}" y="${sy + (narrow ? 26 : 18)}" text-anchor="middle">awg0</text>
     ${narrow ? "" : `<text class="lbl2" x="${sx}" y="${sy + 34}" text-anchor="middle">${esc(srvLabel)}</text>`}</g>`;
-  const exLabel = (e) => (narrow ? (e.short.length > 10 ? e.short.slice(0, 9) + "…" : e.short) : exitLabel(e));
   exits.forEach((e, j) => {
     s += `<g class="node" data-e="${esc(e.id)}"><title>${esc(e.name)}</title><rect x="${exX - 11}" y="${ey(j) - 11}" width="22" height="22" rx="7" fill="${e.c}"/>
       <text class="lbl" x="${exX + 20}" y="${ey(j) + (narrow ? 4 : 0)}">${esc(exLabel(e))}</text>
