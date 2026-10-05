@@ -404,6 +404,12 @@ const NAV = [
 const topEl = document.getElementById("top"), railEl = document.getElementById("rail"), tabEl = document.getElementById("tabbar"),
   moreEl = document.getElementById("more"), scrim = document.getElementById("scrim"), drawerEl = document.getElementById("drawer");
 const curPath = () => location.hash.slice(1) || "/";
+// Срок показываем, как раньше, у незаблокированного (истёкший до прохода таймера —
+// «истёк», заметно, если таймер не блокирует), а ещё у заблокированного за трафик
+// с будущим сроком: блок держит лимит, срок остаётся в силе
+const expLive = (c) => !!c.expires && (!c.blocked || (c.blocked_by === "traffic" && c.expires > Date.now() / 1000));
+// Битый %-код в адресе (#/client/%E0%A4) — decodeURIComponent бросает; такой путь считается ненайденным
+const badPath = (p) => { try { decodeURIComponent(p); return false; } catch { return true; } };
 const isOn = (p) => {
   const c = curPath();
   return p === "/" ? c === "/" : c === p || c.startsWith(p + "/") || (p === "/clients" && /^\/(client\/|add$|bulk$)/.test(c))
@@ -759,6 +765,7 @@ async function show(path, target, my) {
 async function render() {
   const path = curPath();
   const my = ++token;
+  if (badPath(path)) return replace("/clients");
   closePal(); closeMore();
   if (tg && tg.BackButton) tg.BackButton[path === "/" ? "hide" : "show"]();
   drawNav();
@@ -1181,6 +1188,8 @@ async function liveLoop(ctx, onTick) {
   while (ctx.live()) {
     if (!document.hidden) {
       try {
+        // Вкладка была скрыта: первый замер охватил бы весь провал — скорость и «в сети» считаются с нуля
+        if (L.at && Date.now() - L.at > 10000) { L.prev = null; L.rx = []; L.tx = []; L.per = {}; L.act = {}; L.since = 0; }
         const d = await call("traffic", "now");
         if (d && d.peers) {
           if (L.prev && d.ts > L.prev.ts) {
@@ -1209,7 +1218,7 @@ async function liveLoop(ctx, onTick) {
 
 // Журнал сроков и лимитов (/var/log/awg2-expire.log) → события
 const EV_KIND = {
-  limit: ["ban", "var(--red)", (n, x) => [`${n} заблокирован: лимит исчерпан`, x]],
+  limit: ["shield-off", "var(--red)", (n, x) => [`${n} заблокирован: лимит исчерпан`, x]],
   limit90: ["gauge", "var(--amber)", (n, x) => [`${n} израсходовал 90% лимита`, x]],
   unlimit: ["circle-check", "var(--ok)", (n, x) => [`${n} разблокирован`, x]],
   expired: ["hourglass", "var(--red)", (n, x) => [`${n}: срок истёк`, x]],
@@ -1340,7 +1349,7 @@ route(/^\/$/, async (ctx) => {
   const tmax = Math.max(1, ...topToday.map((c) => c.today));
   const lims = rows.filter((c) => c.limit).map((c) => [c, Math.min(999, Math.round((c.used || 0) * 100 / c.limit))]).sort((a, b) => b[1] - a[1]);
   const nowS = Date.now() / 1000, D30 = 30 * 86400;
-  const exps = rows.filter((c) => c.expires && !c.blocked && c.expires - nowS < D30).sort((a, b) => a.expires - b.expires);
+  const exps = rows.filter((c) => expLive(c) && c.expires - nowS < D30).sort((a, b) => a.expires - b.expires);
   const events = parseEvents(evlog && evlog.log);
   // Маршруты трафика: схема (по умолчанию) или список — выбор запоминается на устройстве
   const routesIn = h("div", { class: "in" });
@@ -1412,7 +1421,10 @@ route(/^\/$/, async (ctx) => {
     foot);
   drawRoutes();
   // Ширина окна поменялась — схема перерисовывается под неё
-  const onResize = () => { if (!ctx.live()) { window.removeEventListener("resize", onResize); return; } clearTimeout(onResize.t); onResize.t = setTimeout(drawRoutes, 150); };
+  // Слушатель один на окно: прежний снимается при новом заходе на экран и когда экран закрыт
+  if (S.onResize) window.removeEventListener("resize", S.onResize);
+  const onResize = () => { if (!ctx.live()) { window.removeEventListener("resize", onResize); if (S.onResize === onResize) S.onResize = null; return; } clearTimeout(onResize.t); onResize.t = setTimeout(drawRoutes, 150); };
+  S.onResize = onResize;
   window.addEventListener("resize", onResize);
   liveLoop(ctx, (L) => {
     // Отключился или подключился — схема, счётчик и подзаголовок меняются на лету
@@ -1482,7 +1494,7 @@ function clientTags(c) {
   const left = c.expires ? c.expires - Date.now() / 1000 : 0;
   return [
     c.mimicry && c.mimicry !== "none" ? tag(c.mimicry, "accent", "drama") : tag("без I1-I5"),
-    c.expires && !c.blocked ? tag(expShort(c.expires), left < 3 * 86400 ? "warn" : "", "hourglass") : null,
+    expLive(c) ? tag(expShort(c.expires), left < 3 * 86400 ? "warn" : "", "hourglass") : null,
     c.limit ? tag(`лимит ${Math.min(999, Math.round(c.used * 100 / c.limit))}%`, c.used >= c.limit * 0.9 ? "warn" : "", "gauge") : null,
     routeTag(c, (S.clients && S.clients.route) || {}),
     c.mon ? tag("мониторинг", "", "bell") : null,
@@ -1493,8 +1505,13 @@ async function removeClients(btn, names, after) {
   if (!await confirmTg(names.length === 1 ? `Удалить клиента ${names[0]}? Его конфиг перестанет работать.`
     : `Удалить клиентов: ${names.length}?\n${list}\n\nИх конфиги перестанут работать.`)) return;
   await busy(btn, async () => {
-    await post("/api/client/del", { names });
-    haptic(); toast(names.length === 1 ? `Удалён: ${names[0]}` : `Удалено: ${names.length}`);
+    const r = await post("/api/client/del", { names });
+    // Сервер отвечает именами, которые удалил на самом деле
+    const gone = Array.isArray(r && r.data) ? r.data.filter((n) => names.includes(n)) : names;
+    haptic();
+    if (gone.length === names.length) toast(names.length === 1 ? `Удалён: ${names[0]}` : `Удалено: ${names.length}`);
+    else if (!gone.length) toast("Не удалось удалить: " + list, 4000);
+    else toast(`Удалено ${gone.length} из ${names.length}; остались: ${names.filter((n) => !gone.includes(n)).join(", ")}`, 5000);
     after();
   });
 }
@@ -1516,6 +1533,8 @@ const CLIENTS_RE = route(/^\/clients$/, async (ctx) => {
   const headBox = h("div");
   const search = h("input", { type: "search", placeholder: "Поиск по имени, IP, заметке", value: S.q, "aria-label": "Поиск",
     oninput: () => { S.q = search.value.trim().toLowerCase(); draw(); } });
+  // Поле поиска остаётся в панели инструментов навсегда: пересоздай его draw() — фокус пропал бы после каждой буквы
+  toolbar.append(h("div", { class: "search" }, icon("search"), search));
   const count = (k) => D().rows.filter((c) => k === "all" || (k === "online" && c.online) || (k === "blocked" && c.blocked)
     || (k === "mon" && c.mon)).length;
 
@@ -1546,6 +1565,7 @@ const CLIENTS_RE = route(/^\/clients$/, async (ctx) => {
     const op = (ic, label, fn, cls) => h("button", { class: cls || null, title: label, "aria-label": label,
       onclick: (ev) => { ev.stopPropagation(); fn(ev.currentTarget); } }, icon(ic));
     const left = c.expires ? c.expires - Date.now() / 1000 : 0;
+    const expActive = expLive(c);
     return h("tr", { class: sel ? "sel" : null, "data-name": c.name, onclick: () => open(c) },
       S.select ? h("td", {}, mark(c)) : null,
       h("td", {}, h("div", { class: "who" }, ava(c), h("div", { style: "min-width:0" }, h("b", {}, c.name, c.mon ? " 🔔" : ""),
@@ -1554,8 +1574,8 @@ const CLIENTS_RE = route(/^\/clients$/, async (ctx) => {
       h("td", { class: "num" }, c.today != null ? `${fmtBytes(c.today)} сегодня` : "—", h("br"),
         h("span", { class: "muted" }, `↓ ${fmtBytes(c.rx)} · ↑ ${fmtBytes(c.tx)}`)),
       h("td", {}, c.limit ? h("div", { class: "lim", title: limitText(c) }, ringSvg(pct, 26, 4), pct + "%") : h("span", { class: "muted" }, "—")),
-      h("td", { class: "num", style: c.expires && !c.blocked && left < 3 * 86400 ? "color:var(--amber)" : null },
-        c.expires && !c.blocked ? expShort(c.expires) : c.expires ? "истёк" : "∞"),
+      h("td", { class: "num", style: expActive && left < 3 * 86400 ? "color:var(--amber)" : null },
+        expActive ? expShort(c.expires) : c.expires ? "истёк" : "∞"),
       h("td", {}, routeChip(c, mdl), c.mimicry && c.mimicry !== "none" ? h("div", { class: "muted small mono" }, c.mimicry) : null),
       h("td", {}, S.select ? null : h("div", { class: "ops" },
         op("qr-code", "Конфиг и QR", () => go(`/client/${enc}/qr`)),
@@ -1573,7 +1593,7 @@ const CLIENTS_RE = route(/^\/clients$/, async (ctx) => {
     return h("div", { class: "item", "data-name": c.name, onclick: () => open(c) },
       S.select ? mark(c) : ava(c),
       h("div", { class: "main" }, h("div", { class: "title" }, c.name + (c.mon ? " 🔔" : "")),
-        h("div", { class: "sub" }, [c.ip, seen(c), c.expires && !c.blocked ? "⏳ " + expShort(c.expires) : null, c.note].filter(Boolean).join(" · "))),
+        h("div", { class: "sub" }, [c.ip, seen(c), expLive(c) ? "⏳ " + expShort(c.expires) : null, c.note].filter(Boolean).join(" · "))),
       h("div", { class: "side" }, "↓" + fmtBytes(c.rx), h("br"), "↑" + fmtBytes(c.tx)));
   }
   function exportBtn() {
@@ -1597,8 +1617,8 @@ const CLIENTS_RE = route(/^\/clients$/, async (ctx) => {
     tabs.replaceChildren(tabsBar(FILTERS.map(([k, label]) => [k, label, count(k)]), S.filter, (k) => { S.filter = k; draw(); }));
     const views = wide ? [["table", "list", "Таблица"], ["cards", "layout-grid", "Карточки"]]
       : [["cards", "layout-list", "Карточки"], ["list", "list", "Список"]];
-    toolbar.replaceChildren(
-      h("div", { class: "search" }, icon("search"), search),
+    while (toolbar.children.length > 1) toolbar.lastChild.remove();       // всё, кроме поиска
+    toolbar.append(
       segBar(views, S.view, (v) => { S.view = v; setPref(vkey, v); draw(); }),
       h("button", { title: "Сортировка: " + (S.sort === "name" ? "по имени" : "по активности"), "aria-label": "Сортировка", onclick: () => {
         S.sort = S.sort === "name" ? "activity" : "name";
@@ -3075,15 +3095,26 @@ route(/^\/wgobf\/client\/([^/]+)$/, async (ctx, name) => {
 });
 
 // ── Бот ───────────────────────────────────────────────────
-// Бот перезапускается (прокси, перезапуск): панель ждёт новый процесс —
-// у него другое время старта
-async function botRestarting(started, what) {
+// Бот перезапускается (прокси, перезапуск): Mini App живёт в процессе бота и ждёт
+// новый процесс — у него другое время старта. Веб-панель — отдельный процесс:
+// её /api/me всегда отдаёт своё время старта, поэтому она ждёт, пока служба бота снова станет active
+async function botRestarting(started, what, running = true) {
+  // Остановленного бота awg2 не перезапускает (bot_restart) — ждать нечего
+  if (WEB && !running) {
+    toast(`${what}. Бот остановлен — изменения вступят в силу, когда он запустится`, 5000);
+    render();
+    return;
+  }
   toast(`${what} — бот перезапускается…`, 8000);
   const until = Date.now() + 120e3;
   let back = false;
+  // awg2 откладывает рестарт на 2 с — раньше статус показал бы ещё старый процесс
+  if (WEB) await new Promise((ok) => setTimeout(ok, 4000));
   while (!back && Date.now() < until) {
-    await new Promise((ok) => setTimeout(ok, 2000));
-    try { back = (await post("/api/me")).started !== started; } catch { /* ещё не поднялся */ }
+    await new Promise((ok) => setTimeout(ok, WEB ? 3000 : 2000));
+    try {
+      back = WEB ? !!((await call("bot", "status")) || {}).active : (await post("/api/me")).started !== started;
+    } catch { /* ещё не поднялся */ }
   }
   toast(back ? "✅ Бот снова на связи" : "Бот не ответил за 2 минуты — открой панель заново", 4000);
   if (back) render();
@@ -3112,7 +3143,7 @@ route(/^\/bot$/, async (ctx) => {
       lines: [d.proxy || null],
       acts: [act("refresh-cw", "Рестарт", async (b) => {
         if (!await confirmTg("Перезапустить бота? Панель подождёт и продолжит работу.")) return;
-        await busy(b, async () => { await call("bot", "restart"); await botRestarting(me.started, "Перезапуск"); });
+        await busy(b, async () => { await call("bot", "restart"); await botRestarting(me.started, "Перезапуск", d.active !== false); });
       }), act("circle-arrow-up", "Обновить", () => updateBot(ctx)), act("file-text", "Журнал", () => go("/log/bot"))] }),
     statGrid([
       [`${d.owners} + ${d.invited}`, "Админы", "владельцы + приглашённые", d.owner ? () => go("/bot/admins") : null],
@@ -3176,7 +3207,7 @@ route(/^\/bot\/proxy$/, async (ctx) => {
       }
     }
     url.value = "";
-    await botRestarting(me.started, "Прокси сохранён");
+    await botRestarting(me.started, "Прокси сохранён", d.active !== false);
   }
   ctx.put(title("Прокси до Telegram"),
     h("div", { class: "card" }, kv("Сейчас", h("span", { class: "mono" }, d.proxy || "нет — напрямую")),
@@ -3203,7 +3234,7 @@ route(/^\/bot\/proxy$/, async (ctx) => {
       btn("🩺 Проверить", (b) => busy(b, async () => { await call("bot", "proxy", "check"); haptic(); toast("✅ Через прокси Telegram отвечает"); })),
       btn("🗑 Убрать", async (b) => {
         if (!await confirmTg("Убрать прокси? Бот пойдёт к Telegram напрямую.")) return;
-        await busy(b, async () => { await call("bot", "proxy", "clear"); await botRestarting(me.started, "Прокси убран"); });
+        await busy(b, async () => { await call("bot", "proxy", "clear"); await botRestarting(me.started, "Прокси убран", d.active !== false); });
       }, "btn-danger")) : null,
     hint("После сохранения бот перезапустится — панель дождётся его сама."));
 });
