@@ -1030,7 +1030,7 @@ function routesView(rows, mdl) {
 
 // Схема: клиенты → сервер → выходы. Клиентов много — показаны самые активные
 function topology(el, rows, mdl, srvLabel) {
-  const W = Math.max(300, el.clientWidth || 600), narrow = W < 560, MAXC = narrow ? 8 : 12;
+  const W = Math.max(300, el.clientWidth || 600), narrow = W < 560, MAXC = 6;
   const shown = sortRows(rows, "activity").sort((a, b) => (b.online - a.online) || ((b.today || 0) - (a.today || 0)));
   // Клиентов больше, чем влезает, — схема той же высоты, а столбец клиентов
   // листается внутри неё (колесо, тачпад, палец); awg0 и выходы стоят на месте
@@ -1646,37 +1646,38 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
       haptic(); toast(v === "off" ? "Лимит снят" : v === "reset" ? "Счётчик обнулён" : "Лимит установлен"); render();
     });
   }
-  async function setRoute(btn) {
+  // Маршрут клиента — выбор прямо в карточке: варианты работающего туннеля
+  function routeCard() {
     const kind = r.kind;
-    let opts;
-    if (kind === "exits") {
-      const cur = c.exit_choice;
-      opts = [["off", "Напрямую"], ["shared", "Общий выход"], ...(r.nodes || []).map((n) => [n, "Нода " + n])]
-        .map(([v, l]) => ({ label: (cur === v ? "🔘 " : "⚪️ ") + l, value: v }));
+    const pick = (opts, cur, apply) => h("div", { class: "chips rchips" }, opts.map(([v, l]) => h("button", {
+      class: v === cur ? "on" : null, "data-v": v, title: l, onclick: (ev) => (v === cur ? null : busy(ev.currentTarget, async () => {
+        await apply(v); haptic(); toast(`Маршрут ${name}: ${l}`); render();
+      })) }, l)));
+    let body;
+    if (!kind) body = h("div", { class: "muted small" }, "Туннели выключены — клиент идёт напрямую через сервер. ", linkTo("Туннели →", "/tunnels"));
+    else if (kind === "tun2socks") body = h("div", { class: "muted small" }, "Через tun2socks идут все клиенты — выбирать нечего.");
+    else if (kind === "exits") {
+      body = [pick([["off", "Напрямую"], ["shared", "Общий выход"], ...(r.nodes || []).map((n) => [n, "Нода " + n])], c.exit_choice || "shared",
+        (v) => call("exits", "client", name, v)),
+      r.mode !== "peers" ? hint("Сейчас через exit-ноды идут все клиенты. Выбор переведёт их в режим «выбранные» — остальные останутся на общем выходе.") : null];
     } else if (kind === "xray" && r.per_client && (r.tags || []).length >= 2) {
       // Свой выход Xray клиенту; «по умолчанию» — общий выход или балансировщик
-      const on = c.xray !== false, out = c.xray_out || "";
       const main = r.main === "balancer" ? "балансировщик" : r.main;
-      opts = [{ label: (on && !out ? "🔘 " : "⚪️ ") + "Xray: по умолчанию" + (main ? ` (${main})` : ""), value: "on" },
-        ...r.tags.map((t) => ({ label: (on && out === t ? "🔘 " : "⚪️ ") + "Xray: " + t, value: "x:" + t })),
-        { label: (on ? "⚪️ " : "🔘 ") + "Напрямую", value: "off" }];
+      body = pick([["default", "По умолчанию" + (main ? ` (${main})` : "")], ...r.tags.map((t) => ["x:" + t, t]), ["off", "Напрямую"]],
+        c.xray === false ? "off" : c.xray_out ? "x:" + c.xray_out : "default",
+        (v) => {
+          if (v === "off") return call("tunnels", "client", "xray", name, "off");
+          toast("Перенастраиваю Xray…", 4000);
+          return call("xray", "client", name, v === "default" ? "default" : v.slice(2));
+        });
     } else {
-      const on = c[kind] !== false, t = kind === "warp" ? "WARP" : "Xray";
-      opts = [{ label: (on ? "🔘 " : "⚪️ ") + "Через " + t, value: "on" }, { label: (on ? "⚪️ " : "🔘 ") + "Напрямую", value: "off" }];
+      const t = kind === "warp" ? "WARP" : "Xray";
+      body = pick([["on", "Через " + t], ["off", "Напрямую"]], c[kind] !== false ? "on" : "off", (v) => call("tunnels", "client", kind, name, v));
     }
-    const v = await sheet("Маршрут " + name, opts);
-    if (!v) return;
-    await busy(btn, async () => {
-      const own = kind === "xray" && r.per_client && (r.tags || []).length >= 2 && v !== "off";
-      if (own) toast("Перенастраиваю Xray…", 4000);
-      await (kind === "exits" ? call("exits", "client", name, v)
-        : own ? call("xray", "client", name, v === "on" ? "default" : v.slice(2))
-          : call("tunnels", "client", kind, name, v));
-      haptic(); toast("Маршрут изменён"); render();
-    });
+    return h("div", { class: "card rcard" }, h("div", { class: "eyebrow" }, "маршрут"), body);
   }
 
-  const area = (a, el) => h("div", { class: "a-" + a }, el);
+  const area = (a, ...el) => h("div", { class: "a-" + a }, el);
   ctx.put(
     ctx.drawer ? null : title(name, statusPill(c)),
     h("div", { class: "row", style: "flex-wrap:wrap;gap:6px;margin:-4px 2px 12px" }, ctx.drawer ? statusPill(c) : null, clientTags(c)),
@@ -1690,8 +1691,7 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
       kv("IP", h("span", { class: "mono" }, c.ip)),
       c.endpoint ? kv("Адрес клиента", h("span", { class: "mono" }, c.endpoint.replace(/:\d+$/, ""))) : null,
       kv("Мимикрия", h("span", { class: "mono" }, !c.mimicry || c.mimicry === "none" ? "без I1-I5" : c.mimicry)),
-      kv("Маршрут", c.route || "напрямую"),
-      c.note ? kv("Заметка", c.note) : null)),
+      c.note ? kv("Заметка", c.note) : null), routeCard()),
     area("traf", h("div", { class: "card" },
       kv("За месяц", fmtBytes(c.month)), kv("Сегодня", fmtBytes(c.today)),
       kv("Лимит", c.limit ? limitText(c) : "нет"), c.limit ? meter(c.used, c.limit) : null, chartBox)),
@@ -1705,7 +1705,6 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
       h("button", { onclick: (ev) => setExpire(ev.currentTarget) }, "⏳ Срок"),
       h("button", { onclick: (ev) => setLimit(ev.currentTarget) }, "📶 Лимит"),
       h("button", { onclick: () => go(`/client/${enc}/mimicry`) }, "🎭 Мимикрия"),
-      ["warp", "xray", "exits"].includes(r.kind) ? h("button", { onclick: (ev) => setRoute(ev.currentTarget) }, "🌐 Маршрут") : null,
       h("button", { onclick: () => go(`/client/${enc}/note`) }, "📝 Заметка"))),
     area("del", h("button", { class: "btn-danger btn-block", onclick: (ev) => removeClients(ev.currentTarget, [name], () => replace("/clients")) },
       "🗑 Удалить клиента"))));
@@ -2415,20 +2414,82 @@ route(/^\/tunnels\/tun2socks$/, async (ctx) => {
         ["t2s", "remove"]), "btn-danger") : null));
 });
 
-// AWG exit-ноды
+// AWG exit-ноды: туннель вкл/выкл, кого вести (все или выбранные), выбор клиентов
+// и ноды каждому — на одном экране
 route(/^\/tunnels\/exits$/, async (ctx) => {
-  const r = await callR(["exits", "status"]);
-  const d = r.data || {}, nodes = d.nodes || [], up = d.up;
+  const [r, cl] = await Promise.all([callR(["exits", "status"]), loadClients().catch(() => ({ rows: [] }))]);
+  const d = r.data || {}, nodes = d.nodes || [], up = !!d.up, mode = d.mode === "peers" ? "peers" : "all";
+  // Выход каждого клиента в режиме «выбранные»: off — напрямую, shared — общий выход, иначе нода
+  const rows = (cl.rows || []).map((c) => ({ name: c.name, ip: c.ip, online: c.online, exit: c.exit == null ? "shared" : c.exit }));
+  const label = (v) => (v === "shared" ? "общий выход" : "нода " + v);
+  const onCount = () => rows.filter((c) => c.exit !== "off").length;
   async function balance(b) {
     const cur = d.balancer === "ecmp" ? "ecmp" : d.single || "";
     const v = await sheet("⚖️ Балансировка: одна нода — весь общий трафик через неё; ECMP — поровну между поднятыми",
       [...nodes.map((n) => ({ label: `${cur === n.name ? "🔘" : "⚪️"} Нода ${n.name}`, value: "single|" + n.name })),
         { label: `${cur === "ecmp" ? "🔘" : "⚪️"} ECMP`, value: "ecmp|" }]);
     if (!v) return;
-    const [mode, node] = v.split("|");
-    await quick(b, "Балансировка", ["exits", "balance", mode, ...(node ? [node] : [])]);
+    const [m, node] = v.split("|");
+    await quick(b, "Балансировка", ["exits", "balance", m, ...(node ? [node] : [])]);
   }
-  ctx.put(title("🚪 Exit-ноды"), hint("Клиенты выходят в интернет через другие AWG/WG-серверы."), logCard(r.log),
+  // Сам туннель: включить (в выбранном режиме) или выключить — все клиенты напрямую
+  const tunSub = h("div", { class: "sub wrap" });
+  const subText = () => (!nodes.length ? "сначала добавь ноду ниже" : !up ? "выключен — все клиенты идут напрямую"
+    : mode === "all" ? "включён · все клиенты" : `включён · через ноды ${onCount()} из ${rows.length}`);
+  const tunnel = h("div", { class: "card item" + (nodes.length ? "" : " dis"), "data-tunnel": up ? "on" : "off",
+    onclick: nodes.length ? () => busy(null, async () => {
+      const res = await callR(up ? ["exits", "down"] : ["exits", "up", mode]);
+      haptic(); toast("✅ " + outcome(res.log, up ? "Exit-ноды выключены" : "Exit-ноды включены"), 3500); render();
+    }) : null },
+  h("div", { class: "main" }, h("div", { class: "title" }, "Туннель через exit-ноды"), tunSub),
+  h("div", { class: "switch" + (up ? " on" : "") }));
+  // Выбранные клиенты: переключатель у каждого, нода (если их несколько), поиск, все / никого
+  let q = "";
+  const count = h("span", { class: "muted small" }), list = h("div", { class: "card list exl" });
+  const search = h("input", { type: "search", placeholder: "Поиск клиента", autocomplete: "off",
+    oninput: () => { q = search.value.trim().toLowerCase(); draw(); } });
+  const setExit = (c, v) => busy(null, async () => {
+    await call("exits", "client", c.name, v);
+    c.exit = v; haptic(); draw();
+  });
+  async function pickNode(c) {
+    const v = await sheet(`🚪 Выход: ${c.name}`, [["shared", "Общий выход"], ...nodes.map((n) => [n.name, "Нода " + n.name])]
+      .map(([val, l]) => ({ label: `${c.exit === val ? "🔘" : "⚪️"} ${l}`, value: val })));
+    if (v && v !== c.exit) { await setExit(c, v); toast(`${c.name} → ${label(v)}`); }
+  }
+  const bulk = (all) => (b) => busy(b, async () => {
+    await call("exits", "client", all ? "all" : "none");
+    rows.forEach((c) => { if (!all) c.exit = "off"; else if (c.exit === "off") c.exit = "shared"; });
+    haptic(); toast(all ? "Все клиенты — через exit-ноды" : "Никого через exit-ноды — все напрямую", 3000); draw();
+  });
+  function draw() {
+    tunSub.textContent = subText();
+    count.textContent = `через ноды: ${onCount()} из ${rows.length}`;
+    const vis = rows.filter((c) => !q || c.name.toLowerCase().includes(q) || (c.ip || "").includes(q));
+    list.replaceChildren(...(vis.length ? vis.map((c) => {
+      const on = c.exit !== "off", flip = () => setExit(c, on ? "off" : "shared");
+      return h("div", { class: "item", "data-name": c.name },
+        h("div", { class: "dot" + (c.online ? " on" : "") }),
+        h("div", { class: "main", onclick: flip }, h("div", { class: "title" }, c.name),
+          h("div", { class: "sub" }, `${c.ip} · ${on ? label(c.exit) : "напрямую"}`)),
+        on && nodes.length > 1 ? h("button", { class: "chip", title: "Выбрать ноду", onclick: () => pickNode(c) }, label(c.exit), " ▾") : null,
+        h("div", { class: "switch" + (on ? " on" : ""), role: "switch", "aria-checked": String(on), "aria-label": c.name, onclick: flip }));
+    }) : [h("div", { class: "empty" }, q ? "Никого не нашлось" : "Клиентов нет")]));
+  }
+  draw();
+  const seg = h("div", { class: "seg exmode" }, [["all", "Все клиенты"], ["peers", "Выбранные"]].map(([k, t]) =>
+    h("button", { class: mode === k ? "on" : null, onclick: (ev) => (mode === k ? null
+      : quick(ev.currentTarget, k === "all" ? "Через ноды — все клиенты" : "Через ноды — выбранные", ["exits", "mode", k])) }, t)));
+  ctx.put(title("🚪 Exit-ноды"), hint("Клиенты выходят в интернет через другие AWG/WG-серверы."),
+    tunnel,
+    nodes.length ? [h("h2", {}, "Кого вести через ноды"), seg,
+      mode === "peers" ? [
+        h("div", { class: "ctools", style: "margin-top:12px" }, h("div", { class: "search" }, icon("search"), search),
+          btn("✅ Все", bulk(true)), btn("➖ Никого", bulk(false))),
+        h("div", { class: "row", style: "margin:0 4px 8px" }, count), list,
+        hint(up ? "Включено — клиент идёт через ноды, выключено — напрямую через сервер."
+          : "Туннель выключен — выбор сохранится и сработает, когда его включишь.")]
+        : hint("Все клиенты идут через ноды. «Выбранные» — отметить, кого вести; остальные — напрямую.")] : null,
     h("h2", {}, "Ноды"),
     h("div", { class: "card list" }, nodes.length ? nodes.map((n) => h("div", { class: "item", onclick: () =>
       quickAsk(null, `Удалить ноду ${n.name}? Её клиенты перейдут на общий выход.`, `Нода ${n.name} удалена`, ["exits", "del", n.name]) },
@@ -2436,15 +2497,10 @@ route(/^\/tunnels\/exits$/, async (ctx) => {
     h("div", { class: "main" }, h("div", { class: "title" }, n.name), h("div", { class: "sub" }, n.up ? "поднята" : "лежит")),
     h("div", { class: "side bad" }, icon("trash-2")))) : h("div", { class: "empty" }, "Нод нет")),
     btn("➕ Добавить ноду", () => go("/tunnels/exits/add"), "btn-block" + (nodes.length ? "" : " btn-primary")),
-    nodes.length ? [h("h2", {}, "Маршруты"),
-      h("div", { class: "actions" },
-        !up || d.mode !== "all" ? btn("▶️ Все клиенты", () => runJob(ctx, "Маршруты: все клиенты", ["exits", "up", "all"]), up ? null : "btn-primary") : null,
-        !up || d.mode !== "peers" ? btn("🎯 Выбранные", () => runJob(ctx, "Маршруты: выбранные клиенты", ["exits", "up", "peers"])) : null,
-        up ? btn("⏹ Выключить", (b) => quick(b, "Маршруты выключены", ["exits", "down"])) : null,
-        btn("⚖️ Балансировка", balance),
-        btn("👥 Клиенты и ноды", () => go("/tunnels/exits/clients")),
-        btn("📜 Журнал", () => go("/log/exits"))),
-      hint("«Все клиенты» — весь трафик через ноды · «Выбранные» — только отмеченные, остальные напрямую")] : null);
+    h("div", { class: "actions", style: "margin-top:8px" },
+      nodes.length ? btn("⚖️ Балансировка", balance) : null,
+      btn("📜 Журнал", () => go("/log/exits"))),
+    logCard(r.log));
 });
 
 route(/^\/tunnels\/exits\/add$/, async (ctx) => {
@@ -2462,25 +2518,8 @@ route(/^\/tunnels\/exits\/add$/, async (ctx) => {
     }, "btn-primary btn-block"));
 });
 
-// Какой выход у каждого клиента, когда маршруты — «выбранные клиенты»
-route(/^\/tunnels\/exits\/clients$/, async (ctx) => {
-  const [cl, d] = await Promise.all([loadClients(), call("exits", "status")]);
-  const mode = (d && d.mode) || "all", nodes = (d && d.nodes) || [];
-  const exitOf = (c) => (mode !== "peers" || c.exit == null ? "shared" : c.exit);
-  const label = (v) => ({ off: "напрямую", shared: "общий выход" }[v] || "нода " + v);
-  async function pick(c) {
-    const cur = exitOf(c);
-    const v = await sheet(`🚪 Выход: ${c.name}`, [["off", "Напрямую"], ["shared", "Общий выход"], ...nodes.map((n) => [n.name, "Нода " + n.name])]
-      .map(([val, l]) => ({ label: `${cur === val ? "🔘" : "⚪️"} ${l}`, value: val })));
-    if (v && v !== cur) await quick(null, "Выход изменён", ["exits", "client", c.name, v]);
-  }
-  ctx.put(title("👥 Клиенты и ноды"),
-    hint((d && d.up ? "Нажми клиента, чтобы выбрать его выход." : "Маршруты выключены — выбор вступит в силу, когда их включишь.")
-      + (mode !== "peers" ? " Выбор переводит маршруты в режим «выбранные клиенты»: остальные остаются на общем выходе." : "")),
-    h("div", { class: "card list" }, cl.rows.length ? cl.rows.map((c) => h("div", { class: "item", onclick: () => pick(c) },
-      h("div", { class: "main" }, h("div", { class: "title" }, c.name), h("div", { class: "sub" }, c.ip)),
-      h("div", { class: "side" }, "→ " + label(exitOf(c))))) : h("div", { class: "empty" }, "Клиентов нет")));
-});
+// Выбор клиентов и нод теперь на экране exit-нод
+route(/^\/tunnels\/exits\/clients$/, async () => replace("/tunnels/exits"));
 
 // Каскад портов
 route(/^\/tunnels\/cascade$/, async (ctx) => {

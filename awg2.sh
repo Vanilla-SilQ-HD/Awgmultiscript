@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.2.4"
+VERSION="v1.2.5"
 # Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
 # в сравнении версий не участвует. У выпущенной сборки пусто.
 BUILD=""
@@ -6594,8 +6594,27 @@ exits_balance() {
 }
 
 # Клиент и exit-ноды: exits_client ИМЯ off|shared|НОДА. Переводит в выборочный режим.
+# exits_client ИМЯ|all|none off|shared|НОДА — выход клиента; all — все клиенты
+# через ноды (у кого своя нода, она остаётся), none — никто: все напрямую.
+# Режим при этом — «выбранные клиенты»; маршруты перезапускаются один раз.
 exits_client() {
   local ip
+  if [[ "$1" == all || "$1" == none ]]; then
+    mkdir -p "$(dirname "$EXITS_PEERS")"
+    peers_sync "$EXITS_PEERS"
+    if [[ "$1" == all ]]; then
+      clients_name_ip | cut -d'|' -f2 | while IFS= read -r ip; do
+        grep -E "^${ip//./\\.}(\||$)" "$EXITS_PEERS" 2>/dev/null | head -1 | grep . || echo "$ip"
+      done > "$EXITS_PEERS.new"
+      mv -f "$EXITS_PEERS.new" "$EXITS_PEERS"
+    else
+      : > "$EXITS_PEERS"
+    fi
+    exits_state_set mode peers
+    exits_reapply
+    ok "Через exit-ноды: $(grep -c . "$EXITS_PEERS" || true) из $(clients_name_ip | grep -c . || true)"
+    return 0
+  fi
   ip=$(clients_name_ip | awk -F'|' -v n="$1" '$1 == n {print $2; exit}')
   [[ -n "$ip" ]] || { err "Клиента $1 нет"; return 1; }
   if [[ "$(exits_state_get mode)" != peers ]]; then
@@ -6610,6 +6629,16 @@ exits_client() {
   esac
   exits_reapply
   ok "$1: ${2/shared/общий выход}"
+}
+
+# exits_mode all|peers — кого вести через ноды, не включая и не выключая их
+exits_mode() {
+  [[ "${1:-}" == all || "${1:-}" == peers ]] || { err "Режим: all | peers"; return 1; }
+  if [[ "$1" == peers ]]; then peers_sync "$EXITS_PEERS"; peers_seed "$EXITS_PEERS"; fi
+  exits_state_set mode "$1"
+  exits_reapply
+  if [[ "$1" == all ]]; then ok "Через exit-ноды — все клиенты"
+  else ok "Через exit-ноды — выбранные: $(grep -c . "$EXITS_PEERS" || true)"; fi
 }
 
 exits_toggle() {
@@ -9956,10 +9985,11 @@ _api_exits() {
     balance)
       [[ -n "${1:-}" ]] || { _api_usage "exits balance single НОДА|ecmp"; return; }
       exits_balance "$1" "${2:-}" ;;
+    mode) exits_mode "${1:-}" ;;
     client)
-      [[ -n "${2:-}" ]] || { _api_usage "exits client ИМЯ off|shared|НОДА"; return; }
-      exits_client "$1" "$2" ;;
-    *) _api_usage "exits status|add ИМЯ (stdin)|del ИМЯ|up [all|peers]|down|balance single НОДА|ecmp|client ИМЯ off|shared|НОДА" ;;
+      [[ "${1:-}" == all || "${1:-}" == none || -n "${2:-}" ]] || { _api_usage "exits client ИМЯ off|shared|НОДА | all | none"; return; }
+      exits_client "$1" "${2:-}" ;;
+    *) _api_usage "exits status|add ИМЯ (stdin)|del ИМЯ|up [all|peers]|down|mode all|peers|balance single НОДА|ecmp|client ИМЯ off|shared|НОДА|all|none" ;;
   esac
 }
 
@@ -14441,5 +14471,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=516fd496eb6764da
+_BUILD_SUM=322daeb3d89f81ac
 main "$@"

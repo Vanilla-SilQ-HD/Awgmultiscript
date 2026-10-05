@@ -583,10 +583,11 @@ _api_exits() {
     balance)
       [[ -n "${1:-}" ]] || { _api_usage "exits balance single НОДА|ecmp"; return; }
       exits_balance "$1" "${2:-}" ;;
+    mode) exits_mode "${1:-}" ;;
     client)
-      [[ -n "${2:-}" ]] || { _api_usage "exits client ИМЯ off|shared|НОДА"; return; }
-      exits_client "$1" "$2" ;;
-    *) _api_usage "exits status|add ИМЯ (stdin)|del ИМЯ|up [all|peers]|down|balance single НОДА|ecmp|client ИМЯ off|shared|НОДА" ;;
+      [[ "${1:-}" == all || "${1:-}" == none || -n "${2:-}" ]] || { _api_usage "exits client ИМЯ off|shared|НОДА | all | none"; return; }
+      exits_client "$1" "${2:-}" ;;
+    *) _api_usage "exits status|add ИМЯ (stdin)|del ИМЯ|up [all|peers]|down|mode all|peers|balance single НОДА|ecmp|client ИМЯ off|shared|НОДА|all|none" ;;
   esac
 }
 

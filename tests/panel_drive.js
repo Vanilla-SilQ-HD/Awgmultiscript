@@ -324,17 +324,50 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await expectAlert("IP:ПОРТ", async () => { await page.fill("input", "нет"); await page.click("text=Включить"); });
     await shot("34-t2s");
   });
-  await step("exit-ноды", async () => {
-    await nav("/tunnels/exits", "text=Маршруты");
+  await step("exit-ноды: тумблер туннеля, все / выбранные", async () => {
+    await nav("/tunnels/exits", "text=Кого вести через ноды");
     await page.waitForSelector(".item >> text=n1");
+    await page.waitForSelector("[data-tunnel=on] .switch.on");
+    await page.waitForSelector("[data-tunnel=on] >> text=включён · все клиенты");
     await shot("35-exits");
+    await page.click(".exmode button:has-text('Выбранные')");
+    await page.waitForSelector(".exl .item[data-name=alice]");
   });
-  await step("выход клиента", async () => {
-    await nav("/tunnels/exits/clients", ".item");
-    await page.click(".item >> text=alice");
-    await page.click(".sheet >> text=Нода n1");
-    await page.waitForSelector(".item:has-text('alice') >> text=нода n1");
+  await step("exit-ноды: никого / клиент по одному / поиск / все", async () => {
+    const n = await page.locator(".exl .item").count();
+    await page.click(".ctools button:has-text('Никого')");
+    await page.waitForFunction(() => !document.querySelector(".exl .switch.on"));
+    await page.waitForSelector(`text=через ноды: 0 из ${n}`);
+    await page.click(".exl .item[data-name=alice] .switch");
+    await page.waitForSelector(".exl .item[data-name=alice] .switch.on");
+    await page.waitForSelector(".exl .item[data-name=alice] >> text=общий выход");
+    await page.waitForSelector(`text=через ноды: 1 из ${n}`);
+    await page.fill(".ctools input[type=search]", "ali");
+    await page.waitForFunction(() => document.querySelectorAll(".exl .item").length === 1);
+    await page.fill(".ctools input[type=search]", "");
+    await page.click(".ctools button:has-text('Все')");
+    await page.waitForSelector(`text=через ноды: ${n} из ${n}`);
     await shot("36-exit-pick");
+  });
+  await step("exit-ноды: тумблер туннеля выключает их, старый адрес ведёт сюда же", async () => {
+    // В песочнице systemctl — заглушка: служба «работает» и после остановки,
+    // поэтому проверяем ответ awg2 на exits down, а не состояние после
+    await page.click("[data-tunnel=on]");
+    await page.waitForSelector(".toast >> text=Exit-ноды выключены");
+    await nav("/tunnels/exits/clients", "text=Кого вести через ноды");
+    await page.waitForURL(/#\/tunnels\/exits$/);
+  });
+  await step("карточка клиента: маршрут выбирается на месте", async () => {
+    await nav("/client/alice", ".rcard .rchips button[data-v=shared].on");
+    await page.click(".rcard .rchips button[data-v=n1]");
+    await page.waitForSelector(".rcard .rchips button[data-v=n1].on");
+    await page.click(".rcard .rchips button[data-v=off]");
+    await page.waitForSelector(".rcard .rchips button[data-v=off].on");
+    await page.click(".rcard .rchips button[data-v=shared]");
+    await page.waitForSelector(".rcard .rchips button[data-v=shared].on");
+    await nav("/tunnels/exits", ".exmode");
+    await page.click(".exmode button:has-text('Все клиенты')");
+    await page.waitForSelector("[data-tunnel=on] >> text=включён · все клиенты");
   });
   await step("каскад: добавить", async () => {
     await nav("/tunnels/cascade/add", "input");

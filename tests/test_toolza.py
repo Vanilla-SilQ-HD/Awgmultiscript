@@ -570,6 +570,26 @@ r = api("exits", "add", "n1", stdin="")
 chk("stdin обязателен для exits add", r.get("ok") is False and "stdin" in r["error"], r)
 r = api("exits", "add", "n1", stdin="[Interface]\nPrivateKey = X\n")
 chk("конфиг ноды читается из stdin", r.get("ok") is False and "Endpoint" in r["error"], r)
+# Exit-ноды: все клиенты / никто одной командой, режим без включения
+EX_PEERS, EX_STATE = os.path.join(ROOT, "etc/amnezia/amneziawg/exits_peers.list"), os.path.join(ROOT, "etc/amnezia/amneziawg/exits_state")
+saved = [open(EX_PEERS).read(), open(EX_STATE).read()]
+ips = {c["name"]: c["ip"] for c in api("clients", "list").get("data") or []}
+peers = lambda: [x for x in open(EX_PEERS).read().split("\n") if x]
+r = api("exits", "client", "none")
+chk("exits client none — никого через ноды, режим «выбранные»", r.get("ok") and peers() == [] and "mode=peers" in open(EX_STATE).read(), [r, peers()])
+api("exits", "client", "alice", "nl")
+r = api("exits", "client", "all")
+chk("exits client all — все клиенты, своя нода остаётся", r.get("ok") and len(peers()) == len(ips) and f"{ips['alice']}|nl" in peers(), [r, peers()])
+rows = {c["name"]: c.get("exit") for c in api("clients", "list").get("data") or []}
+chk("в списке клиентов — выход каждого", rows.get("alice") == "nl" and all(v == "shared" for n, v in rows.items() if n != "alice"), rows)
+r = api("exits", "mode", "all")
+chk("exits mode all — режим меняется", r.get("ok") and "mode=all" in open(EX_STATE).read(), r)
+r = api("exits", "mode", "x")
+chk("exits mode — только all|peers", r.get("ok") is False, r)
+with open(EX_PEERS, "w") as f:
+    f.write(saved[0])
+with open(EX_STATE, "w") as f:
+    f.write(saved[1])
 # cascade del: аргументы шли в grep -E как регулярка — «.*» вычищал весь файл правил
 r = api("cascade", "del", ".*", ".*")
 rules = api("cascade", "list").get("data") or []

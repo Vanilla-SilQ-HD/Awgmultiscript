@@ -320,8 +320,27 @@ exits_balance() {
 }
 
 # Клиент и exit-ноды: exits_client ИМЯ off|shared|НОДА. Переводит в выборочный режим.
+# exits_client ИМЯ|all|none off|shared|НОДА — выход клиента; all — все клиенты
+# через ноды (у кого своя нода, она остаётся), none — никто: все напрямую.
+# Режим при этом — «выбранные клиенты»; маршруты перезапускаются один раз.
 exits_client() {
   local ip
+  if [[ "$1" == all || "$1" == none ]]; then
+    mkdir -p "$(dirname "$EXITS_PEERS")"
+    peers_sync "$EXITS_PEERS"
+    if [[ "$1" == all ]]; then
+      clients_name_ip | cut -d'|' -f2 | while IFS= read -r ip; do
+        grep -E "^${ip//./\\.}(\||$)" "$EXITS_PEERS" 2>/dev/null | head -1 | grep . || echo "$ip"
+      done > "$EXITS_PEERS.new"
+      mv -f "$EXITS_PEERS.new" "$EXITS_PEERS"
+    else
+      : > "$EXITS_PEERS"
+    fi
+    exits_state_set mode peers
+    exits_reapply
+    ok "Через exit-ноды: $(grep -c . "$EXITS_PEERS" || true) из $(clients_name_ip | grep -c . || true)"
+    return 0
+  fi
   ip=$(clients_name_ip | awk -F'|' -v n="$1" '$1 == n {print $2; exit}')
   [[ -n "$ip" ]] || { err "Клиента $1 нет"; return 1; }
   if [[ "$(exits_state_get mode)" != peers ]]; then
@@ -336,6 +355,16 @@ exits_client() {
   esac
   exits_reapply
   ok "$1: ${2/shared/общий выход}"
+}
+
+# exits_mode all|peers — кого вести через ноды, не включая и не выключая их
+exits_mode() {
+  [[ "${1:-}" == all || "${1:-}" == peers ]] || { err "Режим: all | peers"; return 1; }
+  if [[ "$1" == peers ]]; then peers_sync "$EXITS_PEERS"; peers_seed "$EXITS_PEERS"; fi
+  exits_state_set mode "$1"
+  exits_reapply
+  if [[ "$1" == all ]]; then ok "Через exit-ноды — все клиенты"
+  else ok "Через exit-ноды — выбранные: $(grep -c . "$EXITS_PEERS" || true)"; fi
 }
 
 exits_toggle() {
