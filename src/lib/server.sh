@@ -1037,6 +1037,9 @@ server_reset() {
   : > "$WARP_PEERS" 2>/dev/null || true
   : > "$XRAY_PEERS" 2>/dev/null || true
   : > "$EXITS_PEERS" 2>/dev/null || true
+  # Снимок счётчиков — метка жизни таймера: старый после сброса заставил бы
+  # сторож «чинить» таймер посреди создания нового сервера
+  rm -f "$EXPIRE_STATE_DIR/transfer"
   ok "Сервер сброшен. Создать новый: Сервер → Создать сервер"
   log_info "сервер сброшен"
 }

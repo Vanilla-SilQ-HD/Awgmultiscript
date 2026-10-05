@@ -58,6 +58,7 @@ IDLE = 12 * 3600                # без действий — вход зано�
 LIFETIME = 7 * 24 * 3600        # и не дольше недели
 SESSIONS_MAX = 32
 FAILS_MAX = 5                   # неверных паролей с адреса до блокировки
+SCRYPT_PARALLEL = 4             # одновременных проверок пароля
 LOCK_FIRST = 15 * 60
 LOCK_MAX = 24 * 3600
 STORM_WINDOW, STORM_FAILS = 600, 30     # неверных паролей со всех адресов за 10 минут
@@ -172,6 +173,8 @@ class Guard:
 
     def ok(self, ip: str) -> None:
         self.ips.pop(ip, None)
+        if self.storm:                      # попытка засчитана заранее — верный вход не перебор
+            self.storm.pop()
 
 
 # ── Сессии ────────────────────────────────────────────────
@@ -305,6 +308,10 @@ class WebPanel:
         self.base = base_path(self.conf)
         self.guard = Guard()
         self.sessions = Sessions()
+        # scrypt — 16 МБ и заметное время CPU на проверку: не больше SCRYPT_PARALLEL
+        # разом, иначе поток неверных паролей съедает память и пул потоков
+        self.scrypt_slots = asyncio.Semaphore(SCRYPT_PARALLEL)
+        self.csrf_logged = 0.0
         self.notify = Notifier()
         self.ctx: ssl.SSLContext | None = None
         self.cert_kind = ""
@@ -322,7 +329,13 @@ class WebPanel:
     @web.middleware
     async def guard_mw(self, request: web.Request, handler):  # type: ignore[no-untyped-def]
         if request.method == "POST" and not same_origin(request):
-            journal("CSRF", request.remote or "?", request.headers.get("Origin", ""))
+            # Без входа и с любым Origin — поэтому не чаще раза в 10 с и коротко:
+            # иначе поток таких запросов забивает журнал и диск
+            now = time.monotonic()
+            if now - self.csrf_logged >= 10:
+                self.csrf_logged = now
+                journal("CSRF", request.remote or "?", request.headers.get("Origin", "")[:80].encode(
+                    "ascii", "backslashreplace").decode())
             raise web.HTTPForbidden(text='{"error": "чужой сайт"}', content_type="application/json")
         resp = await handler(request)
         return resp
@@ -354,23 +367,28 @@ class WebPanel:
     # ── вход и выход ──
     async def login(self, request: web.Request) -> web.Response:
         ip = request.remote or "?"
-        wait = self.guard.locked(ip)
-        if wait:
-            return web.json_response({"error": f"Слишком много неверных паролей — вход закрыт ещё на "
-                                      f"{max(1, wait // 60)} мин."}, status=429)
         try:
             body = await request.json()
             user, password = str(body.get("user") or "")[:64], str(body.get("password") or "")[:256]
         except (ValueError, AttributeError):
             raise web.HTTPBadRequest(text='{"error": "нужен JSON"}', content_type="application/json") from None
+        # Блокировка проверяется и попытка засчитывается подряд, без await между
+        # ними (тело запроса уже прочитано): иначе запросы, посланные разом,
+        # проходили locked() все до первого fail(), и лимит FAILS_MAX не работал.
+        # Верный пароль счёт сбрасывает (guard.ok).
+        wait = self.guard.locked(ip)
+        if wait:
+            return web.json_response({"error": f"Слишком много неверных паролей — вход закрыт ещё на "
+                                      f"{max(1, wait // 60)} мин."}, status=429)
+        lock = self.guard.fail(ip)
         if self.guard.storming():
             await asyncio.sleep(3)
         self.conf = read_conf()
         want_user, stored = self.conf.get("WEB_USER", ""), self.conf.get("WEB_PASS", "")
         user_ok = bool(want_user) and hmac.compare_digest(user.encode(), want_user.encode())
-        pass_ok = await asyncio.to_thread(verify_password, password, stored if user_ok and stored else _DUMMY)
+        async with self.scrypt_slots:
+            pass_ok = await asyncio.to_thread(verify_password, password, stored if user_ok and stored else _DUMMY)
         if not (user_ok and pass_ok and stored):
-            lock = self.guard.fail(ip)
             journal("FAIL", ip, f"user={user[:32]!r}")
             if lock:
                 journal("LOCK", ip, f"{lock // 60} мин")

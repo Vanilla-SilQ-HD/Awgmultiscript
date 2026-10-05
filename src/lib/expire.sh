@@ -141,6 +141,9 @@ After=awg-quick@awg0.service network-online.target
 [Service]
 Type=oneshot
 ExecStart=$EXPIRE_BIN
+# У oneshot тайм-аута нет: зависший проход (awg show, syncconf) навсегда
+# останавливал бы и таймер — сторож его перезапуском не снимает
+TimeoutStartSec=120
 # Запуск каждые 15 с: «Starting/Finished» в журнал не пишем, сбои — пишем
 LogLevelMax=notice
 EOF

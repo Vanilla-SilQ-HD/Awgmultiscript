@@ -214,6 +214,21 @@ ufw_allow() {  # порт/протокол комментарий
   ufw allow "$1" comment "$2" >/dev/null 2>&1
 }
 
+# Снять правила UFW с комментарием ровно $1. ufw_delete_matching ищет подстроку —
+# «awg-web» (веб-панель) задевал и «awg-webapp» (порт Mini App).
+ufw_delete_comment() {
+  command -v ufw &>/dev/null || return 0
+  local n guard=0
+  while (( guard++ < 64 )); do
+    n=$(ufw status numbered 2>/dev/null | awk -v c="$1" '{
+          s = $0; sub(/[ \t]+$/, "", s); i = index(s, "# ")
+          if (i && substr(s, i + 2) == c && match(s, /^\[ *[0-9]+ *\]/)) {
+            n = substr(s, 2, RLENGTH - 2); gsub(/ /, "", n); print n; exit } }')
+    [[ -n "$n" ]] || break
+    ufw --force delete "$n" >/dev/null 2>&1 || break
+  done
+}
+
 # Снять все правила UFW, в комментарии которых есть $1.
 ufw_delete_matching() {
   command -v ufw &>/dev/null || return 0

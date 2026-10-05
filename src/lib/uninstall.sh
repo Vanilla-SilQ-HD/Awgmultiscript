@@ -113,6 +113,12 @@ uninstall_all() {
   for o in "$@"; do
     case "$o" in bot) del_bot=y ;; wgobf) del_wgobf=y ;; web) del_web=y ;; self) del_self=y ;; esac
   done
+  # Веб-панель работает через awg2: без него она осталась бы открытым входом,
+  # который ничего не может, и убрать её было бы уже нечем
+  if [[ "$del_self" == y && "$del_web" != y ]] && web_installed; then
+    del_web=y
+    info "Без awg2 веб-панель не работает — удаляю и её"
+  fi
 
   server_exists && do_backup
   awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true

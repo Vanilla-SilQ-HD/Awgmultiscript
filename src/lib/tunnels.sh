@@ -269,7 +269,9 @@ tunnel_client() {
   mkdir -p "$(dirname "$file")"
   peers_sync "$file"
   outs=$(_xray_outs)
-  case "$2" in
+  # all / none без третьего аргумента — все клиенты; с ним — клиент с таким
+  # именем: «tunnels client xray all off» не должно включать всех
+  case "$2${3:+|}" in
     all) peers_all "$file" ;;
     none) : > "$file" ;;
     *) ip=$(clients_name_ip | awk -F'|' -v n="$2" '$1 == n {print $2; exit}')

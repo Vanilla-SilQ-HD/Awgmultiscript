@@ -735,6 +735,21 @@ ufw_allow() {  # порт/протокол комментарий
   ufw allow "$1" comment "$2" >/dev/null 2>&1
 }
 
+# Снять правила UFW с комментарием ровно $1. ufw_delete_matching ищет подстроку —
+# «awg-web» (веб-панель) задевал и «awg-webapp» (порт Mini App).
+ufw_delete_comment() {
+  command -v ufw &>/dev/null || return 0
+  local n guard=0
+  while (( guard++ < 64 )); do
+    n=$(ufw status numbered 2>/dev/null | awk -v c="$1" '{
+          s = $0; sub(/[ \t]+$/, "", s); i = index(s, "# ")
+          if (i && substr(s, i + 2) == c && match(s, /^\[ *[0-9]+ *\]/)) {
+            n = substr(s, 2, RLENGTH - 2); gsub(/ /, "", n); print n; exit } }')
+    [[ -n "$n" ]] || break
+    ufw --force delete "$n" >/dev/null 2>&1 || break
+  done
+}
+
 # Снять все правила UFW, в комментарии которых есть $1.
 ufw_delete_matching() {
   command -v ufw &>/dev/null || return 0
@@ -3263,6 +3278,9 @@ server_reset() {
   : > "$WARP_PEERS" 2>/dev/null || true
   : > "$XRAY_PEERS" 2>/dev/null || true
   : > "$EXITS_PEERS" 2>/dev/null || true
+  # Снимок счётчиков — метка жизни таймера: старый после сброса заставил бы
+  # сторож «чинить» таймер посреди создания нового сервера
+  rm -f "$EXPIRE_STATE_DIR/transfer"
   ok "Сервер сброшен. Создать новый: Сервер → Создать сервер"
   log_info "сервер сброшен"
 }
@@ -3899,6 +3917,9 @@ After=awg-quick@awg0.service network-online.target
 [Service]
 Type=oneshot
 ExecStart=$EXPIRE_BIN
+# У oneshot тайм-аута нет: зависший проход (awg show, syncconf) навсегда
+# останавливал бы и таймер — сторож его перезапуском не снимает
+TimeoutStartSec=120
 # Запуск каждые 15 с: «Starting/Finished» в журнал не пишем, сбои — пишем
 LogLevelMax=notice
 EOF
@@ -4333,7 +4354,9 @@ tunnel_client() {
   mkdir -p "$(dirname "$file")"
   peers_sync "$file"
   outs=$(_xray_outs)
-  case "$2" in
+  # all / none без третьего аргумента — все клиенты; с ним — клиент с таким
+  # именем: «tunnels client xray all off» не должно включать всех
+  case "$2${3:+|}" in
     all) peers_all "$file" ;;
     none) : > "$file" ;;
     *) ip=$(clients_name_ip | awk -F'|' -v n="$2" '$1 == n {print $2; exit}')
@@ -6560,6 +6583,20 @@ WantedBy=multi-user.target
 EOF
 }
 
+# Список «выбранных» при переходе в них из режима «все клиенты». all —
+# действие над одним клиентом относительно «все» (exits_client, меню): в
+# списке все клиенты. Иначе («выбранные» кнопкой, exits up peers) — прежний
+# выбор, а если его нет или он пуст (после «никто», сброса сервера) — тоже
+# все: пустой список увёл бы мимо нод вообще всех. В режиме «выбранные»
+# пустой список — сознательное «никто», его не трогаем.
+_exits_seed_peers() {  # [all]
+  mkdir -p "$(dirname "$EXITS_PEERS")"
+  peers_sync "$EXITS_PEERS"
+  if [[ "$(exits_state_get mode)" == peers ]]; then peers_seed "$EXITS_PEERS"; return 0; fi
+  if [[ "${1:-}" == all ]] || ! grep -q . "$EXITS_PEERS" 2>/dev/null; then peers_all "$EXITS_PEERS"; fi
+  return 0
+}
+
 exits_reapply() { exits_is_up && systemctl restart "$EXITS_UNIT" &>/dev/null; return 0; }
 
 # ── Включение / выключение ────────────────────────────────
@@ -6570,7 +6607,7 @@ exits_up() {  # all|peers
   [[ -n "$(exits_up_nodes)" ]] || { err "Ни одна exit-нода не поднята — добавь или перезапусти ноду"; return 1; }
   # Список клиентов режима peers — до проверки «уже включено»: иначе при
   # переключении all → peers на ходу файла нет, и маршруты не получает никто.
-  if [[ "$mode" == peers ]]; then peers_sync "$EXITS_PEERS"; peers_seed "$EXITS_PEERS"; fi
+  if [[ "$mode" == peers ]]; then _exits_seed_peers; fi
   if exits_is_up; then exits_state_set mode "$mode"; exits_reapply; ok "Режим: $mode"; return 0; fi
   tunnel_guard exits || return 1
   exits_state_set state active mode "$mode"
@@ -6735,16 +6772,15 @@ exits_balance() {
 # exits_client ИМЯ|all|none off|shared|НОДА — выход клиента; all — все клиенты
 # через ноды (у кого своя нода, она остаётся), none — никто: все напрямую.
 # Режим при этом — «выбранные клиенты»; маршруты перезапускаются один раз.
+# Массовая форма — только без второго аргумента: клиент может называться
+# «all» или «none», и «exits client all off» — про него, а не про всех.
 exits_client() {
   local ip
-  if [[ "$1" == all || "$1" == none ]]; then
+  if [[ ( "$1" == all || "$1" == none ) && -z "${2:-}" ]]; then
     mkdir -p "$(dirname "$EXITS_PEERS")"
     peers_sync "$EXITS_PEERS"
     if [[ "$1" == all ]]; then
-      clients_name_ip | cut -d'|' -f2 | while IFS= read -r ip; do
-        grep -E "^${ip//./\\.}(\||$)" "$EXITS_PEERS" 2>/dev/null | head -1 | grep . || echo "$ip"
-      done > "$EXITS_PEERS.new"
-      mv -f "$EXITS_PEERS.new" "$EXITS_PEERS"
+      peers_all "$EXITS_PEERS"
     else
       : > "$EXITS_PEERS"
     fi
@@ -6755,8 +6791,11 @@ exits_client() {
   fi
   ip=$(clients_name_ip | awk -F'|' -v n="$1" '$1 == n {print $2; exit}')
   [[ -n "$ip" ]] || { err "Клиента $1 нет"; return 1; }
+  # Из «все клиенты» в «выбранные»: список — все клиенты (свои ноды остаются),
+  # а не то, что лежало в файле. После «никто» или сброса сервера он пуст, и
+  # «alice — напрямую» уводило мимо нод вообще всех.
   if [[ "$(exits_state_get mode)" != peers ]]; then
-    peers_seed "$EXITS_PEERS"
+    _exits_seed_peers all
     exits_state_set mode peers
   fi
   case "$2" in
@@ -6772,7 +6811,7 @@ exits_client() {
 # exits_mode all|peers — кого вести через ноды, не включая и не выключая их
 exits_mode() {
   [[ "${1:-}" == all || "${1:-}" == peers ]] || { err "Режим: all | peers"; return 1; }
-  if [[ "$1" == peers ]]; then peers_sync "$EXITS_PEERS"; peers_seed "$EXITS_PEERS"; fi
+  if [[ "$1" == peers ]]; then _exits_seed_peers; fi
   exits_state_set mode "$1"
   exits_reapply
   if [[ "$1" == all ]]; then ok "Через exit-ноды — все клиенты"
@@ -6810,7 +6849,7 @@ exits_peers_menu() {
   # Выбор клиентов имеет смысл только в режиме «выборочно»
   if [[ "$(exits_state_get mode)" != peers ]]; then
     info "Сейчас через exit-ноды идут все клиенты — переключаю на выборочный режим"
-    peers_seed "$EXITS_PEERS"
+    _exits_seed_peers all
     exits_state_set mode peers
     exits_reapply
   fi
@@ -6836,7 +6875,7 @@ exits_peers_menu() {
     read_choice c "${C}  Номер — вкл/выкл: ${N}" 0 "${#rows[@]}" 0 "e|a|n"
     case "$c" in
       0) return 0 ;;
-      a) clients_name_ip | cut -d'|' -f2 > "$EXITS_PEERS" ;;
+      a) peers_all "$EXITS_PEERS" ;;          # свои ноды клиентов остаются
       n) : > "$EXITS_PEERS" ;;
       e) read_choice sel "${C}  Номер клиента: ${N}" 1 "${#rows[@]}"
          _exits_assign "${rows[$((sel - 1))]#*|}" "${rows[$((sel - 1))]%%|*}" ;;
@@ -8492,7 +8531,11 @@ BOT_VENV_PY="$BOT_DIR/venv/bin/python"
 
 # Любой след бота, а не только маркер: после частичного удаления его
 # остатки тоже надо уметь добить.
-bot_installed() { [[ -f /usr/local/bin/awg-bot.py || -d "$BOT_DIR" || -f "/etc/systemd/system/$BOT_UNIT" ]]; }
+# Код в $BOT_DIR ставит и веб-панель (--web-only) — при ней это ещё не бот
+bot_installed() {
+  [[ -f /usr/local/bin/awg-bot.py || -f "/etc/systemd/system/$BOT_UNIT" ]] && return 0
+  [[ -d "$BOT_DIR" ]] && ! web_installed
+}
 
 bot_version() { _bot_src_version "$BOT_DIR"; }
 
@@ -8812,6 +8855,7 @@ bot_uninstall() {
   if web_installed; then
     arts=(); for p in "${BOT_ARTIFACTS[@]}"; do [[ "$p" == "$BOT_DIR" || "$p" == /var/lib/awg-bot ]] || arts+=("$p"); done
     info "Код бота остаётся — на нём работает веб-панель"
+    rm -f "$BOT_ADMINS"           # приглашённые админы — бота, а не панели
   fi
   for p in "${arts[@]}"; do rm -rf "$p"; done
   systemctl daemon-reload
@@ -8923,6 +8967,8 @@ web_ask_password() {
       break
     fi
     (( ${#a} >= 10 )) || { warn "Нужно не меньше 10 символов"; continue; }
+    # Вход принимает до 256 символов — длиннее не войти никогда
+    (( ${#a} <= 256 )) || { warn "Не больше 256 символов"; continue; }
     _read_secret b "${C}  Ещё раз: ${N}"
     [[ "$a" == "$b" ]] && break
     warn "Пароли не совпали"
@@ -9019,12 +9065,13 @@ web_set_port() {
   old=$(web_conf_get WEB_PORT)
   read_line v "${C}  Порт (1024-65535, Enter — случайный): ${N}"
   [[ -n "$v" ]] || v=$(web_random_port) || return 1
-  [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1024 && v <= 65535 )) || { err "Порт: 1024-65535"; return 1; }
+  # 10#: «010000» — не восьмеричное 4096, а 10000 (так его прочтут Python и ufw)
+  [[ "$v" =~ ^[0-9]{1,9}$ ]] && v=$((10#$v)) && (( v >= 1024 && v <= 65535 )) || { err "Порт: 1024-65535"; return 1; }
   [[ "$v" == "$old" ]] && return 0
   web_port_busy "$v" && { err "Порт $v занят"; return 1; }
   [[ "$v" == "$(server_port 2>/dev/null)" || "$v" == "$(webapp_port)" ]] && { err "Порт $v занят AWG или Mini App"; return 1; }
   web_conf_set WEB_PORT "$v"
-  ufw_delete_matching awg-web
+  ufw_delete_comment awg-web
   ufw_allow "$v/tcp" awg-web
   web_restart && web_show_access
 }
@@ -9036,7 +9083,7 @@ web_remove() {
   remove_unit "$WEB_UNIT"
   systemctl daemon-reload
   rm -rf "$WEB_CONF" "$WEB_DIR" "$WEB_LOG"
-  ufw_delete_matching awg-web
+  ufw_delete_comment awg-web
   # Код и venv ставились только ради панели — бот их не использует
   if [[ ! -f "/etc/systemd/system/$BOT_UNIT" ]]; then rm -rf "$BOT_DIR" /var/lib/awg-bot; fi
   ok "Веб-панель удалена"
@@ -9225,6 +9272,12 @@ uninstall_all() {
   for o in "$@"; do
     case "$o" in bot) del_bot=y ;; wgobf) del_wgobf=y ;; web) del_web=y ;; self) del_self=y ;; esac
   done
+  # Веб-панель работает через awg2: без него она осталась бы открытым входом,
+  # который ничего не может, и убрать её было бы уже нечем
+  if [[ "$del_self" == y && "$del_web" != y ]] && web_installed; then
+    del_web=y
+    info "Без awg2 веб-панель не работает — удаляю и её"
+  fi
 
   server_exists && do_backup
   awg-quick down "$SERVER_CONF" &>/dev/null || ip link del "$AWG_IF" &>/dev/null || true
@@ -10055,7 +10108,7 @@ _api_tunnels() {
       done | api_rows name ip on:b ;;
     client)
       [[ -n "${3:-}" ]] || { _api_usage "tunnels client warp|xray ИМЯ|all|none [on|off]"; return; }
-      tunnel_client "$2" "$3" "${4:-on}" ;;
+      tunnel_client "$2" "$3" "${4:-}" ;;
     *) _api_usage "tunnels status|panic|clients warp|xray|client warp|xray ИМЯ|all|none [on|off]" ;;
   esac
 }
@@ -10183,6 +10236,7 @@ _api_exits() {
       exits_balance "$1" "${2:-}" ;;
     mode) exits_mode "${1:-}" ;;
     client)
+      # all / none без второго аргумента — все клиенты; с ним — клиент с таким именем
       [[ "${1:-}" == all || "${1:-}" == none || -n "${2:-}" ]] || { _api_usage "exits client ИМЯ off|shared|НОДА | all | none"; return; }
       exits_client "$1" "${2:-}" ;;
     *) _api_usage "exits status|add ИМЯ (stdin)|del ИМЯ|up [all|peers]|down|mode all|peers|balance single НОДА|ecmp|client ИМЯ off|shared|НОДА|all|none" ;;
@@ -10375,7 +10429,7 @@ _api_cert() {
 
 _api_uninstall() {
   local o
-  for o in "$@"; do [[ "$o" =~ ^(bot|wgobf|self)$ ]] || { _api_usage "uninstall [bot] [wgobf] [self]"; return; }; done
+  for o in "$@"; do [[ "$o" =~ ^(bot|wgobf|web|self)$ ]] || { _api_usage "uninstall [bot] [wgobf] [web] [self]"; return; }; done
   uninstall_all "$@"
 }
 
@@ -14790,5 +14844,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=49a82d02ac5e1b87
+_BUILD_SUM=b2a1ded5e3ea34d7
 main "$@"

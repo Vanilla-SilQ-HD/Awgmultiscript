@@ -403,10 +403,12 @@ def setup(app: web.Application, user_of: UserOf) -> None:
     @route("/api/bot/invite")
     async def _invite(request: web.Request, user: dict, body: dict) -> web.Response:
         _owner(user)
+        # Сначала бот и его имя: в веб-панели бота нет (409), а Telegram может не
+        # ответить — приглашение, созданное до этого, осталось бы невидимым
+        me = await _bot(request).me()
         token, exp = admins.create_invite(int(user["id"]))
         if token is None:
             raise _bad(str(exp))
-        me = await _bot(request).me()
         return web.json_response({"ok": True, "expires": exp,
                                   "link": f"https://t.me/{me.username}?start={admins.INVITE_PREFIX}{token}"})
 

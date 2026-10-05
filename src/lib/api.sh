@@ -460,7 +460,7 @@ _api_tunnels() {
       done | api_rows name ip on:b ;;
     client)
       [[ -n "${3:-}" ]] || { _api_usage "tunnels client warp|xray ИМЯ|all|none [on|off]"; return; }
-      tunnel_client "$2" "$3" "${4:-on}" ;;
+      tunnel_client "$2" "$3" "${4:-}" ;;
     *) _api_usage "tunnels status|panic|clients warp|xray|client warp|xray ИМЯ|all|none [on|off]" ;;
   esac
 }
@@ -588,6 +588,7 @@ _api_exits() {
       exits_balance "$1" "${2:-}" ;;
     mode) exits_mode "${1:-}" ;;
     client)
+      # all / none без второго аргумента — все клиенты; с ним — клиент с таким именем
       [[ "${1:-}" == all || "${1:-}" == none || -n "${2:-}" ]] || { _api_usage "exits client ИМЯ off|shared|НОДА | all | none"; return; }
       exits_client "$1" "${2:-}" ;;
     *) _api_usage "exits status|add ИМЯ (stdin)|del ИМЯ|up [all|peers]|down|mode all|peers|balance single НОДА|ecmp|client ИМЯ off|shared|НОДА|all|none" ;;
@@ -780,7 +781,7 @@ _api_cert() {
 
 _api_uninstall() {
   local o
-  for o in "$@"; do [[ "$o" =~ ^(bot|wgobf|self)$ ]] || { _api_usage "uninstall [bot] [wgobf] [self]"; return; }; done
+  for o in "$@"; do [[ "$o" =~ ^(bot|wgobf|web|self)$ ]] || { _api_usage "uninstall [bot] [wgobf] [web] [self]"; return; }; done
   uninstall_all "$@"
 }
 

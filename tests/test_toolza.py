@@ -657,6 +657,41 @@ r = api("exits", "mode", "all")
 chk("exits mode all — режим меняется", r.get("ok") and "mode=all" in open(EX_STATE).read(), r)
 r = api("exits", "mode", "x")
 chk("exits mode — только all|peers", r.get("ok") is False, r)
+# «никто» → «все» → «alice напрямую»: список был пуст, и мимо нод уходили все
+api("exits", "client", "none")
+api("exits", "mode", "all")
+r = api("exits", "client", "alice", "off")
+chk("из «все клиенты» в «выбранные»: напрямую только alice, остальные через ноды",
+    r.get("ok") and sorted(peers()) == sorted(ip for n, ip in ips.items() if n != "alice") and "mode=peers" in open(EX_STATE).read(),
+    [r, peers()])
+# Клиент «all»: «exits client all off» — про него, а не про всех
+api("client", "add", "all", "mimicry=none")
+api("exits", "client", "all")
+ip_all = next(c["ip"] for c in api("clients", "list").get("data") or [] if c["name"] == "all")
+r = api("exits", "client", "all", "off")
+chk("клиент по имени all: со вторым аргументом — только он", r.get("ok") and ip_all not in peers() and len(peers()) == len(ips), [r, peers()])
+# Туннели: то же — «tunnels client xray all off» про клиента «all»
+api("tunnels", "client", "warp", "all")
+r = api("tunnels", "client", "warp", "all", "off")
+wl = api("tunnels", "clients", "warp").get("data") or []
+chk("туннель: клиент по имени all с off — выключен только он",
+    r.get("ok") and [c["name"] for c in wl if not c["on"]] == ["all"], [r, wl])
+r = api("tunnels", "client", "warp", "none")
+wl = api("tunnels", "clients", "warp").get("data") or []
+chk("туннель: none без аргумента — все напрямую", r.get("ok") and not any(c["on"] for c in wl), wl)
+api("client", "del", "all")
+# Кнопка «выбранные» после «никто» и «все»: пустой список увёл бы мимо нод всех
+api("exits", "client", "none")
+api("exits", "mode", "all")
+r = api("exits", "mode", "peers")
+chk("exits mode peers после «никто» и «все» — через ноды все, а не никто",
+    r.get("ok") and len(peers()) == len(ips), [r, peers()])
+# …а сознательный выбор переживает «все» → «выбранные»
+api("exits", "client", "none")
+api("exits", "client", "bob", "shared")
+api("exits", "mode", "all")
+api("exits", "mode", "peers")
+chk("exits mode peers возвращает прежний выбор", peers() == [ips["bob"]], peers())
 with open(EX_PEERS, "w") as f:
     f.write(saved[0])
 with open(EX_STATE, "w") as f:
@@ -1636,6 +1671,26 @@ chk("Enter вместо пароля — сгенерирован и показ�
     out[-500:])
 rc, out, _ = bash(WEBPRE + "printf '%s' 'Пароль 123' | py web-hash")
 chk("хеш пароля: соль каждый раз новая", out.strip().startswith("scrypt$") and out.strip() != conf2["WEB_PASS"], out)
+# Порт панели и её правило в UFW: «awg-web» — не подстрока для «awg-webapp» Mini App
+UFWST = os.path.join(TMP, "ufw-rules")
+with open(UFWST, "w") as f:
+    f.write("8443/tcp ALLOW IN Anywhere # awg-webapp\n41234/tcp ALLOW IN Anywhere # awg-web\n"
+            "51820/udp ALLOW IN Anywhere # AmneziaWG\n41234/tcp (v6) ALLOW IN Anywhere (v6) # awg-web\n")
+UFWFN = ('ufw() { case "$1" in status) awk \'{printf "[%2d] %s\\n", NR, $0}\' "' + UFWST + '" ;; '
+         '--force) sed -i "${3}d" "' + UFWST + '" ;; esac; }; ')
+rc, out, _ = bash(UFWFN + 'ufw_delete_comment awg-web; cat "' + UFWST + '"')
+chk("UFW: правила веб-панели удалены (и v6), порт Mini App «awg-webapp» и AmneziaWG — на месте",
+    out.split("\n")[:2] == ["8443/tcp ALLOW IN Anywhere # awg-webapp", "51820/udp ALLOW IN Anywhere # AmneziaWG"]
+    and "# awg-web\n" not in out, out)
+rc, out, _ = bash(WEBPRE + 'web_port_busy() { return 1; }; web_restart() { :; }; web_show_access() { :; }; '
+                  'web_set_port 2>&1 <<< "010000"; web_conf_get WEB_PORT')
+chk("порт панели с ведущим нулём — десятичный (10000), а не восьмеричный", out.strip().splitlines()[-1] == "10000", out)
+rc, out, _ = bash(WEBPRE + 'web_ask_password 2>&1 <<< "$(printf "%0300d\\n%0300d\\n" 1 1)"; echo "rc=$?"', stdin=None)
+chk("пароль длиннее 256 символов — отказ (вход принимает до 256)", "Не больше 256" in out, out[-300:])
+rc, out, _ = bash(f'BOT_DIR="{TMP}/botcode"; mkdir -p "$BOT_DIR"; '
+                  'web_installed() { true; }; bot_installed && echo BOT || echo NOBOT; '
+                  'web_installed() { false; }; bot_installed && echo BOT || echo NOBOT')
+chk("код для одной веб-панели — ещё не бот; без панели каталог кода — бот (как раньше)", out.split() == ["NOBOT", "BOT"], out)
 rc, out, _ = bash(WEBPRE + "main_menu", stdin="0\n")
 chk("главное меню: пункт w) Веб-панель", "w)" in out and "Веб-панель" in out, out[-600:])
 rc, out, _ = bash(WEBPRE + f'remove_unit() {{ rm -f "{ROOT}/units/$1"; }}; ' + "web_remove quiet 2>&1; ls " + f'"{WEBC}" 2>&1; ls "{ROOT}/units/awg-web.service" 2>&1')
