@@ -38,6 +38,40 @@ const say = (ok, label) => console.log(`${ok ? "OK" : "FAIL"} ${label}`);
       const rail = await page.locator("#rail").isVisible(), tabs = await page.locator("#tabbar").isVisible();
       if (rail !== (name === "ПК") || tabs === (name === "ПК")) throw new Error(`#rail=${rail} #tabbar=${tabs}`);
     });
+    if (name === "ПК") {
+      await step("лента: с подписями, «бутерброд» сворачивает до иконок и обратно, выбор запоминается", async () => {
+        await page.waitForSelector("#rail a .lbl >> text=Клиенты");
+        if (!await page.evaluate(() => document.body.classList.contains("rail-wide"))) throw new Error("по умолчанию без подписей");
+        await page.click("#rail a.burger");
+        await page.waitForSelector("#rail a .tip >> text=Клиенты", { state: "attached" });
+        if (await page.locator("#rail a .lbl").count()) throw new Error("подписи остались");
+        await page.screenshot({ path: `${out}/${name}-лента-узкая.png` });
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.waitForSelector("#rail a .tip >> text=Клиенты", { state: "attached" });
+        await page.click("#rail a.burger");
+        await page.waitForSelector("#rail a .lbl >> text=Клиенты");
+      });
+      await step("шапка: глазок скрывает имя и адрес сервера (и порт на схеме), выбор запоминается", async () => {
+        await page.waitForSelector(".top .srv .eye");
+        await page.waitForSelector(".topo svg [data-srv]");
+        const st = await page.evaluate(() => [S.status.host, (S.status.server || {}).endpoint || S.status.ip].filter(Boolean));
+        const txt = () => page.locator(".top .srv").innerText();
+        const t0 = await txt();
+        if (!st.length || !st.every((v) => t0.includes(v))) throw new Error("в шапке нет имени/адреса: " + st + " / " + t0);
+        await page.click(".top .srv .eye");
+        await page.waitForSelector(".top .srv.hid");
+        const t = await txt();
+        if (st.some((v) => t.includes(v)) || !t.includes("адрес скрыт")) throw new Error("не скрыто: " + t);
+        await page.waitForFunction(() => { const n = document.querySelector(".topo svg [data-srv]"); return n && !/:\d/.test(n.textContent); });
+        await page.screenshot({ path: `${out}/${name}-шапка-скрыто.png` });
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.waitForSelector(".top .srv.hid");
+        await page.click(".top .srv .eye");
+        await page.waitForSelector(".top .srv:not(.hid)");
+        const back = await txt();
+        if (!st.every((v) => back.includes(v))) throw new Error("не вернулось: " + back);
+      });
+    }
     await step("палитра команд: Ctrl+K — клиент по имени", async () => {
       await page.keyboard.press("Control+k");
       await page.waitForSelector(".pal.on input");

@@ -413,6 +413,12 @@ const isOn = (p) => {
 const inApp = () => (WEB ? !!S.me : !!(tg && tg.initData));
 const railOn = () => inApp() && desk();
 const hasUpd = () => !!S.update && S.update !== S.version;
+// Имя и адрес сервера в шапке можно скрыть (для скриншотов и показа экрана) —
+// заодно порт на схеме маршрутов. Лента на ПК — с подписями или узкая, иконками
+const srvHidden = () => pref("hide-srv", "") === "1";
+const railWide = () => pref("rail", "wide") !== "narrow";
+function toggleSrvHidden() { setPref("hide-srv", srvHidden() ? "" : "1"); drawTop(); window.dispatchEvent(new Event("resize")); }
+function toggleRail() { setPref("rail", railWide() ? "narrow" : "wide"); drawTop(); window.dispatchEvent(new Event("resize")); }
 const logoImg = (cls) => h("img", { class: cls || null, src: TZ_ICON, alt: "" });
 
 // Знак-название: крупное AWG на всю высоту, справа «toolza» и строка версии.
@@ -461,11 +467,16 @@ function lockupEl() {
 function drawTop() {
   const app = inApp();
   document.body.classList.toggle("rail-on", railOn());
+  document.body.classList.toggle("rail-wide", railOn() && railWide());
   document.body.classList.toggle("bare", !app);
-  const st = S.status || {}, s = st.server || {};
-  const srv = app && S.status ? h("a", { class: "srv", title: "Сервер: имя, адрес и интерфейс", onclick: () => go("/server") },
-    h("i", { class: "pulse" + (!s.exists ? " off" : s.up ? "" : " bad") }), h("b", {}, st.host || "сервер"),
-    h("span", { class: "mono" }, s.exists ? `${s.endpoint || st.ip || ""} · awg0` : "сервер не создан")) : null;
+  const st = S.status || {}, s = st.server || {}, hide = srvHidden();
+  const srv = app && S.status ? h("div", { class: "srv" + (hide ? " hid" : "") },
+    h("a", { class: "srvl", title: "Сервер: имя, адрес и интерфейс", onclick: () => go("/server") },
+      h("i", { class: "pulse" + (!s.exists ? " off" : s.up ? "" : " bad") }), h("b", {}, hide ? "сервер" : st.host || "сервер"),
+      h("span", { class: "mono" }, !s.exists ? "сервер не создан" : hide ? "адрес скрыт · awg0" : `${s.endpoint || st.ip || ""} · awg0`)),
+    h("button", { class: "eye", onclick: toggleSrvHidden, "aria-pressed": String(hide),
+      title: hide ? "Показать имя и адрес сервера" : "Скрыть имя и адрес сервера",
+      "aria-label": hide ? "Показать имя и адрес сервера" : "Скрыть имя и адрес сервера" }, icon(hide ? "eye-off" : "eye"))) : null;
   const upd = hasUpd();
   topEl.replaceChildren(...[
     h("a", { class: "lock", title: upd ? `AWG Toolza ${S.version} · доступна ${S.update}` : "AWG Toolza",
@@ -489,14 +500,18 @@ const MORE = () => [...NAV.slice(4), ["look", "sliders-horizontal", "Тема"],
 function drawNav() {
   const app = inApp(), rail = railOn();
   if (rail) {
-    const a = (p, ic, t, onclick) => h("a", { href: onclick ? "#" : "#" + p, class: !onclick && isOn(p) ? "on" : null, "aria-label": t,
+    // С подписями — текст рядом с иконкой; узкая — подсказка при наведении
+    const wide = railWide();
+    const a = (p, ic, t, onclick, cls) => h("a", { href: onclick ? "#" : "#" + p,
+      class: [cls, !onclick && isOn(p) ? "on" : null].filter(Boolean).join(" ") || null, "aria-label": t,
       onclick: onclick ? (ev) => { ev.preventDefault(); onclick(); } : null },
-      icon(ic), h("span", { class: "tip" }, t), p === "/update" && hasUpd() ? h("i", { class: "badge" }) : null);
+      icon(ic), h("span", { class: wide ? "lbl" : "tip" }, t), p === "/update" && hasUpd() ? h("i", { class: "badge" }) : null);
     railEl.replaceChildren(...[h("a", { class: "logo", href: "#/", title: "AWG Toolza", "aria-label": "Обзор" }, logoImg()),
       ...NAV.map(([p, ic, t]) => a(p, ic, t)), h("div", { class: "sp" }),
       a("", "sliders-horizontal", "Тема", lookPanel),
       WEB ? a("/account", "user", "Аккаунт") : null,
-      WEB ? a("", "door-open", "Выйти", logout) : null].filter(Boolean));
+      WEB ? a("", "door-open", "Выйти", logout) : null,
+      a("", "menu", wide ? "Свернуть меню" : "Меню с подписями", toggleRail, "burger")].filter(Boolean));
   } else {
     railEl.replaceChildren();
   }
@@ -688,11 +703,26 @@ function closeDrawer() {
   syncScrim();
 }
 
+// Две и больше карточки (.ecard) подряд — в одну сетку: на ПК в два столбца
+// ровными рядами, на телефоне — столбиком, как раньше
+function egrid(nodes) {
+  const out = [];
+  for (let i = 0; i < nodes.length; i++) {
+    const isCard = (n) => n instanceof Element && n.classList.contains("ecard");
+    if (!isCard(nodes[i]) || !isCard(nodes[i + 1])) { out.push(nodes[i]); continue; }
+    const run = [];
+    while (i < nodes.length && isCard(nodes[i])) run.push(nodes[i++]);
+    i--;
+    out.push(h("div", { class: "egrid" }, run));
+  }
+  return out;
+}
+
 async function show(path, target, my) {
   const live = () => my === token, inDrawer = target !== root;
   // Экран отрисовывает то, что успел загрузить; ушли с него — молчит.
   // Условные части экрана приходят как null — их просто нет (иначе «null» текстом)
-  const ctx = { put: (...nodes) => { if (live()) target.replaceChildren(...nodes.flat(Infinity).filter((n) => n != null && n !== false)); },
+  const ctx = { put: (...nodes) => { if (live()) target.replaceChildren(...egrid(nodes.flat(Infinity).filter((n) => n != null && n !== false))); },
     live, drawer: inDrawer };
   for (const [re, fn] of routes) {
     const m = path.match(re);
@@ -965,6 +995,23 @@ function routesView(rows, mdl) {
     "aria-label": list.filter((x) => share(x) > 0).map((x) => `${x.e.name} ${pct(x)}%`).join(", ") },
   list.filter((x) => share(x) > 0).map((x) => h("i", { style: `flex:${share(x).toFixed(4)};background:${x.e.c}`, title: `${x.e.name} · ${pct(x)}%` })));
   const MAXCHIPS = 8;
+  // Клиенты выхода чипами; «ещё N» раскрывает всех — в области с прокруткой,
+  // блок не растёт (запоминается, пока открыт обзор)
+  const open = S.chipsOpen || (S.chipsOpen = {});
+  const chips = (id, clients) => {
+    const rc = h("div", { class: "rc" });
+    const fill = () => {
+      const all = !!open[id], n = clients.length;
+      rc.classList.toggle("open", all);
+      rc.replaceChildren(...(all ? clients : clients.slice(0, MAXCHIPS)).map((c) => h("a", {
+        class: "cchip" + (c.blocked ? " bad" : c.online ? " on" : ""), title: c.blocked ? blockedWord(c) : seen(c),
+        onclick: (ev) => { ev.stopPropagation(); go("/client/" + encodeURIComponent(c.name)); } }, c.name)),
+      n > MAXCHIPS ? h("a", { class: "xmore", role: "button",
+        onclick: (ev) => { ev.stopPropagation(); open[id] = !all; fill(); } }, all ? "свернуть" : `ещё ${n - MAXCHIPS}`) : null);
+    };
+    fill();
+    return rc;
+  };
   return [
     bar,
     h("div", { class: "rcap" }, total ? `сегодня ${fmtBytes(total)}` : "сегодня трафика ещё не было — доля по числу клиентов"),
@@ -975,10 +1022,7 @@ function routesView(rows, mdl) {
         h("i", { class: "sw", style: `background:${x.e.c}` }),
         h("div", { class: "rm" }, h("b", { title: x.e.name }, exitLabel(x.e)),
           h("span", {}, n ? `${n} ${plural(n, "клиент", "клиента", "клиентов")}` + (on ? ` · ${on} в сети` : " · никого в сети") : "никто не идёт"),
-          n ? h("div", { class: "rc" }, clients.slice(0, MAXCHIPS).map((c) => h("a", {
-            class: "cchip" + (c.blocked ? " bad" : c.online ? " on" : ""), title: c.blocked ? blockedWord(c) : seen(c),
-            onclick: (ev) => { ev.stopPropagation(); go("/client/" + encodeURIComponent(c.name)); } }, c.name)),
-          n > MAXCHIPS ? h("span", { class: "more" }, `ещё ${n - MAXCHIPS}`) : null) : null),
+          n ? chips(x.e.id, clients) : null),
         h("div", { class: "rv" }, fmtBytes(x.today), h("small", {}, share(x) ? pct(x) + "%" : "—")));
     })),
   ];
@@ -987,40 +1031,55 @@ function routesView(rows, mdl) {
 // Схема: клиенты → сервер → выходы. Клиентов много — показаны самые активные
 function topology(el, rows, mdl, srvLabel) {
   const W = Math.max(300, el.clientWidth || 600), narrow = W < 560, MAXC = narrow ? 8 : 12;
-  const shown = sortRows(rows, "activity").sort((a, b) => (b.online - a.online) || ((b.today || 0) - (a.today || 0))).slice(0, MAXC);
+  const shown = sortRows(rows, "activity").sort((a, b) => (b.online - a.online) || ((b.today || 0) - (a.today || 0)));
+  // Клиентов больше, чем влезает, — схема той же высоты, а столбец клиентов
+  // листается внутри неё (колесо, тачпад, палец); awg0 и выходы стоят на месте
+  const scroll = shown.length > MAXC;
   const exits = mdl.ex.filter((e) => e.id !== "direct" || shown.some((c) => mdl.of[c.name] === "direct") || mdl.ex.length === 1);
-  const row = narrow ? 36 : 46, n = Math.max(shown.length, exits.length, 2), Hh = n * row + 24;
-  const cx = narrow ? 104 : 190, sx = W / 2, exX = W - (narrow ? 96 : 200), sy = Hh / 2;
-  const cy = (i) => 12 + row / 2 + i * (Hh - 24 - row) / ((shown.length - 1) || 1) + (shown.length === 1 ? (Hh - 24 - row) / 2 : 0);
-  const ey = (i) => 12 + row / 2 + i * (Hh - 24 - row) / ((exits.length - 1) || 1) + (exits.length === 1 ? (Hh - 24 - row) / 2 : 0);
+  const row = narrow ? 36 : 46, Hc = Math.max(scroll ? MAXC : shown.length, exits.length, 2) * row + 24;
+  const cap = scroll ? 22 : 0, Hh = Hc + cap;
+  const cx = narrow ? 104 : 190, sx = W / 2, exX = W - (narrow ? 96 : 200), sy = Hc / 2;
+  const spread = (i, k) => 12 + row / 2 + i * (Hc - 24 - row) / ((k - 1) || 1) + (k === 1 ? (Hc - 24 - row) / 2 : 0);
+  const cy = (i) => (scroll ? 12 + row / 2 + i * row : spread(i, shown.length)), ey = (i) => spread(i, exits.length);
   const sw = narrow ? 66 : 124, sh = narrow ? 72 : 96;
   const bez = (x1, y1, x2, y2) => { const m = (x1 + x2) / 2; return `M${x1},${y1} C${m},${y1} ${m},${y2} ${x2},${y2}`; };
   const esc = (t) => String(t).replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
   const sum = {}, maxT = Math.max(1, ...rows.map((c) => c.today || 0));
   rows.forEach((c) => { const e = mdl.of[c.name]; sum[e] = (sum[e] || 0) + (c.today || 0); });
   const maxE = Math.max(1, ...Object.values(sum));
+  const cname = (c) => (c.name.length > 16 ? c.name.slice(0, 15) + "…" : c.name);
+  const csub = (c) => (c.blocked ? blockedWord(c) : c.online ? `${fmtBytes(c.today || 0)} сегодня` : c.handshake ? `${fmtDur(c.ago)} назад` : "не подключался");
+  const ctitle = (c) => `${c.name} → ${mdl.get(mdl.of[c.name]).name}`;
+  // Линии клиент → awg0 (у листаемого столбца — только видимых клиентов)
+  const links = (y0) => {
+    let p = "";
+    shown.forEach((c, i) => {
+      const y = cy(i) - y0;
+      if (y < 6 || y > Hc - 6) return;
+      const e = mdl.get(mdl.of[c.name]), d = bez(cx + 9, y, sx - sw / 2, sy), t = (c.today || 0) / maxT;
+      p += `<path class="link ${c.online ? "" : "off"}" data-c="${esc(c.name)}" data-e="${esc(e.id)}" d="${d}" stroke="${c.blocked ? "var(--red)" : e.c}"/>`;
+      if (c.online) p += `<path class="flow" data-c="${esc(c.name)}" data-e="${esc(e.id)}" d="${d}" stroke="${e.c}" style="animation-duration:${(7 - t * 4.5).toFixed(1)}s"/>`;
+    });
+    return p;
+  };
   let s = "";
-  shown.forEach((c, i) => {
-    const e = mdl.get(mdl.of[c.name]), d = bez(cx + 9, cy(i), sx - sw / 2, sy), t = (c.today || 0) / maxT;
-    s += `<path class="link ${c.online ? "" : "off"}" data-c="${esc(c.name)}" data-e="${esc(e.id)}" d="${d}" stroke="${c.blocked ? "var(--red)" : e.c}"/>`;
-    if (c.online) s += `<path class="flow" data-c="${esc(c.name)}" data-e="${esc(e.id)}" d="${d}" stroke="${e.c}" style="animation-duration:${(7 - t * 4.5).toFixed(1)}s"/>`;
-  });
   exits.forEach((e, j) => {
     const d = bez(sx + sw / 2, sy, exX - 11, ey(j)), t = (sum[e.id] || 0) / maxE;
     s += `<path class="link" data-e="${esc(e.id)}" d="${d}" stroke="${e.c}" style="stroke-width:${(1.4 + t * 2.4).toFixed(1)}"/>`;
     if (sum[e.id]) s += `<path class="flow" data-e="${esc(e.id)}" d="${d}" stroke="${e.c}" style="animation-duration:${(5.5 - t * 3.5).toFixed(1)}s"/>`;
   });
-  shown.forEach((c, i) => {
-    const col = c.blocked ? "var(--red)" : c.online ? "var(--ok)" : "var(--dim)";
-    const sub = c.blocked ? blockedWord(c) : c.online ? `${fmtBytes(c.today || 0)} сегодня` : c.handshake ? `${fmtDur(c.ago)} назад` : "не подключался";
-    s += `<g class="node" data-c="${esc(c.name)}" data-e="${esc(mdl.of[c.name])}"><title>${esc(c.name)} → ${esc(mdl.get(mdl.of[c.name]).name)}</title>
-      <circle cx="${cx}" cy="${cy(i)}" r="${c.online ? 6 : 5}" fill="${col}"/>
-      ${c.online ? `<circle cx="${cx}" cy="${cy(i)}" r="10" fill="none" stroke="${col}" stroke-opacity=".3"/>` : ""}
-      <text class="lbl" x="${cx - 16}" y="${cy(i) + (narrow ? 4 : 0)}" text-anchor="end">${esc(c.name.length > 16 ? c.name.slice(0, 15) + "…" : c.name)}</text>
-      ${narrow ? "" : `<text class="lbl2" x="${cx - 16}" y="${cy(i) + 14}" text-anchor="end">${esc(sub)}</text>`}</g>`;
-  });
-  if (rows.length > shown.length) {
-    s += `<text class="lbl2" x="${cx - 16}" y="${Hh - 2}" text-anchor="end">и ещё ${rows.length - shown.length}</text>`;
+  if (!scroll) {
+    s += links(0);
+    shown.forEach((c, i) => {
+      const col = c.blocked ? "var(--red)" : c.online ? "var(--ok)" : "var(--dim)";
+      s += `<g class="node" data-c="${esc(c.name)}" data-e="${esc(mdl.of[c.name])}"><title>${esc(ctitle(c))}</title>
+        <circle cx="${cx}" cy="${cy(i)}" r="${c.online ? 6 : 5}" fill="${col}"/>
+        ${c.online ? `<circle cx="${cx}" cy="${cy(i)}" r="10" fill="none" stroke="${col}" stroke-opacity=".3"/>` : ""}
+        <text class="lbl" x="${cx - 16}" y="${cy(i) + (narrow ? 4 : 0)}" text-anchor="end">${esc(cname(c))}</text>
+        ${narrow ? "" : `<text class="lbl2" x="${cx - 16}" y="${cy(i) + 14}" text-anchor="end">${esc(csub(c))}</text>`}</g>`;
+    });
+  } else {
+    s += `<g class="cl"></g><text class="lbl2" x="${cx - 16}" y="${Hh - 6}" text-anchor="end">↕ ${shown.length} ${plural(shown.length, "клиент", "клиента", "клиентов")}</text>`;
   }
   s += `<g class="node" data-srv="1"><rect x="${sx - sw / 2}" y="${sy - sh / 2}" width="${sw}" height="${sh}" rx="16" fill="var(--panel2)" stroke="var(--acc)" stroke-width="1.5"/>
     <image x="${sx - 18}" y="${sy - sh / 2 + 8}" width="36" height="36" href="${TZ_ICON}"/>
@@ -1033,6 +1092,22 @@ function topology(el, rows, mdl, srvLabel) {
       ${narrow ? "" : `<text class="lbl2" x="${exX + 20}" y="${ey(j) + 14}">${fmtBytes(sum[e.id] || 0)} сегодня</text>`}</g>`;
   });
   el.innerHTML = `<svg viewBox="0 0 ${W} ${Hh}" height="${Hh}" role="img" aria-label="Маршруты трафика: клиенты, сервер, выходы">${s}</svg>`;
+  if (scroll) {
+    // Столбец клиентов — обычная прокрутка браузера; линии перерисовываются по ней
+    const prev = S.topoSt || 0;
+    const inner = h("div", { class: "tci", style: `height:${shown.length * row + 24}px` }, shown.map((c, i) => h("div", {
+      class: "node tc", "data-c": c.name, "data-e": mdl.of[c.name], title: ctitle(c), style: `top:${cy(i) - row / 2}px;height:${row}px` },
+    h("span", { class: "tn" }, h("b", {}, cname(c)), narrow ? null : h("small", {}, csub(c))),
+    h("i", { class: "dot" + (c.blocked ? " bad" : c.online ? " on" : "") }))));
+    const col = h("div", { class: "tcl", style: `width:${cx + 14}px;height:${Hc}px` }, inner);
+    el.append(col);
+    const g = el.querySelector("g.cl");
+    let raf = 0;
+    const redraw = () => { raf = 0; S.topoSt = col.scrollTop; g.innerHTML = links(col.scrollTop); };
+    col.addEventListener("scroll", () => { if (!raf) raf = requestAnimationFrame(redraw); }, { passive: true });
+    col.scrollTop = prev;
+    redraw();
+  }
   // Наведение — путь клиента или выхода; нажатие — карточка клиента или туннели
   el.querySelectorAll(".node").forEach((g) => {
     g.addEventListener("mouseenter", () => {
@@ -1062,10 +1137,23 @@ function liveSvg(L) {
     <polyline points="${pts(L.tx)}" fill="none" stroke="var(--acc)" stroke-width="2" vector-effect="non-scaling-stroke"/>` : ""}`;
   return el;
 }
+// «В сети» по живым счётчикам: от клиента за 45 с пришёл хоть пакет — keepalive
+// шлёт их раз в 22-30 с. Рукопожатие в сводке держит отключившегося «в сети»
+// ещё до 3 минут. Пока замеров меньше 45 с или они перестали приходить —
+// верим сводке
+const LIVE_IDLE = 45000;
+function liveOnline(c, L) {
+  const now = Date.now();
+  if (!L || !L.since || !L.act || c.blocked || now - L.at > 10000) return c.online;
+  const t = L.act[c.name];
+  if (t && now - t < LIVE_IDLE) return true;
+  return now - L.since < LIVE_IDLE ? c.online : false;
+}
+
 async function liveLoop(ctx, onTick) {
-  const L = S.live || (S.live = { rx: [], tx: [], prev: null, per: {}, at: 0 });
-  // Давние замеры не годятся: скорость считается с нуля
-  if (Date.now() - L.at > 30000) { L.prev = null; L.rx = []; L.tx = []; L.per = {}; }
+  const L = S.live || (S.live = { rx: [], tx: [], prev: null, per: {}, at: 0, act: {}, since: 0 });
+  // Давние замеры не годятся: скорость и «в сети» считаются с нуля
+  if (Date.now() - L.at > 30000) { L.prev = null; L.rx = []; L.tx = []; L.per = {}; L.act = {}; L.since = 0; }
   while (ctx.live()) {
     if (!document.hidden) {
       try {
@@ -1080,12 +1168,13 @@ async function liveLoop(ctx, onTick) {
               // Счётчик сбросился (рестарт awg0) — этот замер без прироста
               const a = Math.max(0, r - p[0]) / dt, b = Math.max(0, t - p[1]) / dt;
               per[n] = [a, b]; rx += a; tx += b;
+              if (r > p[0]) L.act[n] = Date.now();             // от клиента пришёл пакет
             }
             L.rx.push(rx); L.tx.push(tx);
             if (L.rx.length > 60) { L.rx.shift(); L.tx.shift(); }
             L.per = per;
           }
-          L.prev = d; L.at = Date.now();
+          L.prev = d; L.at = Date.now(); L.since = L.since || L.at;
           if (ctx.live()) onTick(L);
         }
       } catch { /* сервер не ответил — следующий замер */ }
@@ -1193,6 +1282,7 @@ route(/^\/$/, async (ctx) => {
   drawTop();
   const s = d.server || {}, comp = d.components || {}, rows = (cl && cl.rows) || [], r = (cl && cl.route) || {};
   const mdl = exitsModel(rows, r), alerts = homeAlerts(d);
+  for (const c of rows) c.online = liveOnline(c, S.live);
   const now = new Date();
   const eyebrow = now.toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long" }) + " · "
     + now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
@@ -1244,11 +1334,12 @@ route(/^\/$/, async (ctx) => {
         h("div", { class: "seg rseg", role: "group", "aria-label": "Вид маршрутов" }, [["map", "схема"], ["list", "список"]].map(([k, t]) =>
           h("button", { class: v === k ? "on" : null, "aria-pressed": String(v === k), onclick: () => { setPref("routes", k); drawRoutes(); } }, t)))),
       ...(topo ? [topo] : routesView(rows, mdl)));
-    if (topo) requestAnimationFrame(() => { if (ctx.live()) topology(topo, rows, mdl, `AWG ${s.proto || "?"} · :${s.port || "?"}`); });
+    if (topo) requestAnimationFrame(() => { if (ctx.live()) topology(topo, rows, mdl, `AWG ${s.proto || "?"}` + (srvHidden() ? "" : ` · :${s.port || "?"}`)); });
   };
-  const sub = [`${online} из ${rows.length} ${plural(rows.length, "клиента", "клиентов", "клиентов")} в сети`,
+  const subText = () => [`${rows.filter((c) => c.online).length} из ${rows.length} ${plural(rows.length, "клиента", "клиентов", "клиентов")} в сети`,
     byLimit ? `${byLimit} ${plural(byLimit, "заблокирован", "заблокированы", "заблокированы")} по лимиту` : null,
     byExp ? `${byExp} с истёкшим сроком` : null, alerts.length ? "есть замечания" : "сервер без замечаний"].filter(Boolean).join(" · ");
+  const sub = h("span", {}, subText()), kOnline = h("span", {}, String(online));
 
   ctx.put(
     head(eyebrow, !s.up ? "awg0 не поднят" : alerts.length ? "Нужно внимание" : "Всё работает", sub, [
@@ -1256,7 +1347,7 @@ route(/^\/$/, async (ctx) => {
     alerts.length ? h("div", { class: "card warn" }, alerts.map(([a, path]) => h("div", { class: "row", style: "cursor:pointer;padding:3px 0",
       onclick: () => go(path) }, icon("triangle-alert"), a))) : null,
     h("div", { class: "kpis" },
-      kpi("в сети", String(online), `/ ${rows.length}`, h("span", {}, tun ? `${tun} через ${via}` : "все напрямую"), () => go("/clients")),
+      kpi("в сети", kOnline, `/ ${rows.length}`, h("span", {}, tun ? `${tun} через ${via}` : "все напрямую"), () => go("/clients")),
       kpi("сейчас", speedV, speedU, speedD),
       kpi("сегодня", ...fmtBytes(today).split(" "), h("span", {}, `за месяц ${fmtBytes(month)}`)),
       kpi("аптайм сервера", h("span", {}, uD, h("small", {}, uDu), uH != null ? " " + uH : "", uH != null ? h("small", {}, uHu) : null), null,
@@ -1300,6 +1391,15 @@ route(/^\/$/, async (ctx) => {
   const onResize = () => { if (!ctx.live()) { window.removeEventListener("resize", onResize); return; } clearTimeout(onResize.t); onResize.t = setTimeout(drawRoutes, 150); };
   window.addEventListener("resize", onResize);
   liveLoop(ctx, (L) => {
+    // Отключился или подключился — схема, счётчик и подзаголовок меняются на лету
+    let moved = false;
+    for (const c of rows) {
+      const v = liveOnline(c, L);
+      if (v === c.online) continue;
+      c.online = v; moved = true;
+      if (!v && L.act[c.name]) c.ago = Math.round((Date.now() - L.act[c.name]) / 1000);
+    }
+    if (moved) { kOnline.textContent = String(rows.filter((c) => c.online).length); sub.textContent = subText(); drawRoutes(); }
     const rx = L.rx.length ? L.rx[L.rx.length - 1] : 0, tx = L.tx.length ? L.tx[L.tx.length - 1] : 0;
     if (!L.rx.length) return;
     const [a, au] = fmtRate(rx), [b, bu] = fmtRate(tx), [c, cu] = fmtRate(rx + tx);

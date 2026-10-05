@@ -125,6 +125,33 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     // Скорость — по двум замерам счётчиков awg0 (раз в 3 с)
     await page.waitForFunction(() => { const el = document.querySelector(".live .big .dn span"); return el && el.textContent !== "—"; },
       null, { timeout: 15000 });
+    // Много клиентов: схема той же высоты, столбец клиентов листается внутри, линии — за прокруткой
+    const sc = await page.evaluate(() => {
+      const el = document.createElement("div"); el.className = "topo"; el.style.width = "360px";
+      document.querySelector(".topo").after(el);
+      const rows = Array.from({ length: 30 }, (_, i) => ({ name: "demo-" + i, online: i < 2, handshake: 1, ago: 60, today: 0 }));
+      topology(el, rows, exitsModel(rows, {}), "AWG");
+      const col = el.querySelector(".tcl"), first = () => (el.querySelector("g.cl path") || {}).dataset;
+      const r = { rows: el.querySelectorAll(".tcl .tc").length, h: el.querySelector("svg").getAttribute("height"),
+        scrolls: col.scrollHeight > col.clientHeight, before: first() && first().c };
+      col.scrollTop = 400; col.dispatchEvent(new Event("scroll"));
+      return new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(() => { r.after = first() && first().c; el.remove(); ok(r); })));
+    });
+    if (sc.rows !== 30 || !sc.scrolls || +sc.h > 400 || !sc.before || sc.before === sc.after) throw new Error("прокрутка схемы: " + JSON.stringify(sc));
+    // «В сети» по живым счётчикам: 45 с без единого пакета — не в сети, сводка и схема меняются на лету
+    const rule = await page.evaluate(() => {
+      const now = Date.now(), c = { name: "a", online: true };
+      return [liveOnline(c, { since: now - 60000, at: now, act: {} }), liveOnline(c, { since: now - 60000, at: now, act: { a: now - 5000 } }),
+        liveOnline(c, { since: now - 5000, at: now, act: {} }), liveOnline(c, { since: now - 60000, at: now - 20000, act: {} }),
+        liveOnline({ name: "a", online: false }, { since: now - 5000, at: now, act: { a: now } })].join();
+    });
+    if (rule !== "false,true,true,true,true") throw new Error("правило «в сети»: " + rule);
+    const before = await page.evaluate(() => +document.querySelector(".kpis .kpi .v span").textContent);
+    if (await page.locator(".topo svg .node[data-c=alice] circle").count() !== 2) throw new Error("alice не в сети на схеме");
+    await page.evaluate(() => { S.live.act = {}; S.live.since = Date.now() - 60000; });
+    await page.waitForFunction((n) => +document.querySelector(".kpis .kpi .v span").textContent === n - 1, before, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll(".topo svg .node[data-c=alice] circle").length === 1, null, { timeout: 5000 });
+    await page.waitForSelector(".head .sub >> text=/^" + (before - 1) + " из /");
     await page.click(".topo svg .node[data-c=alice]");
     await page.waitForURL(/#\/client\/alice$/);
   });
