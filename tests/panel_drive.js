@@ -233,8 +233,9 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await shot("08-select");
     await page.click(".bar >> text=Удалить");
     await page.waitForSelector(".toast >> text=Удалено: 2");
+    // Список обновляется на месте: удалённые строки уходят, как только придёт новый
+    await page.waitForSelector("[data-name=t-001]", { state: "detached", timeout: 10000 }).catch(() => { throw new Error("t-001 остался"); });
     await page.waitForSelector("[data-name]");
-    if (await page.locator("[data-name=t-001]").count()) throw new Error("t-001 остался");
   });
   await step("мимикрия", async () => {
     await nav("/client/alice/mimicry", ".item");
@@ -535,10 +536,12 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
   // ── Обновление ──
   // Главная сама заглядывает в канал — v9.9.9 может быть уже известна
   await step("обновление", async () => { await nav("/update", "text=Канал"); await page.waitForSelector("text=стабильный"); await shot("47-update"); });
-  await step("проверка обновлений", async () => {
+  await step("проверка обновлений — на месте, экран не перерисовывается", async () => {
+    await page.evaluate(() => { document.querySelector("#app h1").dataset.keep = "1"; });
     await page.click("button:has-text('Проверить')");
     await page.waitForSelector(".toast >> text=Доступна v9.9.9");
     await page.waitForSelector("button:has-text('Обновить до v9.9.9')");
+    if (!await page.$("#app h1[data-keep]")) throw new Error("экран обновления перерисовался целиком");
     // Список изменений из CHANGELOG.md канала — разметка без innerHTML
     await page.waitForSelector(".chlog-h >> text=Что нового в v9.9.9");
     await page.waitForSelector(".chlog b >> text=Новое");

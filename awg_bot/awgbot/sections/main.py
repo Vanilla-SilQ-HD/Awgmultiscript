@@ -64,7 +64,7 @@ def _tunnels(d: dict) -> str:
     """Работающие туннели первыми, затем настроенные и выключенные."""
     t = d.get("tunnels") or {}
     names = [("warp", "WARP"), ("xray", "Xray"), ("tun2socks", "tun2socks"),
-             ("exits", "Exit-ноды"), ("dns", "DNS")]
+             ("exits", "Exit-ноды WG"), ("dns", "DNS")]
     items = [(t[k], n) for k, n in names if t.get(k, "none") != "none"]
     if d.get("wgobf", "none") != "none":
         items.append((d["wgobf"], "WG+обф."))

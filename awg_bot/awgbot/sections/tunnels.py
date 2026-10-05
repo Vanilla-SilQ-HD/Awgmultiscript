@@ -38,7 +38,7 @@ async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
     d = await api.data("tunnels", "status", default={}) or {}
 
     names = [("warp", "WARP", "warp"), ("xray", "Xray", "xr"), ("tun2socks", "tun2socks", "t2s"),
-             ("exits", "Exit-ноды", "ex"), ("dns", "Шифр. DNS", "dns")]
+             ("exits", "Exit-ноды WG", "ex"), ("dns", "Шифр. DNS", "dns")]
     n = d.get("cascade", 0)
     lines = [f"{ui.state_icon(d.get(k, 'none'))} {label} — {ui.state_word(d.get(k, 'none'))}" for k, label, _ in names]
     lines.insert(4, f"{'🟢' if n else '▫️'} Каскад портов — {'правил: ' + str(n) if n else 'правил нет'}")

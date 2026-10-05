@@ -722,14 +722,24 @@ async function show(path, target, my) {
   const live = () => my === token, inDrawer = target !== root;
   // Экран отрисовывает то, что успел загрузить; ушли с него — молчит.
   // Условные части экрана приходят как null — их просто нет (иначе «null» текстом)
-  const ctx = { put: (...nodes) => { if (live()) target.replaceChildren(...egrid(nodes.flat(Infinity).filter((n) => n != null && n !== false))); },
-    live, drawer: inDrawer };
+  const ctx = { put: (...nodes) => {
+    if (!live()) return;
+    target.classList.remove("reloading");
+    target.replaceChildren(...egrid(nodes.flat(Infinity).filter((n) => n != null && n !== false)));
+  }, live, drawer: inDrawer };
+  // Тот же экран обновляется после действия — прежнее остаётся на месте (без
+  // «Загрузка…» и прыжка наверх), пока не придёт новое; нажать в нём нельзя
+  const same = target.dataset.path === path && target.childElementCount > 0 && !target.querySelector(":scope > .spin");
+  target.dataset.path = path;
   for (const [re, fn] of routes) {
     const m = path.match(re);
     if (!m) continue;
-    if (inDrawer) target.scrollTop = 0;
-    else { window.scrollTo(0, 0); S.listShown = false; S.listRedraw = null; }
-    ctx.put(h("div", { class: "spin" }, "Загрузка…"));
+    if (same) target.classList.add("reloading");
+    else {
+      if (inDrawer) target.scrollTop = 0;
+      else { window.scrollTo(0, 0); S.listShown = false; S.listRedraw = null; }
+      ctx.put(h("div", { class: "spin" }, "Загрузка…"));
+    }
     try {
       await fn(ctx, ...m.slice(1).map(decodeURIComponent));
       // Карточка поменяла клиента — список за ней показывает то же самое
@@ -738,6 +748,8 @@ async function show(path, target, my) {
       ctx.put(h("div", { class: "card" }, h("div", { class: "bad" }, "❌ " + e.message),
         e.log ? h("pre", {}, e.log.trim().split("\n").slice(-12).join("\n")) : null,
         h("button", { class: "btn-block", onclick: render }, "Повторить")));
+    } finally {
+      if (live()) target.classList.remove("reloading");
     }
     return true;
   }
@@ -926,7 +938,7 @@ function exitsModel(rows, r) {
     if (kind === "exits") {
       const v = c.exit_choice || "shared";
       if (v === "off") return "direct";
-      return v === "shared" ? add("shared", "Exit-ноды · общий", "Exit·общий") : add("n:" + v, "Exit · " + v, v);
+      return v === "shared" ? add("shared", "Exit-ноды WG · общий", "Exit WG", null, "Exit WG") : add("n:" + v, "Exit WG · " + v, v, null, "Exit WG");
     }
     return "direct";
   };
@@ -934,7 +946,7 @@ function exitsModel(rows, r) {
   for (const c of rows) of[c.name] = pick(c);
   // Выходы, на которые сейчас никто не идёт, — тоже на схеме
   if (kind === "xray" && r.per_client) (r.tags || []).forEach((t) => add("x:" + t, "Xray · " + t, t, null, "Xray"));
-  if (kind === "exits" && r.mode === "peers") (r.nodes || []).forEach((n) => add("n:" + n, "Exit · " + n, n, null, "Exit"));
+  if (kind === "exits" && r.mode === "peers") (r.nodes || []).forEach((n) => add("n:" + n, "Exit WG · " + n, n, null, "Exit WG"));
   // Теги выходов Xray бывают длинными (proxy_страна_сервер_…) — коротко, 5 символов
   const xs = ex.filter((e) => e.id.startsWith("x:") && e.id !== "x:main"), sh = xrayShort(xs.map((e) => e.short));
   xs.forEach((e) => { e.short = sh[e.short]; });
@@ -2215,7 +2227,7 @@ route(/^\/server\/module$/, async (ctx) => {
 // ── Туннели и DNS ─────────────────────────────────────────
 const STATE_WORD = { up: "включён", off: "выключен", none: "не настроен" };
 const TUNNELS = [["warp", "☁️", "WARP", "Cloudflare"], ["xray", "🛰", "Xray", "VLESS, VMess, Trojan, SS"],
-  ["tun2socks", "🧦", "tun2socks", "внешний SOCKS5"], ["exits", "🚪", "Exit-ноды", "другие AWG/WG-серверы"]];
+  ["tun2socks", "🧦", "tun2socks", "внешний SOCKS5"], ["exits", "🚪", "Exit-ноды WG", "другие AWG/WG-серверы"]];
 const TUNNEL_ICON = { warp: "cloud", xray: "satellite", tun2socks: "waypoints", exits: "door-open" };
 route(/^\/tunnels$/, async (ctx) => {
   const d = (await call("tunnels", "status")) || {};
@@ -2441,7 +2453,7 @@ route(/^\/tunnels\/exits$/, async (ctx) => {
       const res = await callR(up ? ["exits", "down"] : ["exits", "up", mode]);
       haptic(); toast("✅ " + outcome(res.log, up ? "Exit-ноды выключены" : "Exit-ноды включены"), 3500); render();
     }) : null },
-  h("div", { class: "main" }, h("div", { class: "title" }, "Туннель через exit-ноды"), tunSub),
+  h("div", { class: "main" }, h("div", { class: "title" }, "Туннель через exit-ноды WG"), tunSub),
   h("div", { class: "switch" + (up ? " on" : "") }));
   // Выбранные клиенты: переключатель у каждого, нода (если их несколько), поиск, все / никого
   let q = "";
@@ -2480,7 +2492,7 @@ route(/^\/tunnels\/exits$/, async (ctx) => {
   const seg = h("div", { class: "seg exmode" }, [["all", "Все клиенты"], ["peers", "Выбранные"]].map(([k, t]) =>
     h("button", { class: mode === k ? "on" : null, onclick: (ev) => (mode === k ? null
       : quick(ev.currentTarget, k === "all" ? "Через ноды — все клиенты" : "Через ноды — выбранные", ["exits", "mode", k])) }, t)));
-  ctx.put(title("🚪 Exit-ноды"), hint("Клиенты выходят в интернет через другие AWG/WG-серверы."),
+  ctx.put(title("🚪 Exit-ноды WG"), hint("Клиенты выходят в интернет через другие AWG/WG-серверы."),
     tunnel,
     nodes.length ? [h("h2", {}, "Кого вести через ноды"), seg,
       mode === "peers" ? [
@@ -2506,7 +2518,7 @@ route(/^\/tunnels\/exits$/, async (ctx) => {
 route(/^\/tunnels\/exits\/add$/, async (ctx) => {
   const name = h("input", { placeholder: "de1", maxlength: 6, autocapitalize: "off", autocomplete: "off" });
   const ta = h("textarea", { placeholder: "[Interface]\n…\n\n[Peer]\nEndpoint = …", style: "min-height:160px" });
-  ctx.put(title("➕ Exit-нода"),
+  ctx.put(title("➕ Exit-нода WG"),
     h("label", {}, "Имя: латиница, цифры, _, до 6 символов"), name,
     h("label", {}, "Клиентский конфиг AWG/WG этой ноды"), fileField(ta), ta,
     hint("Маршрут всего сервера конфиг не заберёт: awg2 ставит Table = off."),
@@ -2855,24 +2867,37 @@ const setUpdate = (v) => { v = v || ""; if (v !== (S.update || "")) { S.update =
 
 route(/^\/update$/, async (ctx) => {
   const [d, me] = await Promise.all([call("update", "status"), post("/api/me")]);
-  const beta = d.channel === "beta", latest = d.available || "";
+  const beta = d.channel === "beta";
   setVersion(d.version);
-  setUpdate(latest);
+  // Итог проверки меняет на месте только «Доступна» и кнопку обновления —
+  // экран не перерисовывается целиком и не моргает
+  const avail = h("span"), updBox = h("div");
+  const applyLatest = (v) => {
+    setUpdate(v);
+    avail.replaceChildren(v ? h("b", { class: "ok" }, v) : h("span", { class: "muted" }, "новее нет"));
+    updBox.replaceChildren(...(v ? [btn(`⬆️ Обновить до ${v}`, () => runJob(ctx, "Обновление awg2", ["update", "install"], (res) => [
+      setVersion((res && res.version) || v),
+      h("div", { class: "card" }, kv("Установлена", (res && res.version) || v)),
+      hint("Бот обновляется отдельно — из того же канала."),
+      btn("🤖 Обновить бота", () => updateBot(ctx), "btn-primary btn-block")]), "btn-ok btn-block")] : []));
+  };
+  applyLatest(d.available || "");
   const notes = h("div", { class: "card" }, h("div", { class: "muted small" }, "Загружаю список изменений…"));
-  call("update", "changelog").then((c) => {
+  const loadNotes = () => call("update", "changelog").then((c) => {
     if (!ctx.live()) return;
     notes.replaceChildren(...changelogView(c || {}));
     // В канале новее, а кэш проверки ещё не знает — проверить сейчас, чтобы появилась кнопка «Обновить»
-    if (c && c.newer && !latest) call("update", "check").then(() => { if (ctx.live()) render(); }).catch(() => {});
+    if (c && c.newer && !S.update) call("update", "check").then((r) => { if (ctx.live() && r) applyLatest(r.newer ? r.latest : ""); }).catch(() => {});
   })
     .catch(() => { if (ctx.live()) notes.replaceChildren(h("div", { class: "muted small" }, "Список изменений недоступен — нет связи с GitHub")); });
+  loadNotes();
   async function check(b) {
     await busy(b, async () => {
       const r = await call("update", "check");
-      setUpdate(r.newer ? r.latest : "");
+      applyLatest(r.newer ? r.latest : "");
       haptic();
       toast(r.newer ? `⬆️ Доступна ${r.latest}` : `Обновлений нет — в канале ${r.latest}`, 3000);
-      render();
+      loadNotes();
     });
   }
   async function channel(b) {
@@ -2890,14 +2915,10 @@ route(/^\/update$/, async (ctx) => {
     h("div", { class: "card" },
       kv("awg2", d.version || "?"),
       kv("Канал", beta ? "🧪 бета — ранние сборки" : "стабильный"),
-      kv("Доступна", latest ? h("b", { class: "ok" }, latest) : h("span", { class: "muted" }, "новее нет")),
+      kv("Доступна", avail),
       kv("Бот", me.bot || "?"),
       h("div", { class: "muted small" }, d.repo || "")),
-    latest ? btn(`⬆️ Обновить до ${latest}`, () => runJob(ctx, "Обновление awg2", ["update", "install"], (res) => [
-      setVersion((res && res.version) || latest),
-      h("div", { class: "card" }, kv("Установлена", (res && res.version) || latest)),
-      hint("Бот обновляется отдельно — из того же канала."),
-      btn("🤖 Обновить бота", () => updateBot(ctx), "btn-primary btn-block")]), "btn-ok btn-block") : null,
+    updBox,
     h("div", { class: "actions", style: "margin-top:8px" },
       btn("🔎 Проверить", check),
       btn("🤖 Обновить бота", () => updateBot(ctx)),
