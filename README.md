@@ -20,6 +20,11 @@
 </div>
 
 ---
+## Быстрый старт БЕТА
+
+```bash
+sudo curl -fsSL https://raw.githubusercontent.com/genaRijoff/awg-multi-script/main/awg2.sh -o /usr/local/bin/awg2 && sudo chmod +x /usr/local/bin/awg2 && sudo awg2
+```
 
 ## Быстрый старт
 
