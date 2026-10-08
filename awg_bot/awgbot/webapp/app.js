@@ -8,7 +8,8 @@
 // Старый движок встроенного браузера — Edge 18 (EdgeHTML) в Telegram Desktop
 // для Windows без WebView2: того, чего в нём нет, а панели нужно, — здесь.
 // Синтаксис панели — тоже по его силам: без новинок ES2019+ (оператор
-// нулевого слияния, catch без переменной, разворот объекта в литерале).
+// нулевого слияния, catch без переменной, разворот объекта в литерале);
+// цвета hsl() — через запятые: hsl(156 80% 58%) он не понимает (пустые кружки).
 if (!Array.prototype.flat) {
   Object.defineProperty(Array.prototype, "flat", { configurable: true, writable: true, value: function flat(depth = 1) {
     return depth > 0 ? this.reduce((a, x) => a.concat(Array.isArray(x) ? x.flat(depth - 1) : x), []) : this.slice();
@@ -397,13 +398,13 @@ function applyLook(save = false) {
   ["--acc", "--acc-ink", "--acc-soft", ...BG_VARS].forEach((p) => st.removeProperty(p));
   if (LOOK.hue != null) {
     const hh = LOOK.hue, sat = LOOK.sat, L = dark ? 58 : 32;
-    st.setProperty("--acc", `hsl(${hh} ${sat}% ${L}%)`);
-    st.setProperty("--acc-ink", dark ? `hsl(${hh} 60% 9%)` : `hsl(${hh} 80% 97%)`);
-    st.setProperty("--acc-soft", `hsl(${hh} ${sat}% ${L}% / .13)`);
+    st.setProperty("--acc", `hsl(${hh}, ${sat}%, ${L}%)`);
+    st.setProperty("--acc-ink", dark ? `hsl(${hh}, 60%, 9%)` : `hsl(${hh}, 80%, 97%)`);
+    st.setProperty("--acc-soft", `hsla(${hh}, ${sat}%, ${L}%, .13)`);
   }
   if (LOOK.bgHue != null) {
     const Ls = dark ? [4.5, 6, 8.5, 11, 13, 16, 21] : [94, 91, 98.5, 96, 92.5, 86, 80];
-    BG_VARS.forEach((p, i) => st.setProperty(p, `hsl(${LOOK.bgHue} ${dark ? LOOK.tint : LOOK.tint * 0.8}% ${Ls[i]}%)`));
+    BG_VARS.forEach((p, i) => st.setProperty(p, `hsl(${LOOK.bgHue}, ${dark ? LOOK.tint : LOOK.tint * 0.8}%, ${Ls[i]}%)`));
   }
   st.setProperty("--rb", LOOK.rb + "px");
   st.setProperty("--rc", Math.round(LOOK.rb * 0.62) + "px");
@@ -452,7 +453,7 @@ function lookPanel() {
   let sw = null;
   function draw() {
     sw = h("div", { class: "swatches" }, SWATCH.map(([n, hh, sat]) => h("button", { class: "swt" + (LOOK.hue === hh ? " on" : ""),
-      title: n, "aria-label": n, "data-h": hh, style: `background:hsl(${hh} ${sat}% 52%)`,
+      title: n, "aria-label": n, "data-h": hh, style: `background:hsl(${hh}, ${sat}%, 52%)`,
       onclick: () => { LOOK.hue = hh; LOOK.sat = sat; applyLook(true); draw(); } })));
     tpanel.replaceChildren(
       h("header", {}, h("span", { class: "ci" }, icon("sliders-horizontal")),
@@ -1637,7 +1638,7 @@ async function removeClients(btn, names, after) {
 }
 
 // Аватар клиента: буквы имени, цвет — от имени; точка — в сети / заблокирован
-const avaColor = (name) => { let x = 7; for (const ch of name) x = (x * 31 + ch.charCodeAt(0)) >>> 0; return `hsl(${x % 360} 62% 66%)`; };
+const avaColor = (name) => { let x = 7; for (const ch of name) x = (x * 31 + ch.charCodeAt(0)) >>> 0; return `hsl(${x % 360}, 62%, 66%)`; };
 const ava = (c) => h("div", { class: "ava " + clientState(c), style: `background:${avaColor(c.name)}` },
   c.name.replace(/[^A-Za-z0-9]/g, "").slice(0, 2) || "?");
 
@@ -3671,6 +3672,20 @@ if (WEB && DESK_MQ && DESK_MQ.addEventListener) {
 }
 drawTop();
 window.AWG_STARTED = true;      // icons.js: старт прошёл — его отчёт об ошибке запуска больше не нужен
+// Telegram Desktop для Windows без Microsoft Edge WebView2 Runtime открывает
+// панель в старом Edge 18: вид упрощён. Подсказать, как вернуть современный
+// движок (закрыл — до завтра не показываем)
+const WV2_URL = "https://developer.microsoft.com/ru-ru/microsoft-edge/webview2/consumer";
+if (tg && tg.initData && /Edge\/1\d\./.test(navigator.userAgent) && pref("wv2", "") !== new Date().toDateString()) {
+  const bar = h("div", { class: "card warn wv2", style: "margin:10px 14px 0" },
+    "Telegram открыл панель в старом движке Edge — вид упрощён. Поставь Microsoft Edge WebView2 Runtime и перезапусти Telegram: "
+    + "панель будет как на телефоне. ",
+    h("a", { href: WV2_URL, onclick: (ev) => { ev.preventDefault(); if (tg.openLink) tg.openLink(WV2_URL); else window.open(WV2_URL, "_blank"); } },
+      "Скачать WebView2"),
+    " · ",
+    h("a", { href: "#", onclick: (ev) => { ev.preventDefault(); setPref("wv2", new Date().toDateString()); bar.remove(); } }, "Скрыть"));
+  document.body.insertBefore(bar, root);
+}
 if (WEB) {
   webStart();
 } else if (!tg || !tg.initData) {

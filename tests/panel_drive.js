@@ -81,6 +81,8 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     p3.on("pageerror", (e) => errs.push(String(e)));
     await p3.addInitScript(() => {
       window.AWG_FORCE_NOGAP = true;                // и обход gap у flex — как без его поддержки
+      Object.defineProperty(navigator, "userAgent", { get: () => "Mozilla/5.0 (Windows NT 10.0; Win64; x64; WebView/3.0) "
+        + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.102 Safari/537.36 Edge/18.26300" });
       delete Array.prototype.flat; delete Object.fromEntries; delete String.prototype.trimStart; delete Blob.prototype.text;
       [Element, Document, DocumentFragment].forEach((C) => { delete C.prototype.replaceChildren; });
       const M = CanvasRenderingContext2D.prototype.measureText;
@@ -98,6 +100,7 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     if (await p3.locator(".boot-fail").count()) throw new Error(await p3.textContent(".boot-fail"));
     if (!await p3.locator("#tabbar a svg").count()) throw new Error("иконки нижней панели не нарисованы");
     if (!await p3.locator("[data-gapm]").count()) throw new Error("обход gap у flex не сработал");
+    if (!await p3.locator(".wv2 a:has-text('Скачать WebView2')").count()) throw new Error("нет подсказки про WebView2");
     for (const [hash, sel] of [["#/clients", "#app .search input"], ["#/server", "#app h1"], ["#/tunnels", "#app h1"]]) {
       await p3.evaluate((x) => { location.hash = x; }, hash);
       await p3.waitForSelector(sel);
