@@ -7,7 +7,7 @@
   reboot  сервер перезагрузился (сменился boot_id);
   cert    сертификат Mini App скоро истечёт — значит, продление не сработало;
   disk    диск заполнен на DISK_WARN% (повтор — только после спада ниже DISK_OK%);
-  update  вышла новая версия AWG Toolza — с кнопкой «Обновление»;
+  update  вышла новая версия AWG Toolza — суть из CHANGELOG, «Обновить» и «Что нового»;
   kernel  установлено ядро без модуля AWG — после перезагрузки VPN не поднимется.
 
 Каждое событие — один раз, пока не сменится (новая версия, другое ядро).
@@ -181,6 +181,26 @@ def cert_dates() -> tuple[int, int] | None:
         return None
 
 
+async def update_text(d: dict[str, Any], upd: str) -> str:
+    """Уведомление о новой версии — коротко: версия, канал, что стоит сейчас и
+    суть релиза одной строкой из CHANGELOG (пропущено несколько — по строке
+    на версию). CHANGELOG не скачался — без сути, остальное то же."""
+    cl = await api.data("update", "changelog", default=None, timeout=60) or {}
+    heads = [(str(sec.get("version") or ""), ui.changelog_headline(str(sec.get("body") or "")))
+             for sec in (cl.get("sections") or []) if cl.get("newer") and isinstance(sec, dict)]
+    heads = [(v, t) for v, t in heads if t]
+    channel = "бета" if d.get("channel") == "beta" else "стабильный"
+    lines = [f"🚀 <b>AWG Toolza {esc(upd)}</b>",
+             f"<i>{channel} · у тебя {esc(d.get('version') or '?')}</i>"]
+    if len(heads) == 1:
+        lines.append(f"<blockquote>{esc(heads[0][1])}</blockquote>")
+    elif heads:
+        more = f"\n…и ещё {len(heads) - 3}" if len(heads) > 3 else ""
+        lines.append("<blockquote>" + "\n".join(f"<b>{esc(v)}</b> — {esc(t)}" for v, t in heads[:3]) + more
+                     + "</blockquote>")
+    return "\n".join(lines)
+
+
 async def tick(bot: Bot, st: dict[str, Any]) -> bool:
     """Один проход. False — сводка awg2 не получена."""
     d = await api.data("status")
@@ -223,9 +243,8 @@ async def tick(bot: Bot, st: dict[str, Any]) -> bool:
     upd = d.get("update") or ""
     if upd and upd != st.get("update"):
         if enabled("update"):
-            await notify(bot, f"⬆️ <b>Вышла AWG Toolza {esc(upd)}</b>\nУ тебя {esc(d.get('version') or '?')}. "
-                              "Что нового и обновление — в разделе «Обновление».",
-                         ui.kb(("⬆️ Обновление", "upd")))
+            await notify(bot, await update_text(d, upd),
+                         ui.kb(ui.Row(("⬆️ Обновить", "upd:go"), ("📋 Что нового", "upd:notes"))))
         st["update"] = upd
 
     # Ядро без модуля: один раз на набор ядер

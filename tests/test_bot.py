@@ -708,10 +708,15 @@ async def run():
         not any("снова работает" in t for t in said(mark)) and "down_sent" not in st2, [said(mark), st2])
     al.api.data = real_data
 
+    CL = {"newer": True, "sections": [{"version": "v1.2.1", "title": "2026-10-08",
+                                        "body": "**Быстрее панель, понятнее бот.**\n\n### Панель\n\n- Переходы — сразу."}]}
+
     async def fake_data(*args, **kw):
         if args[:1] == ("status",):
-            return {"version": "v1.2.0", "host": "vm1", "update": "v1.2.1",
+            return {"version": "v1.2.0", "host": "vm1", "update": "v1.2.1", "channel": "beta",
                     "components": {"kernel_gap": "6.8.0-150-generic"}, "server": {"exists": True, "up": True}}
+        if args[:2] == ("update", "changelog"):
+            return CL
         return await real_data(*args, **kw)
     al.api.data = fake_data
     al.disk_pct = lambda: 95
@@ -727,7 +732,32 @@ async def run():
     chk("новая версия, ядро без модуля, сертификат — по сообщению с кнопкой; диск выключен",
         len(sent) == 3 and any("v1.2.1" in t for t in sent) and any("6.8.0-150-generic" in t for t in sent)
         and any("Сертификат Mini App" in t for t in sent) and not any("диск" in t for t in sent)
-        and {"upd", "mod:rebuild", "app"} <= set(btns), [sent, btns])
+        and {"upd:go", "upd:notes", "mod:rebuild", "app"} <= set(btns), [sent, btns])
+    upd_text = next(t for t in sent if "v1.2.1" in t)
+    chk("о новой версии — коротко: версия, канал и что стоит, суть релиза одной строкой",
+        upd_text.startswith("🚀 <b>AWG Toolza v1.2.1</b>") and "бета · у тебя v1.2.0" in upd_text
+        and "<blockquote>Быстрее панель, понятнее бот.</blockquote>" in upd_text and "Переходы" not in upd_text
+        and len(upd_text) < 200, upd_text)
+    CL["sections"] = [{"version": f"v1.2.{n}", "body": f"**Суть {n}.**"} for n in (5, 4, 3, 2, 1)]
+    text = await al.update_text({"version": "v1.2.0", "channel": "stable"}, "v1.2.5")
+    chk("пропущено несколько версий — по строке на версию, не больше трёх",
+        "стабильный · у тебя v1.2.0" in text and "<b>v1.2.5</b> — Суть 5." in text and "<b>v1.2.3</b> — Суть 3." in text
+        and "v1.2.2</b>" not in text and "…и ещё 2" in text, text)
+    CL["sections"] = [{"version": "v1.2.1", "title": "2026-10-08",
+                       "body": "**Быстрее панель, понятнее бот.**\n\n### Панель\n\n- Переходы — `сразу`."}]
+    real_call_n = al.api.call
+
+    async def notes_call(*args, **kw):
+        if args[:2] == ("update", "changelog"):
+            return al.api.Result(True, data=CL)
+        return await real_call_n(*args, **kw)
+    al.api.call = notes_call
+    text, buttons = screen(await press("upd:notes"))
+    al.api.call = real_call_n
+    chk("«Что нового»: версия, суть, разделы и пункты; «Обновить» рядом",
+        "📋 Что нового" in text and "<b>v1.2.1</b>" in text and "<i>Быстрее панель, понятнее бот.</i>" in text
+        and "<b>Панель</b>" in text and "• Переходы — <code>сразу</code>." in text and "**" not in text
+        and ("⬆️ Обновить", "upd:go") in buttons, [text, buttons])
     mark = len(SESSION.sent)
     await al.tick(BOT, st)
     chk("повторно о том же — молчит", not said(mark), said(mark))

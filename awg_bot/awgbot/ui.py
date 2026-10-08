@@ -149,6 +149,53 @@ def back(to: str = "main", text: str = "◀️ Назад") -> Button:
 HOME: Button = ("🏠 Главное меню", "main")
 
 
+# ── CHANGELOG ─────────────────────────────────────────────
+# Раздел версии (update changelog): первая жирная строка — суть релиза в одну
+# фразу, её и показывают уведомление и «Что нового».
+def _md_plain(text: str) -> str:
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    return re.sub(r"\*\*|`", "", text).strip()
+
+
+def changelog_headline(body: str, limit: int = 160) -> str:
+    m = re.search(r"^\*\*(.+?)\*\*\s*$", body or "", re.M | re.S)
+    line = " ".join(_md_plain(m.group(1)).split()) if m else ""
+    return line if len(line) <= limit else line[:limit - 1].rstrip() + "…"
+
+
+def changelog_html(body: str) -> str:
+    """Тело раздела CHANGELOG → HTML Telegram: подзаголовки — жирным,
+    пункты — «•», перенос строки внутри пункта склеивается."""
+    out: list[str] = []
+    in_head = False                         # жирный абзац-суть: он уже в заголовке
+    for raw in (body or "").split("\n"):
+        line = raw.rstrip()
+        if in_head or (not out and line.startswith("**")):
+            in_head = not line.endswith("**") or line == "**"
+            continue
+        if not line.strip() or re.fullmatch(r"\s*-{3,}\s*", line):
+            continue
+        if raw.startswith("  ") and out and not line.strip().startswith(("- ", "* ")):
+            out[-1] += " " + line.strip()
+            continue
+        line = line.strip()
+        if line.startswith("#"):
+            out.append("\n<b>" + esc(_md_plain(line.lstrip("# "))) + "</b>")
+        elif line.startswith(("- ", "* ")):
+            out.append("• " + line[2:])
+        else:
+            out.append(line)
+    html_lines = []
+    for line in out:
+        if line.startswith("\n<b>"):
+            html_lines.append(line)
+            continue
+        t = esc(re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", line))
+        t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t)
+        html_lines.append(re.sub(r"`([^`]+)`", r"<code>\1</code>", t))
+    return "\n".join(html_lines).strip()
+
+
 # ── Текст ─────────────────────────────────────────────────
 def pre(text: str, limit: int = 3000, tail: bool = True) -> str:
     """Моноширинный блок. Длинный текст режется: по умолчанию остаётся
