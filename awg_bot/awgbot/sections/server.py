@@ -126,8 +126,12 @@ NET_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}/24$")
 
 @act("create")
 async def _create(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    info = await api.data("server", "info", default={}) or {}
-    if not info.get("installed"):
+    r = await api.call("server", "info")
+    if not r.ok or not isinstance(r.data, dict):
+        # Сбой чтения — не «нет компонентов»: иначе бот предложил бы переустановку
+        await ui.render(cb, ui.fail(r, "Создание сервера"), ui.kb(ui.back("srv")))
+        return
+    if not r.data.get("installed"):
         # Без компонентов мастер дошёл бы до конца и упёрся в «не установлены»,
         # а на шаге версии честно сказал бы только «3.1 нельзя»
         await ui.confirm(cb, "<b>✨ Создание сервера</b>\n\nСначала нужны компоненты: пакеты, заголовки ядра, "

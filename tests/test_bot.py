@@ -416,18 +416,30 @@ async def run():
     print("Сервер и туннели")
     text, buttons = screen(await press("srv"))
     chk("экран сервера", "AWG 2.0" in text and "srv:proto" in [d for _, d in buttons], text)
-    real_data_ = botapi.data
+    real_call_ = botapi.call
 
     async def no_components(*args, **kw):
         if args[:2] == ("server", "info"):
-            return {"installed": False, "exists": False}
-        return await real_data_(*args, **kw)
-    botapi.data = no_components
+            return botapi.Result(True, data={"installed": False, "exists": False})
+        return await real_call_(*args, **kw)
+    botapi.call = no_components
     text, buttons = screen(await press("srv:create"))
-    botapi.data = real_data_
+    botapi.call = real_call_
     chk("чистый сервер: «Создать сервер» сначала ставит компоненты, мастер не начинается",
         "Сначала нужны компоненты" in text and ("📦 Установить", "srv:installok") in buttons
         and not any(d.startswith("srv:w:") for _, d in buttons), [text, buttons])
+
+    async def info_fails(*args, **kw):
+        if args[:2] == ("server", "info"):
+            return botapi.Result(False, 124, error="awg2 не ответил за 180 с")
+        return await real_call_(*args, **kw)
+    botapi.call = info_fails
+    text, buttons = screen(await press("srv:create"))
+    botapi.call = real_call_
+    chk("сбой server info — ошибка, а не «нужны компоненты» с переустановкой",
+        "не ответил" in text and "Сначала нужны компоненты" not in text
+        and "srv:installok" not in [d for _, d in buttons] and not any(d.startswith("srv:w:") for _, d in buttons),
+        [text, buttons])
     text, buttons = screen(await press("srv:create"))
     chk("мастер создания начинается с региона", "srv:w:region=ru" in [d for _, d in buttons], buttons)
     for step in ("region=ru", "profile=lite"):
@@ -1129,6 +1141,9 @@ async def run():
         chk("«owner» в данных Telegram не делает владельцем (метка только веб-панели)", st == 403, [st, body])
         st, body = await api_("/api/call", {"args": ["backup", "create", "auto", "1"]}, uid=333)
         chk("…и ротация автобэкапов («auto 1» стёрла бы все, кроме одного)", st == 403, [st, body])
+        st, body = await api_("/api/call", {"args": ["log", "web", "500"]}, uid=333)
+        st2, _ = await api_("/api/call", {"args": ["log", "manager", "5"]}, uid=333)
+        chk("…и журнал входов веб-панели; прочие журналы — можно", (st, st2) == (403, 200), [st, st2, body])
         st, body = await api_("/api/bot/info", {}, uid=333)
         chk("панель: приглашённому — сводка бота без списка админов",
             st == 200 and body.get("owner") is False and "admins" not in body and body.get("invited") == 1, [st, body])
@@ -1339,6 +1354,11 @@ async def run():
     denied = [alerts(await press(d, admin)) for d in ("web", "web:pwok", "web:inst", "web:rmok")]
     chk("приглашённому админу веб-панель закрыта — каждая кнопка",
         all(len(a) == 1 and "только владелец" in a[0] for a in denied), denied)
+    _, buttons = screen(await press("diag:logs", admin))
+    log_web = alerts(await press("diag:log:web", admin))
+    chk("журнал входов веб-панели (адреса, введённые логины) — тоже только владельцу",
+        "diag:log:web" not in [d for _, d in buttons] and "diag:log:manager" in [d for _, d in buttons]
+        and len(log_web) == 1 and "только владельцу" in log_web[0], [buttons, log_web])
     admins.remove(333, removed_by=111)
     real_call_ = botapi.call
     WEBST = {"installed": False}

@@ -7,7 +7,7 @@ from aiogram import Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
-from .. import api, jobs, ui
+from .. import access, api, jobs, ui
 from ..ui import esc
 from .clients import NAME_RE
 
@@ -22,6 +22,8 @@ LOGS = [
     ("dns", "dnscrypt-proxy"), ("dns-health", "DNS health-check"), ("wgobf", "WG + обфускатор"),
     ("bot", "Telegram-бот"), ("web", "веб-панель"),
 ]
+# Журнал входов веб-панели (адреса, введённые логины) — как и сам раздел «Веб-панель»
+OWNER_LOGS = {"web"}
 
 DPI_HINT = (
     "<b>🔍 DPI со стороны клиента</b>\n\n"
@@ -99,12 +101,17 @@ async def _sniff_go(cb: CallbackQuery, state: FSMContext, name: str) -> None:
 
 @act("logs")
 async def _logs(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    owner = access.is_owner(cb.from_user.id)
     await ui.render(cb, "<b>📜 Журналы</b>\nПоследние строки журнала службы.",
-                    ui.kb([(label, act.data("log", name)) for name, label in LOGS], ui.back("diag")))
+                    ui.kb([(label, act.data("log", name)) for name, label in LOGS
+                           if owner or name not in OWNER_LOGS], ui.back("diag")))
 
 
 @act("log")
 async def _log(cb: CallbackQuery, state: FSMContext, name: str) -> None:
+    if name in OWNER_LOGS and not access.is_owner(cb.from_user.id):
+        await cb.answer("Журнал веб-панели — только владельцу", show_alert=True)
+        return
     r = await api.call("log", name, 80)
     label = dict(LOGS).get(name, name)
     body = (ui.pre(r.log, 3600) or "<i>пусто</i>") if r.ok else ui.fail(r)

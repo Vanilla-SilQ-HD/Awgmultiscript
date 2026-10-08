@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.2.16"
+VERSION="v1.2.17"
 # Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
 # в сравнении версий не участвует. У выпущенной сборки пусто.
 BUILD=""
@@ -1646,7 +1646,7 @@ mod_reload() {
 
   cmd="for u in $units; do systemctl stop \"\$u\"; done
 for i in $ifaces; do ip link show \"\$i\" >/dev/null 2>&1 && { awg-quick down \"\$i\" 2>/dev/null || ip link del \"\$i\"; }; done
-rmmod $MOD_NAME || exit 3
+rmmod $MOD_NAME || { for u in $units; do systemctl start \"\$u\"; done; exit 3; }
 modprobe $MOD_NAME || exit 4
 for u in $units; do systemctl start \"\$u\"; done
 exit 0"
@@ -1663,7 +1663,7 @@ exit 0"
   mod_log "перезагрузка модуля rc=$rc: $(tr '\n' ';' <<< "$out")"
   case $rc in
     0) _PROTO_PROBE=(); ok "Модуль перезагружен, в памяти новая сборка" ;;
-    3) err "rmmod не выгрузил модуль — его держит ещё какой-то интерфейс"
+    3) err "rmmod не выгрузил модуль — его держит ещё какой-то интерфейс; туннели подняты на прежней сборке"
        info "Проверь: ip -all netns exec ip link show type amneziawg"
        info "Надёжно — перезагрузка сервера: новая сборка уже на диске"
        return 1 ;;
@@ -14993,5 +14993,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=56fc770faa04067b
+_BUILD_SUM=30baba07044a213e
 main "$@"

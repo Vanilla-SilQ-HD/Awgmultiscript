@@ -128,6 +128,46 @@ const say = (ok, label) => console.log(`${ok ? "OK" : "FAIL"} ${label}`);
       const zb = require("fs").readFileSync(await dz.path());
       if (zb.readUInt32LE(0) !== 0x04034b50 || !zb.includes(Buffer.from(dl.suggestedFilename()))) throw new Error("в ZIP нет " + dl.suggestedFilename());
     });
+    await step("сессия кончилась при возврате на открытый экран — форма входа нажимается, в снимок не попадает", async () => {
+      await page.goto(u + "#/clients");
+      await page.waitForSelector(".clist, .ctable");
+      await page.goto(u + "#/");
+      await page.waitForSelector(".kpis .kpi");
+      await ctx.clearCookies();                       // сессии больше нет — ответ 401
+      await page.evaluate(() => { location.hash = "#/clients"; });   // экран из снимка, «reloading»
+      await page.waitForSelector("form.login input[autocomplete=username]");
+      const st = await page.evaluate(() => [document.getElementById("app").className,
+        getComputedStyle(document.querySelector("form.login button")).pointerEvents]);
+      if (/reloading/.test(st[0]) || st[1] === "none") throw new Error("форма входа приглушена: " + st);
+      await page.fill("input[autocomplete=username]", user);
+      await page.fill("input[type=password]", password);
+      await page.click("form.login button", { timeout: 5000 });
+      await page.waitForSelector(".kpis .kpi");
+      const login = await page.evaluate(async () => {
+        location.hash = "#/clients";
+        await new Promise((r) => setTimeout(r, 30));
+        return !!document.querySelector("#app form.login");
+      });
+      if (login) throw new Error("снимок экрана — форма входа");
+      await page.waitForSelector(".clist, .ctable");
+    });
+    if (name === "ПК") {
+      await step("боковая панель при окне 600 px — во всю ширину (снизу), а не 460 px справа", async () => {
+        await page.setViewportSize({ width: 600, height: 800 });
+        const w = await page.evaluate(() => {
+          const d = document.createElement("div");
+          d.className = "drawer on";
+          document.body.append(d);
+          const a = d.getBoundingClientRect();
+          d.classList.add("wide");
+          const b = d.getBoundingClientRect();
+          d.remove();
+          return [a.left, a.width, b.left, b.width, innerWidth];
+        });
+        await page.setViewportSize({ width: 1366, height: 860 });
+        if (w[0] !== 0 || w[2] !== 0 || w[1] < w[4] - 20 || w[3] < w[4] - 20) throw new Error("left/width: " + w);
+      });
+    }
     await step("аккаунт: смена пароля и сессии", async () => {
       await page.goto(u + "#/account");
       await page.waitForSelector("text=Сменить пароль");

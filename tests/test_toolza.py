@@ -915,6 +915,23 @@ bash('systemctl() { echo "systemctl $*" >> "$CALLS"; [[ "$1" == show ]] && echo 
      'ST=elapsed timer_heal awg2-expire.timer; ST=waiting timer_heal awg2-expire.timer; ST=running timer_heal awg2-expire.timer')
 chk("заглохший таймер (elapsed) перезапускается, рабочий — не трогается",
     calls().count("systemctl restart awg2-expire.timer") == 1, calls())
+# Перезагрузка модуля (module all / update / reload): rmmod не отдал модуль —
+# туннели, остановленные перед ним, поднимаются обратно, а не лежат до ручного старта
+RMBIN = os.path.join(TMP, "rmmodbin")
+os.makedirs(RMBIN, exist_ok=True)
+for name, body in (("rmmod", 'echo "rmmod $*" >> "$CALLS"; echo "rmmod: ERROR: Module amneziawg is in use" >&2; exit 1'),
+                   ("systemctl", 'echo "systemctl $*" >> "$CALLS"\n'
+                                 '[[ "$1" == list-units ]] && echo "awg-quick@awg0.service loaded active running x"\nexit 0')):
+    with open(os.path.join(RMBIN, name), "w") as f:
+        f.write("#!/usr/bin/env bash\n" + body + "\n")
+    os.chmod(os.path.join(RMBIN, name), 0o755)
+reset_calls()
+rc, out, _ = bash(f'PATH="{RMBIN}:$PATH"; unset SSH_CONNECTION; AUTO_MODE=1; mod_reload 2>&1; echo "rc=$?"')
+c = calls()
+chk("перезагрузка модуля: rmmod не выгрузил — туннели снова запущены, ошибка сказана",
+    "systemctl stop awg-quick@awg0.service" in c and "rmmod amneziawg" in c
+    and c.rfind("systemctl start awg-quick@awg0.service") > c.find("rmmod amneziawg") >= 0
+    and "rc=1" in out and "rmmod не выгрузил" in out, [c, out])
 api("client", "limit", "alice", "off")
 os.remove(AWG_DUMP)
 # Предупреждение о длине I1-I5 — по каждому клиенту отдельно, не суммой по всем

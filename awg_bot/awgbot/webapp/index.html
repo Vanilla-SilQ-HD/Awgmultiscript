@@ -633,9 +633,9 @@
     .sgrid b { font-size: 19px; }
     .ctools .search { min-width: 0; flex: 1 1 100%; order: -1; }
     .clist { grid-template-columns: 1fr; }
-    .drawer { top: auto; width: 100vw; height: 90vh; border-radius: 20px 20px 0 0; border-left: 0; border-top: 1px solid var(--line2);
+    .drawer { top: auto; width: 100vw; max-width: none; height: 90vh; border-radius: 20px 20px 0 0; border-left: 0; border-top: 1px solid var(--line2);
               transform: translateY(105%); }
-    .drawer.wide { width: 100vw; }
+    .drawer.wide { width: 100vw; max-width: none; }
     .bar { bottom: calc(80px + 0px); bottom: calc(80px + env(safe-area-inset-bottom)); left: 10px; right: 10px; border-radius: 16px; border: 1px solid var(--line2);
            padding: 8px; }
   }

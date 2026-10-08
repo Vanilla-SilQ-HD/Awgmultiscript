@@ -3556,6 +3556,11 @@ route(/^\/log\/([a-z0-9-]+)$/, async (ctx, name) => {
 function showLogin(err = "") {
   token++;                       // недорисованный экран не затрёт форму входа своей ошибкой
   S.me = null;
+  // Экран, прерванный на перезагрузке, сам «reloading» уже не снимет (он не live) —
+  // иначе форма входа приглушена и не нажимается. Снимки прежней сессии — тоже долой
+  root.classList.remove("reloading");
+  delete root.dataset.path;
+  SNAP.clear();
   closeDrawer(); closeLook(); closePal();
   drawTop();
   const user = h("input", { autocomplete: "username", placeholder: "Логин", maxlength: "64", "aria-label": "Логин" });
