@@ -50,11 +50,7 @@ web_ask_password() {
   WEB_PASS_SHOWN="" WEB_NEW_HASH=""
   while true; do
     _read_secret a "${C}  Пароль (от 10 символов, Enter — сгенерировать): ${N}"
-    if [[ -z "$a" ]]; then
-      a=$(tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 18)
-      WEB_PASS_SHOWN="$a"
-      break
-    fi
+    [[ -n "$a" ]] || { web_gen_password; return; }
     (( ${#a} >= 10 )) || { warn "Нужно не меньше 10 символов"; continue; }
     # Вход принимает до 256 символов — длиннее не войти никогда
     (( ${#a} <= 256 )) || { warn "Не больше 256 символов"; continue; }
@@ -63,6 +59,13 @@ web_ask_password() {
     warn "Пароли не совпали"
   done
   WEB_NEW_HASH=$(printf '%s' "$a" | py web-hash) && [[ "$WEB_NEW_HASH" == scrypt\$* ]]
+}
+
+# Новый случайный пароль → WEB_PASS_SHOWN (показать один раз) и WEB_NEW_HASH
+web_gen_password() {
+  WEB_PASS_SHOWN=$(tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 18)
+  [[ ${#WEB_PASS_SHOWN} -eq 18 ]] || return 1
+  WEB_NEW_HASH=$(printf '%s' "$WEB_PASS_SHOWN" | py web-hash) && [[ "$WEB_NEW_HASH" == scrypt\$* ]]
 }
 
 # Код и venv панели: из распакованного архива (рядом, /root, /home) или из
@@ -123,12 +126,15 @@ web_show_access() {
   return 0
 }
 
+_web_code_ensure() {
+  web_code_ready && return 0
+  web_code_install || return 1
+  web_code_ready || { err "Код веб-панели не установился (нет $BOT_DIR/awgbot/web.py)"; return 1; }
+}
+
 web_install() {
-  local user v port path
-  if ! web_code_ready; then
-    web_code_install || return 1
-    web_code_ready || { err "Код веб-панели не установился (нет $BOT_DIR/awgbot/web.py)"; return 1; }
-  fi
+  local user v
+  _web_code_ensure || return 1
   user=$(web_conf_get WEB_USER)
   while true; do
     read_line v "${C}  Логин [Enter = ${user:-admin}]: ${N}"
@@ -138,6 +144,22 @@ web_install() {
   done
   user="$v"
   web_ask_password || { err "Пароль не захеширован"; return 1; }
+  _web_setup "$user" && web_show_access
+}
+
+# Без вопросов (бот): логин — прежний или admin, пароль — новый случайный,
+# его показывают один раз (WEB_PASS_SHOWN).
+web_install_auto() {
+  local user
+  _web_code_ensure || return 1
+  user=$(web_conf_get WEB_USER)
+  web_gen_password || { err "Пароль не захеширован"; return 1; }
+  _web_setup "${user:-admin}"
+}
+
+# Логин и хеш пароля, порт и секретный путь (прежние или случайные), UFW, служба.
+_web_setup() {  # логин
+  local user="$1" port path
   port=$(web_conf_get WEB_PORT); [[ -n "$port" ]] || port=$(web_random_port) || { err "Нет свободного порта"; return 1; }
   path=$(web_conf_get WEB_PATH); [[ -n "$path" ]] || path=$(web_random_path)
   web_conf_set WEB_USER "$user"
@@ -148,7 +170,27 @@ web_install() {
   web_write_unit
   web_restart || return 1
   log_info "веб-панель установлена: порт $port"
-  web_show_access
+}
+
+# Новый случайный пароль; все сессии завершаются (служба перезапускается).
+web_password_new() {
+  web_installed || { err "Веб-панель не установлена"; return 1; }
+  web_gen_password || { err "Пароль не захеширован"; return 1; }
+  web_conf_set WEB_PASS "$WEB_NEW_HASH" && web_restart || return 1
+  log_info "веб-панель: новый пароль"
+  ok "Пароль сменён, все сессии завершены"
+}
+
+# Новый секретный путь: прежний адрес перестаёт открываться.
+web_path_new() {
+  web_installed || { err "Веб-панель не установлена"; return 1; }
+  web_conf_set WEB_PATH "$(web_random_path)" && web_restart || return 1
+  log_info "веб-панель: новый путь"
+}
+
+web_stop() {
+  systemctl disable --now "$WEB_UNIT" &>/dev/null || { err "Веб-панель не остановилась"; return 1; }
+  ok "Веб-панель остановлена"
 }
 
 web_set_port() {
@@ -231,14 +273,13 @@ do_web_menu() {
          if [[ "$v" =~ ^[A-Za-z0-9._-]{3,32}$ ]]; then web_conf_set WEB_USER "$v" && web_restart && ok "Логин: $v"
          elif [[ -n "$v" ]]; then warn "Логин: 3-32 символа — латиница, цифры, . _ -"; fi ;;
       4) web_set_port || true ;;
-      5) web_conf_set WEB_PATH "$(web_random_path)" && web_restart && web_show_access ;;
+      5) web_path_new && web_show_access ;;
       6) _cert_issue_menu ip ;;
       7) read_line v "${C}  Домен (A-запись → $(public_ip_cached)): ${N}"
          [[ -n "$v" ]] && _cert_issue_menu domain "$v" ;;
       8) _cert_use_menu ;;
       9) if [[ -s "$WEB_LOG" ]]; then tail -n 30 "$WEB_LOG"; else info "Журнал пуст"; fi ;;
-      s) if web_active; then systemctl disable --now "$WEB_UNIT" &>/dev/null && ok "Веб-панель остановлена"
-         else web_restart || true; fi ;;
+      s) if web_active; then web_stop || true; else web_restart || true; fi ;;
       u) web_code_install && web_restart || true ;;
       d) web_remove; return 0 ;;
       0) return 0 ;;

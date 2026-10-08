@@ -20,7 +20,7 @@ LOGS = [
     ("warp-health", "WARP health-check"), ("xray", "Xray"), ("xray-routing", "маршруты Xray"),
     ("tun2socks", "tun2socks"), ("exits", "exit-ноды"), ("cascade", "каскад"),
     ("dns", "dnscrypt-proxy"), ("dns-health", "DNS health-check"), ("wgobf", "WG + обфускатор"),
-    ("bot", "Telegram-бот"),
+    ("bot", "Telegram-бот"), ("web", "веб-панель"),
 ]
 
 DPI_HINT = (

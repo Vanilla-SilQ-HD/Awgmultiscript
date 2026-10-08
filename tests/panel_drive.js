@@ -74,6 +74,9 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await step("мастер создания", async () => {
       await page.click("button:has-text('Создать сервер')");
       await page.waitForSelector("h1 >> text=Создание сервера");
+      // tools песочницы не знают ключа 3.1: причина и кнопка обновления модуля и tools
+      await page.waitForSelector("text=amneziawg-tools не умеют 3.1");
+      await page.waitForSelector("button:has-text('Обновить модуль и tools')");
       await page.click(".chip >> text=Мощный"); await page.waitForSelector(".chip >> text=Цепочка I1-I5");
       await page.waitForSelector("select >> nth=0");
       await shot("12-create-pro");

@@ -20,6 +20,7 @@ test_toolza.py — проверка собранного awg2 (dist/awg2.sh) б�
 Выход:   0 — всё прошло, 1 — есть провалы.
 """
 import base64
+import hashlib
 import os
 import sys
 import time
@@ -1117,7 +1118,18 @@ chk("без сервера: модуль и tools умеют 3.1 — масте�
 chk("без сервера: пробный интерфейс — один раз, дальше ответ из памяти", calls().count("ip link add") == 1, calls())
 rc, out, _ = bash(NOSRV.replace("v3.1.20260906", "v2.0.0").replace('rm -f "$STATE_DIR/proto31"; ', "") + "api_main server info")
 chk("модуль сменился на 2.0 — ответ пересчитан: 3.1 нет", json.loads(out)["data"]["proto31"] is False, out)
+chk("…и причина для мастера — модуль (кнопка «Модуль и tools»); при 3.1 причины нет",
+    json.loads(out)["data"]["proto31_why"] == "module" and d["data"]["proto31_why"] == "", [out, d])
 open(awg_stub, "w").write(stub_body)
+rc, out, _ = bash(NOSRV + "api_main server info")
+chk("tools без ключа 3.1 — причина tools (обновление одного модуля 3.1 не даст)",
+    json.loads(out)["data"]["proto31"] is False and json.loads(out)["data"]["proto31_why"] == "tools", out)
+rc, out, _ = bash("PATH=/nonexistent; proto_why 3.1")
+chk("awg не установлен — причина components (мастер сначала ставит компоненты)", out.strip() == "components", out)
+rc, out, _ = bash("mod_update_flow() { echo M; }; tools_update_flow() { echo T; }; components_update_flow; echo rc=$?; "
+                  "mod_update_flow() { echo M; return 1; }; components_update_flow; echo rc=$?")
+chk("module all: модуль, затем tools; модуль не собрался — tools не трогаются",
+    out.split() == ["M", "T", "rc=0", "M", "rc=1"], out)
 bash('rm -f "$STATE_DIR/proto31"')
 
 # Бэкап с другого VPS: аплинк там назывался иначе (eth0 → ens3) — NAT в awg0.conf
@@ -1733,7 +1745,42 @@ rc, out, _ = bash(f'BOT_DIR="{TMP}/botcode"; mkdir -p "$BOT_DIR"; '
 chk("код для одной веб-панели — ещё не бот; без панели каталог кода — бот (как раньше)", out.split() == ["NOBOT", "BOT"], out)
 rc, out, _ = bash(WEBPRE + "main_menu", stdin="0\n")
 chk("главное меню: пункт w) Веб-панель", "w)" in out and "Веб-панель" in out, out[-600:])
+# api web — экран «Веб-панель» в боте: адрес, новый пароль, новый путь
+WEBAPI = WEBPRE + f'web_installed() {{ [[ -f "{ROOT}/units/awg-web.service" ]]; }}; web_restart() {{ ok "Веб-панель работает"; }}; '
+rc, out, _ = bash(WEBAPI + "api_main web status")
+st = json.loads(out)["data"]
+conf = dict(ln.split("=", 1) for ln in open(WEBC).read().split("\n") if "=" in ln)
+chk("api web status: установлена, адрес с портом и секретным путём, логин; пароля в ответе нет",
+    st.get("installed") is True and st.get("url", "").endswith(f":{conf['WEB_PORT']}/{conf['WEB_PATH']}/")
+    and st.get("user") == "admin2" and "password" not in st, st)
+rc, out, _ = bash(WEBAPI + "api_main web password")
+r = json.loads(out)
+conf2 = dict(ln.split("=", 1) for ln in open(WEBC).read().split("\n") if "=" in ln)
+pw = (r.get("data") or {}).get("password", "")
+chk("api web password: новый пароль — в ответе один раз, на сервере только новый хеш",
+    r.get("ok") and re.fullmatch(r"[A-Za-z0-9]{18}", pw) and conf2["WEB_PASS"] != conf["WEB_PASS"]
+    and pw not in open(WEBC).read() and pw not in r.get("log", ""), r)
+_, n_, r_, p_, salt_, want_ = conf2["WEB_PASS"].split("$")
+chk("новый пароль подходит к сохранённому хешу",
+    hashlib.scrypt(pw.encode(), salt=base64.b64decode(salt_), n=int(n_), r=int(r_), p=int(p_), dklen=32)
+    == base64.b64decode(want_), conf2["WEB_PASS"])
+rc, out, _ = bash(WEBAPI + "api_main web path")
+r = json.loads(out)
+conf3 = dict(ln.split("=", 1) for ln in open(WEBC).read().split("\n") if "=" in ln)
+chk("api web path: новый секретный путь, порт прежний",
+    r.get("ok") and conf3["WEB_PATH"] != conf2["WEB_PATH"] and r["data"]["url"].endswith(f"/{conf3['WEB_PATH']}/")
+    and conf3["WEB_PORT"] == conf2["WEB_PORT"] and not r["data"].get("password"), r)
+rc, out, _ = bash(WEBAPI + "api_main web install")
+chk("api web install поверх установленной — отказ (пароль не перезаписывается молча)",
+    not json.loads(out).get("ok"), out)
 rc, out, _ = bash(WEBPRE + f'remove_unit() {{ rm -f "{ROOT}/units/$1"; }}; ' + "web_remove quiet 2>&1; ls " + f'"{WEBC}" 2>&1; ls "{ROOT}/units/awg-web.service" 2>&1')
 chk("удаление: конфиг и служба убраны", "No such file" in out and out.count("No such file") == 2, out)
+rc, out, _ = bash(WEBAPI + "ufw_allow() { :; }; api_main web install")
+r = json.loads(out)
+conf = dict(ln.split("=", 1) for ln in open(WEBC).read().split("\n") if "=" in ln)
+chk("api web install (бот): логин admin, пароль сгенерирован и выдан, случайные порт и путь",
+    r.get("ok") and r["data"].get("user") == "admin" and re.fullmatch(r"[A-Za-z0-9]{18}", r["data"].get("password", ""))
+    and conf.get("WEB_PASS", "").startswith("scrypt$") and r["data"]["url"].endswith(f":{conf['WEB_PORT']}/{conf['WEB_PATH']}/"),
+    r)
 
 summary()

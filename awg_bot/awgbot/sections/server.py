@@ -80,7 +80,8 @@ async def _install(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 @act("installok")
 async def _install_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    await jobs.start(cb, "Установка компонентов", "server", "install", back_to="srv")
+    await jobs.start(cb, "Установка компонентов", "server", "install", back_to="srv",
+                     ok_buttons=[("✨ Создать сервер", act.data("create"))])
 
 
 @act("restart")
@@ -125,8 +126,37 @@ NET_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}/24$")
 
 @act("create")
 async def _create(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    info = await api.data("server", "info", default={}) or {}
+    if not info.get("installed"):
+        # Без компонентов мастер дошёл бы до конца и упёрся в «не установлены»,
+        # а на шаге версии честно сказал бы только «3.1 нельзя»
+        await ui.confirm(cb, "<b>✨ Создание сервера</b>\n\nСначала нужны компоненты: пакеты, заголовки ядра, "
+                             "модуль AmneziaWG и amneziawg-tools — сборка из исходников, обычно 5-15 минут. "
+                             "Когда закончится — «✨ Создать сервер».",
+                         ("📦 Установить", act.data("installok")), "srv")
+        return
     await state.update_data(wiz={})
     await wizard(cb, state)
+
+
+@act("wr")
+async def _wizard_resume(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    """Вернуться в мастер с теми же ответами (после обновления модуля)."""
+    await wizard(cb, state)
+
+
+@act("upd31")
+async def _upd31(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await jobs.start(cb, "Обновление модуля и tools", "module", "all", back_to=act.data("wr"),
+                     ok_buttons=[("✨ Продолжить", act.data("wr"))])
+
+
+# Почему мастеру недоступна 3.1 (server info → proto31_why)
+WHY31 = {
+    "components": "▲ Компоненты не установлены: Сервер → 📦 Компоненты.",
+    "tools": "▲ amneziawg-tools не умеют 3.1 — обнови модуль и tools (5-10 минут), затем вернёшься сюда.",
+    "module": "▲ Модуль ядра собран без 3.1 — обнови модуль и tools (5-10 минут), затем вернёшься сюда.",
+}
 
 
 @act("w")
@@ -253,9 +283,12 @@ async def wizard(target: ui.Target, state: FSMContext) -> None:
                        "AmneziaVPN 5.0.1.5+ или AmneziaWG с 3.1\n"
                        "• AWG 2.0 — подключится любой клиент AmneziaWG")
         buttons = [("AWG 3.1", _w("proto", "3.1"))] if info.get("proto31") else []
+        why = info.get("proto31_why") or ""
         if not info.get("proto31"):
-            text += "\n\n▲ Установленные модуль и tools не умеют 3.1 — обнови их: Сервер → Модуль ядра."
-        await ui.render(target, text, ui.kb(buttons, ("AWG 2.0", _w("proto", "2.0")), cancel))
+            text += "\n\n" + (WHY31.get(why) or "▲ 3.1 не прошла проверку на сервере"
+                                + (f": {esc(info['reboot'])}" if info.get("reboot") else " — Сервер → Модуль ядра"))
+        upd = ("⬆️ Модуль и tools", act.data("upd31")) if why in ("tools", "module") else None
+        await ui.render(target, text, ui.kb(upd, buttons, ("AWG 2.0", _w("proto", "2.0")), cancel))
     elif step == "dns":
         await ui.render(target, head + "<b>DNS для клиентов</b>\n"
                         + "\n".join(f"• {label} — <code>{ips}</code>" for label, ips in DNS),

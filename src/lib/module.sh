@@ -123,42 +123,51 @@ reboot_reason() {
   fi
 }
 
+# Чего не хватает для версии $1 (3.0 | 3.1) — по надёжным признакам:
+# components — awg не установлен; tools — amneziawg-tools не знают её ключа
+# (они сами разбирают конфиг); module — модуль на диске собран из тега без неё;
+# check — признаков «нет» нет, решает проба (proto_supported).
+proto_why() {  # версия
+  local key=HeaderProtectionKey fam
+  [[ "$1" == 3.1 ]] && key=RandomTrailers
+  command -v awg &>/dev/null || { echo components; return 0; }
+  grep -qa "$key" "$(command -v awg)" || { echo tools; return 0; }
+  fam=$(tag_family "$(mod_tag)")
+  if [[ -n "$fam" ]] && [[ "$fam" == 2.0 || ( "$1" == 3.1 && "$fam" == 3.0 ) ]]; then echo module; return 0; fi
+  echo check
+}
+
 # Умеют ли компоненты версию протокола $1 (3.0 | 3.1).
 # 0 — да, 1 — точно нет, 2 — подтвердить не удалось.
 # «Нет» говорим только по надёжным признакам: tools не знают ключа (они сами
 # разбирают конфиг) или модуль на диске собран из тега без поддержки.
 _PROTO_PROBE=()
 proto_supported() {
-  local proto="$1" key val fam rc dev tmp
+  local proto="$1" key val rc dev tmp
   [[ -n "${_PROTO_PROBE[${proto//./}]:-}" ]] && return "${_PROTO_PROBE[${proto//./}]}"
   case "$proto" in
     3.1) key=RandomTrailers; val=on ;;
     *)   key=HeaderProtectionKey; val="" ;;
   esac
   rc=2
-  if ! command -v awg &>/dev/null || ! grep -qa "$key" "$(command -v awg)"; then
+  if [[ "$(proto_why "$proto")" != check ]]; then
     rc=1
+  elif awg showconf "$AWG_IF" 2>/dev/null | grep -q "^$key"; then
+    rc=0
   else
-    fam=$(tag_family "$(mod_tag)")
-    if [[ -n "$fam" ]] && [[ "$fam" == 2.0 || ( "$proto" == 3.1 && "$fam" == 3.0 ) ]]; then
-      rc=1
-    elif awg showconf "$AWG_IF" 2>/dev/null | grep -q "^$key"; then
-      rc=0
-    else
-      # Проба, прерванная раньше (тайм-аут бота, kill), оставляла интерфейс
-      for dev in $(ip -o link show type amneziawg 2>/dev/null | awk -F': ' '{sub(/@.*/, "", $2); print $2}'); do
-        [[ "$dev" =~ ^awgprb([0-9]+)$ ]] && ! kill -0 "${BASH_REMATCH[1]}" 2>/dev/null \
-          && ip link del dev "$dev" &>/dev/null
-      done
-      dev="awgprb$BASHPID"
-      if ip link add dev "$dev" type amneziawg 2>/dev/null; then
-        tmp=$(mktemp)
-        [[ -n "$val" ]] || val=$(awg genkey)
-        printf '[Interface]\nPrivateKey = %s\n%s = %s\n' "$(awg genkey)" "$key" "$val" > "$tmp"
-        awg setconf "$dev" "$tmp" &>/dev/null && rc=0
-        rm -f "$tmp"
-        ip link del dev "$dev" &>/dev/null || true
-      fi
+    # Проба, прерванная раньше (тайм-аут бота, kill), оставляла интерфейс
+    for dev in $(ip -o link show type amneziawg 2>/dev/null | awk -F': ' '{sub(/@.*/, "", $2); print $2}'); do
+      [[ "$dev" =~ ^awgprb([0-9]+)$ ]] && ! kill -0 "${BASH_REMATCH[1]}" 2>/dev/null \
+        && ip link del dev "$dev" &>/dev/null
+    done
+    dev="awgprb$BASHPID"
+    if ip link add dev "$dev" type amneziawg 2>/dev/null; then
+      tmp=$(mktemp)
+      [[ -n "$val" ]] || val=$(awg genkey)
+      printf '[Interface]\nPrivateKey = %s\n%s = %s\n' "$(awg genkey)" "$key" "$val" > "$tmp"
+      awg setconf "$dev" "$tmp" &>/dev/null && rc=0
+      rm -f "$tmp"
+      ip link del dev "$dev" &>/dev/null || true
     fi
   fi
   _PROTO_PROBE[${proto//./}]=$rc
@@ -522,6 +531,12 @@ mod_update_flow() {
   mod_install_tag "$tag" || return 1
   mod_autoload
   if mod_loaded; then mod_reload || true; else modprobe "$MOD_NAME" 2>/dev/null || true; fi
+}
+
+# Модуль и tools разом: для 3.1 нужны оба — бот и панель предлагают одну кнопку.
+components_update_flow() {
+  mod_update_flow || return 1
+  tools_update_flow
 }
 
 tools_update_flow() {  # [force]

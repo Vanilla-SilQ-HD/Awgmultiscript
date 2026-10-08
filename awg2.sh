@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.2.8"
+VERSION="v1.2.9"
 # Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
 # в сравнении версий не участвует. У выпущенной сборки пусто.
 BUILD=""
@@ -1279,42 +1279,51 @@ reboot_reason() {
   fi
 }
 
+# Чего не хватает для версии $1 (3.0 | 3.1) — по надёжным признакам:
+# components — awg не установлен; tools — amneziawg-tools не знают её ключа
+# (они сами разбирают конфиг); module — модуль на диске собран из тега без неё;
+# check — признаков «нет» нет, решает проба (proto_supported).
+proto_why() {  # версия
+  local key=HeaderProtectionKey fam
+  [[ "$1" == 3.1 ]] && key=RandomTrailers
+  command -v awg &>/dev/null || { echo components; return 0; }
+  grep -qa "$key" "$(command -v awg)" || { echo tools; return 0; }
+  fam=$(tag_family "$(mod_tag)")
+  if [[ -n "$fam" ]] && [[ "$fam" == 2.0 || ( "$1" == 3.1 && "$fam" == 3.0 ) ]]; then echo module; return 0; fi
+  echo check
+}
+
 # Умеют ли компоненты версию протокола $1 (3.0 | 3.1).
 # 0 — да, 1 — точно нет, 2 — подтвердить не удалось.
 # «Нет» говорим только по надёжным признакам: tools не знают ключа (они сами
 # разбирают конфиг) или модуль на диске собран из тега без поддержки.
 _PROTO_PROBE=()
 proto_supported() {
-  local proto="$1" key val fam rc dev tmp
+  local proto="$1" key val rc dev tmp
   [[ -n "${_PROTO_PROBE[${proto//./}]:-}" ]] && return "${_PROTO_PROBE[${proto//./}]}"
   case "$proto" in
     3.1) key=RandomTrailers; val=on ;;
     *)   key=HeaderProtectionKey; val="" ;;
   esac
   rc=2
-  if ! command -v awg &>/dev/null || ! grep -qa "$key" "$(command -v awg)"; then
+  if [[ "$(proto_why "$proto")" != check ]]; then
     rc=1
+  elif awg showconf "$AWG_IF" 2>/dev/null | grep -q "^$key"; then
+    rc=0
   else
-    fam=$(tag_family "$(mod_tag)")
-    if [[ -n "$fam" ]] && [[ "$fam" == 2.0 || ( "$proto" == 3.1 && "$fam" == 3.0 ) ]]; then
-      rc=1
-    elif awg showconf "$AWG_IF" 2>/dev/null | grep -q "^$key"; then
-      rc=0
-    else
-      # Проба, прерванная раньше (тайм-аут бота, kill), оставляла интерфейс
-      for dev in $(ip -o link show type amneziawg 2>/dev/null | awk -F': ' '{sub(/@.*/, "", $2); print $2}'); do
-        [[ "$dev" =~ ^awgprb([0-9]+)$ ]] && ! kill -0 "${BASH_REMATCH[1]}" 2>/dev/null \
-          && ip link del dev "$dev" &>/dev/null
-      done
-      dev="awgprb$BASHPID"
-      if ip link add dev "$dev" type amneziawg 2>/dev/null; then
-        tmp=$(mktemp)
-        [[ -n "$val" ]] || val=$(awg genkey)
-        printf '[Interface]\nPrivateKey = %s\n%s = %s\n' "$(awg genkey)" "$key" "$val" > "$tmp"
-        awg setconf "$dev" "$tmp" &>/dev/null && rc=0
-        rm -f "$tmp"
-        ip link del dev "$dev" &>/dev/null || true
-      fi
+    # Проба, прерванная раньше (тайм-аут бота, kill), оставляла интерфейс
+    for dev in $(ip -o link show type amneziawg 2>/dev/null | awk -F': ' '{sub(/@.*/, "", $2); print $2}'); do
+      [[ "$dev" =~ ^awgprb([0-9]+)$ ]] && ! kill -0 "${BASH_REMATCH[1]}" 2>/dev/null \
+        && ip link del dev "$dev" &>/dev/null
+    done
+    dev="awgprb$BASHPID"
+    if ip link add dev "$dev" type amneziawg 2>/dev/null; then
+      tmp=$(mktemp)
+      [[ -n "$val" ]] || val=$(awg genkey)
+      printf '[Interface]\nPrivateKey = %s\n%s = %s\n' "$(awg genkey)" "$key" "$val" > "$tmp"
+      awg setconf "$dev" "$tmp" &>/dev/null && rc=0
+      rm -f "$tmp"
+      ip link del dev "$dev" &>/dev/null || true
     fi
   fi
   _PROTO_PROBE[${proto//./}]=$rc
@@ -1678,6 +1687,12 @@ mod_update_flow() {
   mod_install_tag "$tag" || return 1
   mod_autoload
   if mod_loaded; then mod_reload || true; else modprobe "$MOD_NAME" 2>/dev/null || true; fi
+}
+
+# Модуль и tools разом: для 3.1 нужны оба — бот и панель предлагают одну кнопку.
+components_update_flow() {
+  mod_update_flow || return 1
+  tools_update_flow
 }
 
 tools_update_flow() {  # [force]
@@ -9002,11 +9017,7 @@ web_ask_password() {
   WEB_PASS_SHOWN="" WEB_NEW_HASH=""
   while true; do
     _read_secret a "${C}  Пароль (от 10 символов, Enter — сгенерировать): ${N}"
-    if [[ -z "$a" ]]; then
-      a=$(tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 18)
-      WEB_PASS_SHOWN="$a"
-      break
-    fi
+    [[ -n "$a" ]] || { web_gen_password; return; }
     (( ${#a} >= 10 )) || { warn "Нужно не меньше 10 символов"; continue; }
     # Вход принимает до 256 символов — длиннее не войти никогда
     (( ${#a} <= 256 )) || { warn "Не больше 256 символов"; continue; }
@@ -9015,6 +9026,13 @@ web_ask_password() {
     warn "Пароли не совпали"
   done
   WEB_NEW_HASH=$(printf '%s' "$a" | py web-hash) && [[ "$WEB_NEW_HASH" == scrypt\$* ]]
+}
+
+# Новый случайный пароль → WEB_PASS_SHOWN (показать один раз) и WEB_NEW_HASH
+web_gen_password() {
+  WEB_PASS_SHOWN=$(tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 18)
+  [[ ${#WEB_PASS_SHOWN} -eq 18 ]] || return 1
+  WEB_NEW_HASH=$(printf '%s' "$WEB_PASS_SHOWN" | py web-hash) && [[ "$WEB_NEW_HASH" == scrypt\$* ]]
 }
 
 # Код и venv панели: из распакованного архива (рядом, /root, /home) или из
@@ -9075,12 +9093,15 @@ web_show_access() {
   return 0
 }
 
+_web_code_ensure() {
+  web_code_ready && return 0
+  web_code_install || return 1
+  web_code_ready || { err "Код веб-панели не установился (нет $BOT_DIR/awgbot/web.py)"; return 1; }
+}
+
 web_install() {
-  local user v port path
-  if ! web_code_ready; then
-    web_code_install || return 1
-    web_code_ready || { err "Код веб-панели не установился (нет $BOT_DIR/awgbot/web.py)"; return 1; }
-  fi
+  local user v
+  _web_code_ensure || return 1
   user=$(web_conf_get WEB_USER)
   while true; do
     read_line v "${C}  Логин [Enter = ${user:-admin}]: ${N}"
@@ -9090,6 +9111,22 @@ web_install() {
   done
   user="$v"
   web_ask_password || { err "Пароль не захеширован"; return 1; }
+  _web_setup "$user" && web_show_access
+}
+
+# Без вопросов (бот): логин — прежний или admin, пароль — новый случайный,
+# его показывают один раз (WEB_PASS_SHOWN).
+web_install_auto() {
+  local user
+  _web_code_ensure || return 1
+  user=$(web_conf_get WEB_USER)
+  web_gen_password || { err "Пароль не захеширован"; return 1; }
+  _web_setup "${user:-admin}"
+}
+
+# Логин и хеш пароля, порт и секретный путь (прежние или случайные), UFW, служба.
+_web_setup() {  # логин
+  local user="$1" port path
   port=$(web_conf_get WEB_PORT); [[ -n "$port" ]] || port=$(web_random_port) || { err "Нет свободного порта"; return 1; }
   path=$(web_conf_get WEB_PATH); [[ -n "$path" ]] || path=$(web_random_path)
   web_conf_set WEB_USER "$user"
@@ -9100,7 +9137,27 @@ web_install() {
   web_write_unit
   web_restart || return 1
   log_info "веб-панель установлена: порт $port"
-  web_show_access
+}
+
+# Новый случайный пароль; все сессии завершаются (служба перезапускается).
+web_password_new() {
+  web_installed || { err "Веб-панель не установлена"; return 1; }
+  web_gen_password || { err "Пароль не захеширован"; return 1; }
+  web_conf_set WEB_PASS "$WEB_NEW_HASH" && web_restart || return 1
+  log_info "веб-панель: новый пароль"
+  ok "Пароль сменён, все сессии завершены"
+}
+
+# Новый секретный путь: прежний адрес перестаёт открываться.
+web_path_new() {
+  web_installed || { err "Веб-панель не установлена"; return 1; }
+  web_conf_set WEB_PATH "$(web_random_path)" && web_restart || return 1
+  log_info "веб-панель: новый путь"
+}
+
+web_stop() {
+  systemctl disable --now "$WEB_UNIT" &>/dev/null || { err "Веб-панель не остановилась"; return 1; }
+  ok "Веб-панель остановлена"
 }
 
 web_set_port() {
@@ -9183,14 +9240,13 @@ do_web_menu() {
          if [[ "$v" =~ ^[A-Za-z0-9._-]{3,32}$ ]]; then web_conf_set WEB_USER "$v" && web_restart && ok "Логин: $v"
          elif [[ -n "$v" ]]; then warn "Логин: 3-32 символа — латиница, цифры, . _ -"; fi ;;
       4) web_set_port || true ;;
-      5) web_conf_set WEB_PATH "$(web_random_path)" && web_restart && web_show_access ;;
+      5) web_path_new && web_show_access ;;
       6) _cert_issue_menu ip ;;
       7) read_line v "${C}  Домен (A-запись → $(public_ip_cached)): ${N}"
          [[ -n "$v" ]] && _cert_issue_menu domain "$v" ;;
       8) _cert_use_menu ;;
       9) if [[ -s "$WEB_LOG" ]]; then tail -n 30 "$WEB_LOG"; else info "Журнал пуст"; fi ;;
-      s) if web_active; then systemctl disable --now "$WEB_UNIT" &>/dev/null && ok "Веб-панель остановлена"
-         else web_restart || true; fi ;;
+      s) if web_active; then web_stop || true; else web_restart || true; fi ;;
       u) web_code_install && web_restart || true ;;
       d) web_remove; return 0 ;;
       0) return 0 ;;
@@ -9822,6 +9878,8 @@ _api_server() {
       {
         _kv installed:b "$(_b command -v awg)"; _kv exists:b "$(_b server_exists)"
         _kv proto31:b "$([[ $rc == 0 ]] && echo 1 || echo 0)"
+        # Почему нет 3.1: components | tools | module | check (не прошла проба)
+        _kv proto31_why "$([[ $rc == 0 ]] || proto_why 3.1)"
         _kv reboot "$(reboot_reason)"
         if server_exists; then
           _kv up:b "$(_b iface_up)"; _kv proto "$(server_proto)"
@@ -9907,6 +9965,7 @@ _api_module() {
       [[ -z "$tag" || "$tag" =~ ^v?[0-9][0-9A-Za-z._-]*$ ]] || { err "Тег вида v3.1.20260906"; return 1; }
       mod_update_flow "$tag" "$force" ;;
     tools) tools_update_flow "${1:-}" ;;
+    all) components_update_flow ;;
     reload) mod_reload ;;
     rebuild) mod_rebuild_all ;;
     backups)
@@ -9915,7 +9974,7 @@ _api_module() {
     rollback)
       [[ -n "${1:-}" ]] || { _api_usage "module rollback ФАЙЛ"; return; }
       mod_rollback "$1" ;;
-    *) _api_usage "module report|check|tags|update [ТЕГ] [force]|tools [force]|reload|rebuild|backups|rollback ФАЙЛ" ;;
+    *) _api_usage "module report|check|tags|update [ТЕГ] [force]|tools [force]|all|reload|rebuild|backups|rollback ФАЙЛ" ;;
   esac
 }
 
@@ -10475,6 +10534,38 @@ _api_cert() {
   esac
 }
 
+# ── Веб-панель ────────────────────────────────────────────
+# Пароль в ответе — только новый, сгенерированный здесь (install, password):
+# на сервере лежит лишь его хеш, прежний показать нельзя.
+_api_web_access() {
+  { _kv url "$(web_url)"; _kv user "$(web_conf_get WEB_USER)"; _kv password "${WEB_PASS_SHOWN:-}"; } | api_obj
+}
+
+_api_web() {
+  local a="${1:-status}"
+  shift || true
+  case "$a" in
+    status)
+      { _kv installed:b "$(_b web_installed)"; _kv active:b "$(_b web_active)"
+        if web_installed; then
+          _kv url "$(web_url)"; _kv user "$(web_conf_get WEB_USER)"; _kv port:n "$(web_conf_get WEB_PORT)"
+        fi
+        _kv cert:b "$(_b cert_installed)"; _kv cert_name "$(cert_get name)"; _kv cert_expires:n "$(cert_expires)"
+      } | api_obj ;;
+    install)
+      web_installed && { err "Веб-панель уже установлена — новый пароль: web password"; return 1; }
+      web_install_auto && _api_web_access ;;
+    password) web_password_new && _api_web_access ;;
+    path) web_path_new && _api_web_access ;;
+    restart|start)
+      web_installed || { err "Веб-панель не установлена"; return 1; }
+      web_restart ;;
+    stop) web_stop ;;
+    remove) web_installed || { err "Веб-панель не установлена"; return 1; }; web_remove quiet ;;
+    *) _api_usage "web status|install|password|path|restart|start|stop|remove" ;;
+  esac
+}
+
 _api_uninstall() {
   local o
   for o in "$@"; do [[ "$o" =~ ^(bot|wgobf|web|self)$ ]] || { _api_usage "uninstall [bot] [wgobf] [web] [self]"; return; }; done
@@ -10494,8 +10585,8 @@ _api_log() {
     xray) unit="$XRAY_UNIT" ;;           xray-routing) unit="$XRAY_ROUTING_UNIT" ;;
     tun2socks) unit="$T2S_UNIT" ;;       exits) unit="$EXITS_UNIT" ;;
     dns) unit="$DNS_UNIT" ;;             wgobf) unit="$WGOBF_UNIT" ;;
-    bot) unit="$BOT_UNIT" ;;
-    *) _api_usage "log manager|install|module|expire|cascade|warp-health|dns-health|usque|awg|warp|xray|xray-routing|tun2socks|exits|dns|wgobf|bot [строк]"; return ;;
+    bot) unit="$BOT_UNIT" ;;             web) file="$WEB_LOG" ;;
+    *) _api_usage "log manager|install|module|expire|cascade|warp-health|dns-health|usque|awg|warp|xray|xray-routing|tun2socks|exits|dns|wgobf|bot|web [строк]"; return ;;
   esac
   if [[ -n "$file" ]]; then
     [[ -f "$file" ]] || { info "Журнала $file нет"; return 0; }
@@ -10625,12 +10716,13 @@ api_dispatch() {
     update) _api_update "$@" ;;
     bot) _api_bot "$@" ;;
     cert) _api_cert "$@" ;;
+    web) _api_web "$@" ;;
     uninstall) _api_uninstall "$@" ;;
     log) _api_log "$@" ;;
     job) _api_job "$@" ;;
     help)
       echo "Разделы: status server module clients client mimicry traffic diag backup tunnels warp xray t2s"
-      echo "         exits cascade dns wgobf update bot uninstall log job version"
+      echo "         exits cascade dns wgobf update bot cert web uninstall log job version"
       echo "Подсказка по разделу: awg2 api РАЗДЕЛ" ;;
     *) err "Неизвестная команда: $cmd — awg2 api help"; return 2 ;;
   esac
@@ -14892,5 +14984,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=7fbee33119e65c78
+_BUILD_SUM=611c0bbe87303ab0
 main "$@"

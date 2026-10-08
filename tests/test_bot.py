@@ -59,7 +59,7 @@ os.environ.update(AWG2_BIN=API, AWG_BOT_STATE=STATE, AWG_ADMINS_FILE=os.path.joi
                   AWG_CERT_KEY=os.path.join(ROOT, "etc/awg2/cert/key.pem"))
 sys.path.insert(0, os.path.join(HERE, "..", "awg_bot"))
 
-from awgbot import admins, bot as botmod, jobs, store, ui, webapp  # noqa: E402
+from awgbot import admins, api as botapi, bot as botmod, jobs, store, ui, webapp  # noqa: E402
 
 USER_NAMED = ("cl:v:", "tc:t:", "ex:pick:", "xr:delok:", "wo:v:", "adm:rm:", "diag:sn:", "mod:tag:")
 
@@ -271,10 +271,12 @@ async def run():
     chk("сводка сервера", "AWG Toolza" in text and "AWG 2.0" in text and "2 клиента · 0 онлайн" in text, text)
     chk("шапка блоками", text.count("<blockquote>") >= 3 and "<b>vm" not in text.split("<blockquote>")[0], text)
     datas = [d for _, d in buttons]
-    chk("девять пунктов меню в порядке awg2",
-        datas[:9] == ["srv", "cl", "diag", "bk", "tun", "botm", "del", "upd", "wo"], buttons)
+    chk("пункты меню в порядке awg2, веб-панель — как «w»",
+        datas[:10] == ["srv", "cl", "diag", "bk", "tun", "botm", "del", "upd", "wo", "web"], buttons)
     rows = keyboard(SESSION.sent)
-    chk("главное меню — два столбца", [len(r) for r in rows] == [2, 2, 2, 2, 2, 1], [[b.text for b in r] for r in rows])
+    chk("главное меню — два столбца, «Обновить» и «Поддержать» во всю ширину",
+        [len(r) for r in rows] == [2, 2, 2, 2, 2, 1, 1] and rows[-2][0].callback_data == "main",
+        [[b.text for b in r] for r in rows])
     chk("в самом низу — «Поддержать 💚» во всю ширину, ссылкой",
         rows[-1][0].text == "Поддержать 💚" and rows[-1][0].url == "https://t.me/awgToolza/156/157"
         and rows[-1][0].callback_data is None, rows[-1])
@@ -413,9 +415,29 @@ async def run():
     print("Сервер и туннели")
     text, buttons = screen(await press("srv"))
     chk("экран сервера", "AWG 2.0" in text and "srv:proto" in [d for _, d in buttons], text)
+    real_data_ = botapi.data
+
+    async def no_components(*args, **kw):
+        if args[:2] == ("server", "info"):
+            return {"installed": False, "exists": False}
+        return await real_data_(*args, **kw)
+    botapi.data = no_components
+    text, buttons = screen(await press("srv:create"))
+    botapi.data = real_data_
+    chk("чистый сервер: «Создать сервер» сначала ставит компоненты, мастер не начинается",
+        "Сначала нужны компоненты" in text and ("📦 Установить", "srv:installok") in buttons
+        and not any(d.startswith("srv:w:") for _, d in buttons), [text, buttons])
     text, buttons = screen(await press("srv:create"))
     chk("мастер создания начинается с региона", "srv:w:region=ru" in [d for _, d in buttons], buttons)
-    for step in ("region=ru", "profile=lite", "mimicry=none", "proto=2.0", "dns=0"):
+    for step in ("region=ru", "profile=lite"):
+        await press(f"srv:w:{step}")
+    text, buttons = screen(await press("srv:w:mimicry=none"))
+    chk("мастер: tools без 3.1 — так и сказано, кнопка «Модуль и tools», 3.1 не предлагается",
+        "amneziawg-tools не умеют 3.1" in text and ("⬆️ Модуль и tools", "srv:upd31") in buttons
+        and "srv:w:proto=3.1" not in [d for _, d in buttons], [text, buttons])
+    text, buttons = screen(await press("srv:wr"))
+    chk("возврат в мастер — тот же шаг с прежними ответами", "Версия протокола" in text, text)
+    for step in ("proto=2.0", "dns=0"):
         await press(f"srv:w:{step}")
     text, buttons = screen(await press("srv:w:mtu=1280"))
     chk("мастер: подсеть — случайная или вручную", "Подсеть" in text and "srv:w:net=ask" in [d for _, d in buttons],
@@ -892,7 +914,7 @@ async def run():
                "cl:lim:alice", "cl:tday:alice", "cl:tsrv", "ntf", "abk",
                "diag", "diag:status", "diag:dpi", "diag:logs", "diag:log:manager", "diag:sniff",
                "bk", "bk:list", "tun", "tc::warp", "warp", "warp:backend", "xr", "t2s", "ex", "cas", "dns",
-               "botm", "botm:proxy", "adm", "del", "del:all", "upd", "wo", "wo:install"]
+               "botm", "botm:proxy", "adm", "del", "del:all", "upd", "wo", "wo:install", "web"]
     broken = []
     for data in screens:
         sent = await press(data)
@@ -1273,6 +1295,56 @@ async def run():
     await press("look:off")
     chk("выключение иконок", not icons_mod.active() and icons_mod.mapping(), icons_mod.mapping())
     PREMIUM["mode"] = "strip"
+
+    print("Веб-панель")
+    text, buttons = screen(await press("web"))
+    chk("веб-панель не установлена — «Установить», логин admin и пароль от бота",
+        "Не установлена" in text and ("📦 Установить", "web:inst") in buttons, [text, buttons])
+    admin = User(id=333, is_bot=False, first_name="Admin")
+    admins.add(333, 111)
+    denied = [alerts(await press(d, admin)) for d in ("web", "web:pwok", "web:inst", "web:rmok")]
+    chk("приглашённому админу веб-панель закрыта — каждая кнопка",
+        all(len(a) == 1 and "только владелец" in a[0] for a in denied), denied)
+    admins.remove(333, removed_by=111)
+    real_call_ = botapi.call
+    WEBST = {"installed": False}
+    URL = "https://203.0.113.10:41234/AbCdEfGh123456/"
+    PW = "Qw3rTy7uI9oPaS2dF4"
+    web_calls = []
+
+    async def web_call(*args, **kw):
+        if args[:1] != ("web",):
+            return await real_call_(*args, **kw)
+        web_calls.append(args[1])
+        if args[1] == "status":
+            return botapi.Result(True, data=dict(WEBST))
+        if args[1] in ("install", "password"):
+            WEBST.update(installed=True, active=True, url=URL, user="admin")
+            return botapi.Result(True, data={"url": URL, "user": "admin", "password": PW})
+        if args[1] == "stop":
+            WEBST["active"] = False
+        return botapi.Result(True)
+    botapi.call = web_call
+    text, buttons = screen(await press("web:inst"))
+    chk("установка из бота: адрес, логин и пароль под спойлером — один раз",
+        URL in text and f"<tg-spoiler><code>{PW}</code></tg-spoiler>" in text and buttons == [("✅ Сохранил", "web")],
+        [text, buttons])
+    pw_msg = SESSION.screen_id()
+    text, buttons = screen(await press("web"))
+    chk("«Сохранил» — тот же экран без пароля: адрес, логин, кнопка «Открыть»",
+        SESSION.screen_id() == pw_msg and PW not in SESSION.text.get(pw_msg, "") and URL in text
+        and ("🌐 Открыть", URL) in buttons and ("🔑 Новый пароль", "web:pw") in buttons
+        and ("📜 Журнал входов", "diag:log:web") in buttons, [text, buttons])
+    text, buttons = screen(await press("web:pw"))
+    chk("новый пароль — с подтверждением", "Прежний перестанет подходить" in text
+        and ("🔑 Новый пароль", "web:pwok") in buttons and web_calls[-1] == "status", [text, buttons])
+    text, _ = screen(await press("web:pwok"))
+    chk("новый пароль выдан", PW in text and web_calls[-1] == "password", [text, web_calls])
+    text, buttons = screen(await press("web:stop"))
+    chk("остановка: статус и кнопка «Запустить», ссылки «Открыть» нет",
+        "Остановлена" in text and ("▶️ Запустить", "web:start") in buttons
+        and not any(d == URL for _, d in buttons), [text, buttons])
+    botapi.call = real_call_
 
     print("Ширина экрана")
     short = ui.fit("<b>🛡 alice</b>", ui.kb(("📦 Комплект", "a"), ("🗑 Удалить", "b")))

@@ -2014,6 +2014,16 @@ route(/^\/server\/create$/, async (ctx) => {
     return ctx.put(h("div", { class: "empty" }, "Сервер уже создан"),
       h("button", { class: "btn-block", onclick: () => replace("/server") }, "🖥 К серверу"));
   }
+  // Без компонентов форма упёрлась бы в «не установлены» — сначала они; «Назад» после задачи вернёт сюда же
+  if (!info.installed) {
+    return ctx.put(title("Создание сервера"),
+      h("div", { class: "card" }, "Сначала нужны компоненты: пакеты, заголовки ядра, модуль AmneziaWG и amneziawg-tools — "
+        + "сборка из исходников, обычно 5-15 минут. Когда закончится — вернёшься к созданию сервера."),
+      btn("📦 Установить компоненты", () => runJob(ctx, "Установка компонентов", ["server", "install"]), "btn-block btn-primary"));
+  }
+  const why31 = { tools: "▲ amneziawg-tools не умеют 3.1 — обнови модуль и tools (5-10 минут), затем вернёшься сюда",
+    module: "▲ Модуль ядра собран без 3.1 — обнови модуль и tools (5-10 минут), затем вернёшься сюда" }[info.proto31_why]
+    || "▲ 3.1 не прошла проверку на сервере" + (info.reboot ? ": " + info.reboot : " — Сервер → Модуль ядра");
   const mims = profiles || [];
   const f = { region: "world", profile: "lite", lite: "none", level: "3", proto: info.proto31 ? "3.1" : "2.0" };
   const box = h("div");
@@ -2050,7 +2060,9 @@ route(/^\/server\/create$/, async (ctx) => {
       h("label", {}, "Версия протокола — на весь сервер"),
       chips("proto", info.proto31 ? [["3.1", "AWG 3.1"], ["2.0", "AWG 2.0"]] : [["2.0", "AWG 2.0"]]),
       hint(info.proto31 ? "3.1 — быстрее, заголовки под шифром; клиентам нужен AmneziaVPN 5.0.1.5+ или AmneziaWG с 3.1. "
-        + "2.0 — подключится любой клиент AmneziaWG" : "▲ Модуль и tools не умеют 3.1 — обнови их: Сервер → Модуль ядра"),
+        + "2.0 — подключится любой клиент AmneziaWG" : why31),
+      !info.proto31 && ["tools", "module"].includes(info.proto31_why)
+        ? btn("⬆️ Обновить модуль и tools", () => runJob(ctx, "Обновление модуля и tools", ["module", "all"]), "btn-block") : null,
       h("label", {}, "DNS для клиентов"), dnsSel, dnsSel.value === "manual" ? dnsIn : null,
       h("label", {}, `MTU — рекомендуется ${rec}`), mtu,
       h("label", {}, "Подсеть клиентов"), net,

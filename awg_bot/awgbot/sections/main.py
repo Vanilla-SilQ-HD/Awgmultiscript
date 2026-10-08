@@ -87,8 +87,8 @@ def status_text(d: dict) -> str:
 
 
 def menu_kb(d: dict) -> ui.InlineKeyboardMarkup:
-    """Девять разделов awg2 в два столбца, в том же порядке; в самом низу —
-    «Поддержать» во всю ширину."""
+    """Разделы awg2 в два столбца, в том же порядке (и веб-панель — «w» в
+    меню awg2); ниже — «Обновить» и «Поддержать» во всю ширину."""
     return ui.kb(
         ("🖥 Сервер", "srv"),
         ("👥 Клиенты", "cl"),
@@ -99,7 +99,8 @@ def menu_kb(d: dict) -> ui.InlineKeyboardMarkup:
         ("🗑 Удаление", "del"),
         (f"⬆️ Есть {d['update']}" if d.get("update") else "⬆️ Обновление", "upd", "primary"),
         ("🛡 Обфускатор", "wo"),
-        ("🔄 Обновить", "main"),
+        ("💻 Веб-панель", "web"),
+        ui.Row(("🔄 Обновить", "main")),
         ui.Row(("Поддержать 💚", SUPPORT_URL)),
     )
 

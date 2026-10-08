@@ -126,6 +126,8 @@ _api_server() {
       {
         _kv installed:b "$(_b command -v awg)"; _kv exists:b "$(_b server_exists)"
         _kv proto31:b "$([[ $rc == 0 ]] && echo 1 || echo 0)"
+        # Почему нет 3.1: components | tools | module | check (не прошла проба)
+        _kv proto31_why "$([[ $rc == 0 ]] || proto_why 3.1)"
         _kv reboot "$(reboot_reason)"
         if server_exists; then
           _kv up:b "$(_b iface_up)"; _kv proto "$(server_proto)"
@@ -211,6 +213,7 @@ _api_module() {
       [[ -z "$tag" || "$tag" =~ ^v?[0-9][0-9A-Za-z._-]*$ ]] || { err "Тег вида v3.1.20260906"; return 1; }
       mod_update_flow "$tag" "$force" ;;
     tools) tools_update_flow "${1:-}" ;;
+    all) components_update_flow ;;
     reload) mod_reload ;;
     rebuild) mod_rebuild_all ;;
     backups)
@@ -219,7 +222,7 @@ _api_module() {
     rollback)
       [[ -n "${1:-}" ]] || { _api_usage "module rollback ФАЙЛ"; return; }
       mod_rollback "$1" ;;
-    *) _api_usage "module report|check|tags|update [ТЕГ] [force]|tools [force]|reload|rebuild|backups|rollback ФАЙЛ" ;;
+    *) _api_usage "module report|check|tags|update [ТЕГ] [force]|tools [force]|all|reload|rebuild|backups|rollback ФАЙЛ" ;;
   esac
 }
 
@@ -779,6 +782,38 @@ _api_cert() {
   esac
 }
 
+# ── Веб-панель ────────────────────────────────────────────
+# Пароль в ответе — только новый, сгенерированный здесь (install, password):
+# на сервере лежит лишь его хеш, прежний показать нельзя.
+_api_web_access() {
+  { _kv url "$(web_url)"; _kv user "$(web_conf_get WEB_USER)"; _kv password "${WEB_PASS_SHOWN:-}"; } | api_obj
+}
+
+_api_web() {
+  local a="${1:-status}"
+  shift || true
+  case "$a" in
+    status)
+      { _kv installed:b "$(_b web_installed)"; _kv active:b "$(_b web_active)"
+        if web_installed; then
+          _kv url "$(web_url)"; _kv user "$(web_conf_get WEB_USER)"; _kv port:n "$(web_conf_get WEB_PORT)"
+        fi
+        _kv cert:b "$(_b cert_installed)"; _kv cert_name "$(cert_get name)"; _kv cert_expires:n "$(cert_expires)"
+      } | api_obj ;;
+    install)
+      web_installed && { err "Веб-панель уже установлена — новый пароль: web password"; return 1; }
+      web_install_auto && _api_web_access ;;
+    password) web_password_new && _api_web_access ;;
+    path) web_path_new && _api_web_access ;;
+    restart|start)
+      web_installed || { err "Веб-панель не установлена"; return 1; }
+      web_restart ;;
+    stop) web_stop ;;
+    remove) web_installed || { err "Веб-панель не установлена"; return 1; }; web_remove quiet ;;
+    *) _api_usage "web status|install|password|path|restart|start|stop|remove" ;;
+  esac
+}
+
 _api_uninstall() {
   local o
   for o in "$@"; do [[ "$o" =~ ^(bot|wgobf|web|self)$ ]] || { _api_usage "uninstall [bot] [wgobf] [web] [self]"; return; }; done
@@ -798,8 +833,8 @@ _api_log() {
     xray) unit="$XRAY_UNIT" ;;           xray-routing) unit="$XRAY_ROUTING_UNIT" ;;
     tun2socks) unit="$T2S_UNIT" ;;       exits) unit="$EXITS_UNIT" ;;
     dns) unit="$DNS_UNIT" ;;             wgobf) unit="$WGOBF_UNIT" ;;
-    bot) unit="$BOT_UNIT" ;;
-    *) _api_usage "log manager|install|module|expire|cascade|warp-health|dns-health|usque|awg|warp|xray|xray-routing|tun2socks|exits|dns|wgobf|bot [строк]"; return ;;
+    bot) unit="$BOT_UNIT" ;;             web) file="$WEB_LOG" ;;
+    *) _api_usage "log manager|install|module|expire|cascade|warp-health|dns-health|usque|awg|warp|xray|xray-routing|tun2socks|exits|dns|wgobf|bot|web [строк]"; return ;;
   esac
   if [[ -n "$file" ]]; then
     [[ -f "$file" ]] || { info "Журнала $file нет"; return 0; }
@@ -929,12 +964,13 @@ api_dispatch() {
     update) _api_update "$@" ;;
     bot) _api_bot "$@" ;;
     cert) _api_cert "$@" ;;
+    web) _api_web "$@" ;;
     uninstall) _api_uninstall "$@" ;;
     log) _api_log "$@" ;;
     job) _api_job "$@" ;;
     help)
       echo "Разделы: status server module clients client mimicry traffic diag backup tunnels warp xray t2s"
-      echo "         exits cascade dns wgobf update bot uninstall log job version"
+      echo "         exits cascade dns wgobf update bot cert web uninstall log job version"
       echo "Подсказка по разделу: awg2 api РАЗДЕЛ" ;;
     *) err "Неизвестная команда: $cmd — awg2 api help"; return 2 ;;
   esac
