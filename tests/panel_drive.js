@@ -80,6 +80,7 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     const errs = [];
     p3.on("pageerror", (e) => errs.push(String(e)));
     await p3.addInitScript(() => {
+      window.AWG_FORCE_NOGAP = true;                // и обход gap у flex — как без его поддержки
       delete Array.prototype.flat; delete Object.fromEntries; delete String.prototype.trimStart; delete Blob.prototype.text;
       [Element, Document, DocumentFragment].forEach((C) => { delete C.prototype.replaceChildren; });
       const M = CanvasRenderingContext2D.prototype.measureText;
@@ -96,6 +97,7 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await p3.waitForSelector(".top .lockup text");
     if (await p3.locator(".boot-fail").count()) throw new Error(await p3.textContent(".boot-fail"));
     if (!await p3.locator("#tabbar a svg").count()) throw new Error("иконки нижней панели не нарисованы");
+    if (!await p3.locator("[data-gapm]").count()) throw new Error("обход gap у flex не сработал");
     for (const [hash, sel] of [["#/clients", "#app .search input"], ["#/server", "#app h1"], ["#/tunnels", "#app h1"]]) {
       await p3.evaluate((x) => { location.hash = x; }, hash);
       await p3.waitForSelector(sel);

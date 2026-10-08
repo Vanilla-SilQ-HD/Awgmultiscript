@@ -23,6 +23,42 @@ if (!Array.prototype.flat) {
 if (!Object.fromEntries) Object.fromEntries = (pairs) => { const o = {}; for (const [k, v] of pairs) o[k] = v; return o; };
 if (!String.prototype.trimStart) String.prototype.trimStart = function trimStart() { return this.replace(/^\s+/, ""); };
 if (window.Blob && !Blob.prototype.text) Blob.prototype.text = function text() { return new Response(this).text(); };
+// gap у flex там тоже не работает (у grid — работает): иконки слипались с
+// подписями. Зазоры flex-контейнеров — отступами у их детей.
+const FLEX_GAP = (() => {
+  const d = document.createElement("div");
+  d.style.cssText = "display:flex;flex-direction:column;row-gap:1px;position:absolute;visibility:hidden";
+  d.append(document.createElement("div"), document.createElement("div"));
+  document.body.append(d);
+  const ok = d.scrollHeight === 1;
+  d.remove();
+  return ok && !window.AWG_FORCE_NOGAP;
+})();
+function gapFix(el) {
+  if (!el || el.nodeType !== 1) return;
+  const cs = getComputedStyle(el);
+  if (!/flex/.test(cs.display)) return;
+  const cg = parseFloat(cs.columnGap || cs.gridColumnGap) || 0, rg = parseFloat(cs.rowGap || cs.gridRowGap) || 0;
+  if (!cg && !rg) return;
+  // Ряд с переносом — отступ справа у всех, кроме последнего: слева он сдвигал
+  // перенесённый на новую строку элемент от края
+  const col = /column/.test(cs.flexDirection), wrap = !col && cs.flexWrap !== "nowrap";
+  const side = col ? "marginTop" : wrap ? "marginRight" : "marginLeft", g = col ? rg : cg;
+  const kids = [...el.children].filter((k) => { const ks = getComputedStyle(k);
+    return ks.display !== "none" && ks.position !== "absolute" && ks.position !== "fixed"; });
+  kids.forEach((k, i) => {
+    const ks = getComputedStyle(k), want = g && (wrap ? i < kids.length - 1 : i > 0);
+    // Свой отступ (margin-left: auto и т. п.) не трогаем — только нулевой или поставленный здесь
+    if (want && (k.dataset.gapm === side || ks[side] === "0px")) { k.style[side] = g + "px"; k.dataset.gapm = side; }
+    else if (!want && k.dataset.gapm) { k.style[k.dataset.gapm] = ""; delete k.dataset.gapm; }
+    if (wrap && rg && (k.dataset.gapb || ks.marginBottom === "0px")) { k.style.marginBottom = rg + "px"; k.dataset.gapb = "1"; }
+  });
+}
+if (!FLEX_GAP) {
+  const run = (n) => { if (n.nodeType !== 1) return; gapFix(n); n.querySelectorAll("*").forEach(gapFix); };
+  new MutationObserver((ms) => ms.forEach((m) => { gapFix(m.target); m.addedNodes.forEach(run); }))
+    .observe(document.body, { childList: true, subtree: true });
+}
 
 const WEB = window.AWG_WEB || null;
 const tg = !WEB && window.Telegram && window.Telegram.WebApp;
