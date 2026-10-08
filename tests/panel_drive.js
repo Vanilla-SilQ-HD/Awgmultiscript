@@ -161,6 +161,13 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     const n = await page.locator("[data-name]").count();
     if (n !== 1) throw new Error("ожидался 1 клиент по заметке, найдено " + n);
     await page.fill("input[type=search]", "");
+    // Список перерисовывается на каждую букву — поле поиска не должно терять фокус (на телефоне закрылась бы клавиатура)
+    await page.click("input[type=search]");
+    await page.keyboard.type("al");
+    const focused = await page.evaluate(() => document.activeElement && document.activeElement.type === "search");
+    const val = await page.inputValue("input[type=search]");
+    if (!focused || val !== "al") throw new Error(`фокус потерян при вводе: focused=${focused} value=${val}`);
+    await page.fill("input[type=search]", "");
   });
   await step("вид списком", async () => {
     await page.click(".seg button >> nth=1");

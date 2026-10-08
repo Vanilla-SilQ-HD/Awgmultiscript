@@ -51,7 +51,8 @@ CACHED = {("status",), ("version",), ("server", "info"), ("tunnels", "status"), 
           ("clients", "list"), ("bot", "status"), ("cert", "status"), ("update", "status"), ("mimicry",),
           ("traffic", "daily"), ("backup", "list")}
 _cache: dict[tuple[str, ...], tuple[float, "Result"]] = {}
-_inflight: dict[tuple[str, ...], "asyncio.Future[Result]"] = {}
+_inflight: dict[tuple[str, ...], "asyncio.Task[Result]"] = {}
+_gen = 0                            # растёт на каждой записи: чтение, начатое до неё, в кэш не ложится
 
 
 # Чтения, которые не кэшируются, но и кэш не сбрасывают
@@ -59,7 +60,8 @@ READS = {("job", "status"), ("job", "list"), ("log",), ("module", "report"), ("m
          ("module", "check"), ("update", "check"), ("update", "changelog"), ("cert", "find"),
          ("diag", "status"), ("diag", "sniff-list"), ("tunnels", "clients"), ("wgobf", "clients"),
          ("xray", "diag"), ("cascade", "list"), ("module", "backups"), ("backup", "inspect"),
-         ("bot", "proxy", "get"), ("bot", "webapp", "get"), ("server", "params")}
+         ("bot", "proxy", "get"), ("bot", "webapp", "get"), ("server", "params"),
+         ("traffic", "now")}         # обзор панели спрашивает раз в 3 с — не запись, кэш не сбрасывает
 
 
 def _cacheable(key: tuple[str, ...]) -> bool:
@@ -71,7 +73,30 @@ def _writes(key: tuple[str, ...]) -> bool:
 
 
 def invalidate() -> None:
+    global _gen
+    _gen += 1
     _cache.clear()
+    # Чтения, начатые до записи, дождутся только те, кто их уже ждёт;
+    # новые запросы идут заново и видят записанное
+    _inflight.clear()
+
+
+async def _cached_run(key: tuple[str, ...], args: tuple[Any, ...], timeout: float, gen: int) -> "Result":
+    r = await _run(*args, timeout=timeout)
+    if r.ok and gen == _gen:
+        now = asyncio.get_running_loop().time()
+        # Ключи с аргументами (traffic daily ИМЯ ДНЕЙ…) копились бы без конца
+        for k in [k for k, (t, _) in _cache.items() if now - t >= CACHE_TTL]:
+            del _cache[k]
+        _cache[key] = (now, r)
+    return r
+
+
+def _inflight_done(key: tuple[str, ...], task: "asyncio.Task[Result]") -> None:
+    if _inflight.get(key) is task:
+        del _inflight[key]
+    if not task.cancelled():
+        task.exception()            # прочитано: без «Task exception was never retrieved»
 
 
 async def call(*args: Any, stdin: str | bytes | None = None,
@@ -90,21 +115,15 @@ async def call(*args: Any, stdin: str | bytes | None = None,
     loop = asyncio.get_running_loop()
     if hit and loop.time() - hit[0] < CACHE_TTL:
         return hit[1]
-    if key in _inflight:
-        return await asyncio.shield(_inflight[key])
-    fut: asyncio.Future[Result] = loop.create_future()
-    _inflight[key] = fut
-    try:
-        r = await _run(*args, timeout=timeout)
-        if r.ok:
-            _cache[key] = (loop.time(), r)
-        fut.set_result(r)
-        return r
-    except BaseException as e:
-        fut.set_exception(e) if not fut.done() else None
-        raise
-    finally:
-        _inflight.pop(key, None)
+    # Общий вызов — отдельная задача: отмена одного из ждущих (закрыли экран,
+    # тайм-аут обработчика) не отменяет его остальным — раньше CancelledError
+    # доставался всем, вплоть до цикла уведомлений
+    task = _inflight.get(key)
+    if task is None:
+        task = asyncio.ensure_future(_cached_run(key, args, timeout, _gen))
+        _inflight[key] = task
+        task.add_done_callback(lambda t, k=key: _inflight_done(k, t))
+    return await asyncio.shield(task)
 
 
 async def _run(*args: Any, stdin: str | bytes | None = None,

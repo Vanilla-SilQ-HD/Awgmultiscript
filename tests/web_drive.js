@@ -86,6 +86,24 @@ const say = (ok, label) => console.log(`${ok ? "OK" : "FAIL"} ${label}`);
       if (name !== "ПК" && await page.locator(".ctable").count()) throw new Error("таблица на телефоне");
       await page.screenshot({ path: `${out}/${name}-клиенты.png` });
       if (name === "ПК") {
+        // Заблокирован лимитом трафика, срок впереди — в таблице срок, а не «истёк»; блокировка по сроку — «истёк»
+        const exp = await page.evaluate(() => {
+          const rows = S.clients.rows, keep = rows.map((c) => [c.blocked, c.blocked_by, c.expires]);
+          rows[0].blocked = true; rows[0].blocked_by = "traffic"; rows[0].expires = Math.floor(Date.now() / 1000) + 20 * 86400;
+          const nm = rows[0].name, tx = () => document.querySelector(`tr[data-name="${nm}"] td:nth-child(5)`).textContent;
+          S.listRedraw(); const a = tx();
+          rows[0].blocked_by = "expire"; S.listRedraw(); const b = tx();
+          // Срок прошёл, таймер ещё не заблокировал — как раньше, «истёк» янтарным
+          rows[0].blocked = false; rows[0].blocked_by = null; rows[0].expires = Math.floor(Date.now() / 1000) - 60;
+          S.listRedraw();
+          const td = document.querySelector(`tr[data-name="${nm}"] td:nth-child(5)`);
+          const c3 = td.textContent + "|" + (td.getAttribute("style") || "");
+          rows.forEach((c, i) => { [c.blocked, c.blocked_by, c.expires] = keep[i]; }); S.listRedraw();
+          return [a, b, c3];
+        });
+        if (/истёк/.test(exp[0]) || !exp[0].trim()) throw new Error("клиент с лимитом трафика и будущим сроком: «" + exp[0] + "»");
+        if (!/истёк/.test(exp[1])) throw new Error("заблокированный по сроку должен быть «истёк»: «" + exp[1] + "»");
+        if (!/истёк/.test(exp[2]) || !/amber/.test(exp[2])) throw new Error("истёкший, ещё не заблокированный — «истёк» янтарным: «" + exp[2] + "»");
         await page.click("tr[data-name=alice]");
         await page.waitForSelector(".drawer.on .cgrid .a-traf");
         await page.waitForSelector("tr.cur[data-name=alice]");          // список — за панелью, строка подсвечена

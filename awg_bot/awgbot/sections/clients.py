@@ -117,6 +117,7 @@ async def list_screen(target: ui.Target, page: int = 0) -> None:
     rows: list[dict] = sort_rows(good, mode)
     online = sum(1 for c in rows if c.get("online"))
     blocked = sum(1 for c in rows if c.get("blocked"))
+    expired = sum(1 for c in rows if expired_block(c))
     pages = max(1, (len(rows) + PAGE - 1) // PAGE)
     page = min(max(page, 0), pages - 1)
     text = (f"<b>👥 Клиенты: {len(rows)}</b> · 🟢 {online} онлайн"
@@ -148,7 +149,7 @@ async def list_screen(target: ui.Target, page: int = 0) -> None:
         ("📊 Трафик", act.data("activity")) if rows else None,
         ("📦 Экспорт zip", act.data("export")) if rows else None,
         ("🗑 Удалить…", act.data("dsel")) if rows else None,
-        ("🧹 Истёкшие", act.data("purge")) if blocked else None,
+        ("🧹 Истёкшие", act.data("purge")) if expired else None,
         ui.back()))
 
 
@@ -189,6 +190,12 @@ async def _export(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
                                          caption="📦 Все конфиги клиентов")
 
 
+def expired_block(c: dict) -> bool:
+    """Заблокирован сроком: такие и удаляет «Истёкшие». Заблокированные за
+    трафик остаются — они разблокируются сами в новом месяце."""
+    return bool(c.get("blocked")) and c.get("blocked_by") != "traffic"
+
+
 @act("purge")
 async def _purge(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ui.confirm(cb, "Удалить всех клиентов с истёкшим сроком? Их конфиги перестанут существовать.",
@@ -197,12 +204,12 @@ async def _purge(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 @act("purgeok")
 async def _purge_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    gone = [c["name"] for c in await clients() or [] if c.get("blocked")]
+    gone = [c["name"] for c in await clients() or [] if expired_block(c)]
     r = await api.call("clients", "purge-blocked")
     if r.ok:
         for n in gone:
             store.drop_note(n)
-    await ui.result(cb, r, "Удаление заблокированных", "cl")
+    await ui.result(cb, r, "Удаление клиентов с истёкшим сроком", "cl")
 
 
 # ── Карточка ──────────────────────────────────────────────
@@ -536,7 +543,9 @@ async def _lim(cb: CallbackQuery, state: FSMContext, name: str) -> None:
     if c is None:
         await card(cb, name)
         return
-    period = (await state.get_data()).get("lim_period") or c.get("period") or "month"
+    # Выбранный период помнится для этого клиента: другому он не достаётся
+    chosen, _, p = ((await state.get_data()).get("lim_period") or "").rpartition("|")
+    period = p if chosen == name and p in PERIOD else c.get("period") or "month"
     other = "total" if period == "month" else "month"
     await ui.render(cb, f"<b>📶 Лимит трафика: {esc(name)}</b>\n"
                         f"Сейчас: {limit_text(c) or 'без лимита'}\n"
@@ -556,7 +565,7 @@ async def _lim(cb: CallbackQuery, state: FSMContext, name: str) -> None:
 @act("lp")
 async def _lim_period(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     name, _, period = arg.partition("|")
-    await state.update_data(lim_period=period if period in PERIOD else "month")
+    await state.update_data(lim_period=f"{name}|{period if period in PERIOD else 'month'}")
     await _lim(cb, state, name)
 
 

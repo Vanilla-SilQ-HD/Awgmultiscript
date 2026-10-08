@@ -161,13 +161,21 @@ xray_del_outbound() {
   xray_del_tag "$CHOSEN"
 }
 
+# Клиенты удалённых выходов — на выход по умолчанию; печатает, сколько их.
+_xray_peers_untag() {  # тег...
+  local f="$XRAY_PEERS"
+  [[ -f "$f" ]] || { echo 0; return 0; }
+  awk -F'|' 'NR == FNR {d[$0] = 1; next} NF > 1 && ($2 in d) {c++} END {print c + 0}' \
+    <(printf '%s\n' "$@") "$f"
+  awk -F'|' 'NR == FNR {d[$0] = 1; next} NF > 1 && ($2 in d) {print $1; next} {print}' \
+    <(printf '%s\n' "$@") "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
+}
+
 xray_del_tag() {  # тег
   local n
   xray_tags | grep -qxF "$1" || { err "Выхода $1 нет"; return 1; }
   py xray-del "$XRAY_CONF" "$1"
-  # Клиенты удалённого выхода — на выход по умолчанию
-  n=$(grep -c "|$1\$" "$XRAY_PEERS" 2>/dev/null || true)
-  [[ -f "$XRAY_PEERS" ]] && sed -i "s/|$(sed 's/[.[\*^$/]/\\&/g' <<< "$1")\$//" "$XRAY_PEERS"
+  n=$(_xray_peers_untag "$1")
   _xray_prepare
   ok "Выход $1 удалён"
   (( ${n:-0} )) && info "Его клиенты ($n) — теперь на выходе по умолчанию"
@@ -571,7 +579,10 @@ xray_bad_outbounds() {
 xray_fix() {
   local bad=()
   mapfile -t bad < <(xray_bad_outbounds)
-  (( ${#bad[@]} )) && py xray-del "$XRAY_CONF" "${bad[@]}"
+  if (( ${#bad[@]} )); then
+    py xray-del "$XRAY_CONF" "${bad[@]}"
+    _xray_peers_untag "${bad[@]}" >/dev/null
+  fi
   _xray_prepare
   if xray_test >/dev/null; then ok "Конфиг принят Xray${bad[*]:+, убраны: ${bad[*]}}"
   else err "Конфиг всё ещё отвергается"; return 1; fi

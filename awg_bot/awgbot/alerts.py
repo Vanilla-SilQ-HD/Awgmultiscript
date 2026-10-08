@@ -98,10 +98,15 @@ def set_backup(mode: str | None = None, keep: int | None = None) -> None:
 
 
 def backup_info() -> dict[str, Any]:
+    """last — когда бэкап последний раз удался; next — следующая попытка
+    (после неудачи — повтор через час)."""
     st = store.load(BACKUP_STATE)
     bk = config()["backup"]
     last = int(st.get("last") or 0)
-    nxt = last + BACKUP_PERIOD[bk["mode"]] if bk["mode"] in BACKUP_PERIOD and last else None
+    slot = int(st.get("slot") or last)
+    nxt = None
+    if bk["mode"] in BACKUP_PERIOD:
+        nxt = int(st.get("retry_at") or 0) or (slot + BACKUP_PERIOD[bk["mode"]] if slot else None)
     return {**bk, "last": last or None, "ok": bool(st.get("ok")), "error": str(st.get("error") or ""),
             "next": nxt}
 
@@ -132,10 +137,14 @@ async def _deliver(fn, uid: int) -> bool:                     # type: ignore[no-
     return False
 
 
-async def notify(bot: Bot, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
-    """Владельцам и приглашённым админам."""
+async def notify(bot: Bot, text: str, markup: InlineKeyboardMarkup | None = None,
+                 owner_markup: bool = False) -> None:
+    """Владельцам и приглашённым админам. owner_markup — кнопка ведёт в раздел
+    владельца: админу она ответила бы только «настраивает владелец»."""
+    owners = access.owners()
     for uid in sorted(access.all_ids()):
-        await _deliver(lambda u: bot.send_message(u, text, reply_markup=markup), uid)
+        kb = markup if not owner_markup or uid in owners else None
+        await _deliver(lambda u, kb=kb: bot.send_message(u, text, reply_markup=kb), uid)
 
 
 # ── Проверки ──────────────────────────────────────────────
@@ -202,7 +211,9 @@ async def tick(bot: Bot, st: dict[str, Any]) -> bool:
                               "Сервер → Проверить и починить.", ui.kb(("🛠 Починить", "srv:repair")))
             st["down_sent"] = True
     else:
-        if st.get("down_sent"):
+        # «Снова работает» — только если awg0 и правда поднят: сервер могли
+        # удалить (сброс) — это не восстановление
+        if st.get("down_sent") and s.get("exists") and s.get("up"):
             gone = ui.fmt_dur(now - int(st.get("down_since") or now))
             await notify(bot, f"🟢 <b>{host}: awg0 снова работает</b>\nПростой: около {gone}")
         for k in ("down", "down_since", "down_sent"):
@@ -245,47 +256,72 @@ async def tick(bot: Bot, st: dict[str, Any]) -> bool:
                 left = "истёк" if expires <= now else f"истекает через {ui.fmt_dur(expires - now)}"
                 await notify(bot, f"🔐 <b>Сертификат Mini App {left}</b>\n"
                                   "Автопродление не сработало: Telegram-бот → Mini App → Выпустить заново.",
-                             ui.kb(("📱 Mini App", "app")))
+                             ui.kb(("📱 Mini App", "app")), owner_markup=True)
             st["cert"] = expires
     return True
 
 
 # ── Автобэкап ─────────────────────────────────────────────
-async def backup_due(bot: Bot, force: bool = False) -> bool:
-    """Бэкап, если подошёл срок. True — бэкап сделан и разослан."""
+BACKUP_RETRY = 3600
+BACKUP_UPLOAD_TIMEOUT = 300         # файл до 50 МБ: стандартных 60 с на медленном канале мало
+
+
+async def _backup_failed(bot: Bot, st: dict[str, Any], now: int, error: str) -> str:
+    """Неудача: время последнего удачного бэкапа остаётся, повтор — через час."""
+    store.save(BACKUP_STATE, {**st, "ok": False, "error": error, "retry_at": now + BACKUP_RETRY})
+    log.warning("Автобэкап не удался: %s", error)
+    await notify(bot, f"⚠️ <b>Автобэкап не удался</b>\n{esc(error)}\nПовторю через час.")
+    return "fail"
+
+
+async def backup_due(bot: Bot, force: bool = False) -> str:
+    """Бэкап, если подошёл срок. "done" — сделан и дошёл до владельцев,
+    "busy" — идёт другая операция (попробую на следующей проверке),
+    "fail" — не удался (повтор через час), "" — срок не подошёл."""
     bk = config()["backup"]
     if bk["mode"] not in BACKUP_PERIOD and not force:
-        return False
+        return ""
+    period = BACKUP_PERIOD.get(bk["mode"], 86400)
     st = store.load(BACKUP_STATE)
     now = int(time.time())
-    if not force and now - int(st.get("last") or 0) < BACKUP_PERIOD[bk["mode"]] - 300:
-        return False
+    slot = int(st.get("slot") or st.get("last") or 0)
+    # Часы уходили вперёд: «будущий» слот не ждём. До 300 с вперёд — законно:
+    # бэкап делается на 300 с раньше слота, и следующий слот ложится чуть впереди
+    if slot > now + 300:
+        slot = 0
+    if not force:
+        retry = int(st.get("retry_at") or 0)
+        if retry > now + BACKUP_RETRY:      # то же для повтора
+            retry = 0
+        if (retry and now < retry) or (not retry and now - slot < period - 300):
+            return ""
     r = await api.call("backup", "create", "auto", bk["keep"], timeout=900)
-    if not r.ok and r.rc == 75:                             # идёт другая операция — на следующей проверке
-        return False
+    if not r.ok and r.rc == 75:
+        return "busy"
     path = (r.data or {}).get("path") if r.ok and isinstance(r.data, dict) else None
     if not path or not os.path.isfile(path):
-        # Повтор через час, а не на каждой проверке
-        period = BACKUP_PERIOD.get(bk["mode"], 86400)
-        store.save(BACKUP_STATE, {"last": now - period + 3600, "ok": False, "error": r.message if not r.ok else "нет файла"})
-        log.warning("Автобэкап не удался: %s", r.message)
-        await notify(bot, f"⚠️ <b>Автобэкап не удался</b>\n{esc(r.message if not r.ok else 'нет файла')}\n"
-                          "Повторю через час.")
-        return False
+        return await _backup_failed(bot, st, now, r.message if not r.ok else "нет файла")
     size = os.path.getsize(path)
     when = time.strftime("%d.%m.%Y %H:%M")
     caption = (f"💾 <b>Автобэкап</b> · {when} · {ui.fmt_bytes(size)}\n"
                "В нём приватные ключи — храни как пароль. Восстановление: Бэкапы → Из файла.")
+    sent = 0
     for uid in sorted(access.owners()):
         if size <= SEND_MAX:
-            await _deliver(lambda u: bot.send_document(u, FSInputFile(path), caption=caption), uid)
+            sent += await _deliver(lambda u: bot.send_document(u, FSInputFile(path), caption=caption,
+                                                               request_timeout=BACKUP_UPLOAD_TIMEOUT), uid)
         else:
-            await _deliver(lambda u: bot.send_message(
+            sent += await _deliver(lambda u: bot.send_message(
                 u, f"💾 Автобэкап {when}: {ui.fmt_bytes(size)} — больше 50 МБ, в чат не влезает.\n"
                    f"На сервере: <code>{esc(path)}</code>"), uid)
-    store.save(BACKUP_STATE, {"last": now, "ok": True, "error": "", "path": path})
+    if not sent:
+        return await _backup_failed(bot, st, now, "файл не дошёл ни до одного владельца")
+    # Расписание держится за слот, а не за момент проверки: иначе бэкап
+    # каждый раз сдвигался на время до ближайшей проверки
+    slot = slot + period if slot and not force and -300 <= now - slot - period < period else now
+    store.save(BACKUP_STATE, {"last": now, "slot": slot, "ok": True, "error": "", "path": path})
     log.info("Автобэкап: %s (%s)", path, ui.fmt_bytes(size))
-    return True
+    return "done"
 
 
 async def loop(bot: Bot) -> None:

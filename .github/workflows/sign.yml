@@ -6,6 +6,10 @@
 #
 # Подпись уже верна (стабильный канал получает её вместе с файлами беты) —
 # ничего не делается, и секрет там не нужен.
+#
+# Подписывается только awg2.sh, который совпадает со сборкой src/
+# (./build.sh): ревью читает src/, а 700 КБ сгенерированного файла — нет,
+# и код, которого в src/ нет, получил бы подпись незамеченным.
 name: Подпись awg2.sh
 
 on:
@@ -25,7 +29,7 @@ jobs:
   sign:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           ref: main
           fetch-depth: 1
@@ -41,7 +45,13 @@ jobs:
             | sed "s/^/$id namespaces=\"$ns\" /" > "$RUNNER_TEMP/allowed"
           [[ -s "$RUNNER_TEMP/allowed" ]] || { echo "::error::В src/lib/const.sh нет ключа релизов (UPDATE_SIGNERS)"; exit 1; }
           verify() { ssh-keygen -Y verify -f "$RUNNER_TEMP/allowed" -I "$id" -n "$ns" -s awg2.sh.sig < awg2.sh >/dev/null 2>&1; }
+          # awg2.sh — ровно сборка src/ (с той же буквой тестовой сборки)
+          built() {
+            AWG_BUILD="$(sed -n 's/^BUILD="\(.*\)"$/\1/p' awg2.sh | head -1)" ./build.sh "$RUNNER_TEMP/built.sh" >/dev/null \
+              && cmp -s "$RUNNER_TEMP/built.sh" awg2.sh
+          }
           for attempt in 1 2 3; do
+            built || { echo "::error::awg2.sh не совпадает со сборкой src/ (./build.sh) — не подписываю"; exit 1; }
             if [[ -f awg2.sh.sig ]] && verify; then
               echo "Подпись awg2.sh верна — делать нечего"
               exit 0

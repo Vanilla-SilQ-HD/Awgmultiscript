@@ -8,7 +8,11 @@ BOT_VENV_PY="$BOT_DIR/venv/bin/python"
 
 # Любой след бота, а не только маркер: после частичного удаления его
 # остатки тоже надо уметь добить.
-bot_installed() { [[ -f /usr/local/bin/awg-bot.py || -d "$BOT_DIR" || -f "/etc/systemd/system/$BOT_UNIT" ]]; }
+# Код в $BOT_DIR ставит и веб-панель (--web-only) — при ней это ещё не бот
+bot_installed() {
+  [[ -f /usr/local/bin/awg-bot.py || -f "/etc/systemd/system/$BOT_UNIT" ]] && return 0
+  [[ -d "$BOT_DIR" ]] && ! web_installed
+}
 
 bot_version() { _bot_src_version "$BOT_DIR"; }
 
@@ -328,6 +332,7 @@ bot_uninstall() {
   if web_installed; then
     arts=(); for p in "${BOT_ARTIFACTS[@]}"; do [[ "$p" == "$BOT_DIR" || "$p" == /var/lib/awg-bot ]] || arts+=("$p"); done
     info "Код бота остаётся — на нём работает веб-панель"
+    rm -f "$BOT_ADMINS"           # приглашённые админы — бота, а не панели
   fi
   for p in "${arts[@]}"; do rm -rf "$p"; done
   systemctl daemon-reload

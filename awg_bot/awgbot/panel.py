@@ -31,8 +31,9 @@ from .sections import wgobf
 ALLOWED = {"status", "version", "server", "module", "clients", "client", "mimicry", "diag", "backup",
            "tunnels", "warp", "xray", "t2s", "exits", "cascade", "dns", "wgobf", "update", "log", "bot",
            "cert", "uninstall", "traffic"}
+# backup create auto — ротация автобэкапов: «auto 1» стёр бы все, кроме одного
 OWNER_ONLY = (("uninstall",), ("bot", "uninstall"), ("bot", "webapp", "port"), ("cert", "issue"),
-              ("cert", "use"), ("cert", "remove"))
+              ("cert", "use"), ("cert", "remove"), ("backup", "create", "auto"))
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 MAX_ARGS, MAX_ARG = 32, 4000       # правка всех параметров 3.1 — 23 аргумента
 TIMEOUT_MAX = 900
@@ -259,8 +260,8 @@ def setup(app: web.Application, user_of: UserOf) -> None:
             if keep is not None and keep not in alerts.BACKUP_KEEP:
                 raise _bad("backup_keep: 3 | 7 | 14 | 30")
             alerts.set_backup(mode=mode, keep=keep)
-            if body.get("backup_now"):
-                await alerts.backup_due(_bot(request), force=True)
+            now = await alerts.backup_due(_bot(request), force=True) if body.get("backup_now") else ""
+            return web.json_response({"ok": True, "owner": True, "backup_now": now, **alerts.overview()})
         return web.json_response({"ok": True, "owner": _is_owner(user), **alerts.overview()})
 
     # ── Файлы — в чат с ботом ──
@@ -402,10 +403,12 @@ def setup(app: web.Application, user_of: UserOf) -> None:
     @route("/api/bot/invite")
     async def _invite(request: web.Request, user: dict, body: dict) -> web.Response:
         _owner(user)
+        # Сначала бот и его имя: в веб-панели бота нет (409), а Telegram может не
+        # ответить — приглашение, созданное до этого, осталось бы невидимым
+        me = await _bot(request).me()
         token, exp = admins.create_invite(int(user["id"]))
         if token is None:
             raise _bad(str(exp))
-        me = await _bot(request).me()
         return web.json_response({"ok": True, "expires": exp,
                                   "link": f"https://t.me/{me.username}?start={admins.INVITE_PREFIX}{token}"})
 

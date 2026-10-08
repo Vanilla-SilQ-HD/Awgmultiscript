@@ -50,13 +50,13 @@ async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
 
 # ── Автобэкап ─────────────────────────────────────────────
 @abk()
-async def _auto(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
+async def _auto(cb: CallbackQuery, state: FSMContext, arg: str = "", note: str = "") -> None:
     b = alerts.backup_info()
     mark = lambda ok: "🔘" if ok else "⚪️"                                  # noqa: E731
     await ui.render(cb, "<b>🕒 Автобэкап</b>\n\nПолный бэкап по расписанию — файлом сюда, в чат, и только "
                         "владельцам: в нём приватные ключи. На сервере остаются последние N автобэкапов, "
                         "сделанные вручную не трогаются.\n\n"
-                        f"Сейчас: {esc(auto_line(b))}",
+                        f"Сейчас: {esc(auto_line(b))}" + (f"\n\n{note}" if note else ""),
                     ui.kb(ui.Row(*[(f"{mark(b['mode'] == m)} {label}", abk.data("m", m))
                                    for m, label in (("off", "Выкл"), ("day", "День"), ("week", "Неделя"))]),
                           ui.Row(*[(f"{mark(b['keep'] == n)} {n}", abk.data("k", str(n))) for n in alerts.BACKUP_KEEP]),
@@ -78,11 +78,16 @@ async def _auto_keep(cb: CallbackQuery, state: FSMContext, n: str) -> None:
     await _auto(cb, state)
 
 
+BACKUP_NOW = {"done": "✅ Автобэкап сделан — файл в чате",
+              "busy": "⏳ Сейчас идёт другая операция — нажми ещё раз, когда она закончится",
+              "fail": "❌ Не удался — причина выше, повтор через час"}
+
+
 @abk("now")
 async def _auto_now(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await cb.answer("Делаю автобэкап…")
-    await alerts.backup_due(cb.bot, force=True)                     # type: ignore[arg-type]
-    await _auto(cb, state)
+    res = await alerts.backup_due(cb.bot, force=True)               # type: ignore[arg-type]
+    await _auto(cb, state, note=BACKUP_NOW.get(res, ""))
 
 
 async def _send_backup(bot: Bot, chat_id: int, st: dict) -> None:

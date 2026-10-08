@@ -136,8 +136,13 @@ try:
     chk("в конфиге — хеш scrypt, пароля нет", "WEB_PASS=scrypt$" in conf and PASSWORD not in conf, conf)
 
     print("Чужие сайты")
+    for _ in range(5):
+        c.api("api/nope", {}, headers={"Origin": "https://" + "a" * 8000})
     st, d = c.api("api/call", {"args": ["status"]}, headers={"Origin": "https://evil.example"})
     chk("запрос с чужого сайта (Origin) — 403", st == 403, d)
+    csrf = [ln for ln in open(os.path.join(ROOT, "..", "web", "awg-web.log")).read().splitlines() if " CSRF " in ln]
+    chk("запросы с чужих сайтов не раздувают журнал: одна строка за 10 с, Origin обрезан",
+        len(csrf) == 1 and "aaaa" in csrf[0] and len(csrf[0]) < 160, csrf)
     st, d = c.api("api/call", {"args": ["status"]}, headers={"Sec-Fetch-Site": "cross-site"})
     chk("без Origin, но cross-site — 403", st == 403, d)
     st, d = c.api("api/call", {"args": ["status"]}, headers={"Origin": f"https://127.0.0.1:{PORT}"})
@@ -192,10 +197,33 @@ try:
 
     print("Перебор")
     b = Client()
-    codes = [b.login(password=f"guess-{i}")[0] for i in range(5)]
+    # Разом и с медленным телом: заголовки — сразу, тела — потом все вместе.
+    # Раньше все такие запросы проходили проверку блокировки, пока сервер ждал
+    # тело, и до первого засчитанного неверного пароля
+    import socket
+
+    def slow_login(i):
+        sk = CTX.wrap_socket(socket.create_connection(("127.0.0.1", int(PORT)), timeout=60), server_hostname="127.0.0.1")
+        body = json.dumps({"user": USER, "password": f"guess-{i}"}).encode()
+        sk.sendall((f"POST {BASE}api/login HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\nContent-Type: application/json\r\n"
+                    f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode())
+        return sk, body
+
+    conns = [slow_login(i) for i in range(12)]
+    time.sleep(1)
+    for sk, body in conns:
+        sk.sendall(body)
+    codes = []
+    for sk, _ in conns:
+        data = b""
+        while chunk := sk.recv(65536):
+            data += chunk
+        sk.close()
+        codes.append(int(data.split(b" ", 2)[1]) if data.startswith(b"HTTP/") else 0)
+    codes.sort()
     st, d = b.login(password="Another-pass-77")
-    chk("5 неверных паролей — адрес заблокирован, даже верный пароль не пускает (429)",
-        codes == [401] * 5 and st == 429 and "мин" in d.get("error", ""), [codes, st, d])
+    chk("12 неверных паролей разом, тела после заголовков — проверено 5, остальные 429; адрес заблокирован, даже верный пароль не пускает",
+        codes == [401] * 5 + [429] * 7 and st == 429 and "мин" in d.get("error", ""), [codes, st, d])
     log = open(os.path.join(ROOT, "..", "web", "awg-web.log")).read()
     chk("в журнале — неверные пароли и блокировка с адресом", log.count(" FAIL 127.0.0.1") >= 5 and " LOCK 127.0.0.1" in log, log[-400:])
 

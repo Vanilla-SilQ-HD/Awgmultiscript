@@ -56,6 +56,8 @@ web_ask_password() {
       break
     fi
     (( ${#a} >= 10 )) || { warn "Нужно не меньше 10 символов"; continue; }
+    # Вход принимает до 256 символов — длиннее не войти никогда
+    (( ${#a} <= 256 )) || { warn "Не больше 256 символов"; continue; }
     _read_secret b "${C}  Ещё раз: ${N}"
     [[ "$a" == "$b" ]] && break
     warn "Пароли не совпали"
@@ -152,12 +154,13 @@ web_set_port() {
   old=$(web_conf_get WEB_PORT)
   read_line v "${C}  Порт (1024-65535, Enter — случайный): ${N}"
   [[ -n "$v" ]] || v=$(web_random_port) || return 1
-  [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1024 && v <= 65535 )) || { err "Порт: 1024-65535"; return 1; }
+  # 10#: «010000» — не восьмеричное 4096, а 10000 (так его прочтут Python и ufw)
+  [[ "$v" =~ ^[0-9]{1,9}$ ]] && v=$((10#$v)) && (( v >= 1024 && v <= 65535 )) || { err "Порт: 1024-65535"; return 1; }
   [[ "$v" == "$old" ]] && return 0
   web_port_busy "$v" && { err "Порт $v занят"; return 1; }
   [[ "$v" == "$(server_port 2>/dev/null)" || "$v" == "$(webapp_port)" ]] && { err "Порт $v занят AWG или Mini App"; return 1; }
   web_conf_set WEB_PORT "$v"
-  ufw_delete_matching awg-web
+  ufw_delete_comment awg-web
   ufw_allow "$v/tcp" awg-web
   web_restart && web_show_access
 }
@@ -169,7 +172,7 @@ web_remove() {
   remove_unit "$WEB_UNIT"
   systemctl daemon-reload
   rm -rf "$WEB_CONF" "$WEB_DIR" "$WEB_LOG"
-  ufw_delete_matching awg-web
+  ufw_delete_comment awg-web
   # Код и venv ставились только ради панели — бот их не использует
   if [[ ! -f "/etc/systemd/system/$BOT_UNIT" ]]; then rm -rf "$BOT_DIR" /var/lib/awg-bot; fi
   ok "Веб-панель удалена"

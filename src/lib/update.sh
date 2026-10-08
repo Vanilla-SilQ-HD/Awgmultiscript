@@ -165,9 +165,18 @@ update_fetch() {
 update_install() {
   local target="$SCRIPT_PATH"
   [[ -f "$target" ]] || target=$(readlink -f "$0")
-  if (( 10#$(ver_num "$UPDATE_NEW") < 10#$(ver_num "$VERSION") )) && [[ "${1:-}" != force ]]; then
-    err "В канале версия старше текущей ($UPDATE_NEW) — откат только явно"
-    return 1
+  if (( 10#$(ver_num "$UPDATE_NEW") < 10#$(ver_num "$VERSION") )); then
+    # Подпись не привязана к версии: зеркало может отдать старую, но верно
+    # подписанную сборку. Из бота и панели («Переустановить» = force) откат
+    # не ставится никогда — только из меню awg2, где он назван откатом.
+    if (( API_MODE )); then
+      err "В канале версия старше текущей ($UPDATE_NEW) — откат только из меню awg2"
+      return 1
+    fi
+    if [[ "${1:-}" != force ]]; then
+      err "В канале версия старше текущей ($UPDATE_NEW) — откат только явно"
+      return 1
+    fi
   fi
   if cmp -s "$target" "$UPDATE_FILE"; then ok "Уже последняя версия ($VERSION)"; return 0; fi
   cp -a "$target" "$target.bak" 2>/dev/null && info "Прежняя версия: $target.bak"
