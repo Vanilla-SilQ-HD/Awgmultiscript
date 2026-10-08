@@ -8,6 +8,16 @@ valid_ip() {
   for o in "${BASH_REMATCH[@]:1}"; do (( o <= 255 )) || return 1; done
 }
 
+# DNS для клиентов: IPv4 через запятую (и/или пробел), каждый — настоящий адрес:
+# «999.999.999.999» иначе уходил в конфиги всех клиентов
+valid_dns_list() {  # «1.1.1.1, 1.0.0.1»
+  local -a a
+  local d
+  IFS=', ' read -ra a <<< "$1"
+  (( ${#a[@]} )) || return 1
+  for d in "${a[@]}"; do valid_ip "$d" || return 1; done
+}
+
 valid_cidr() {
   [[ "$1" == */* ]] || return 1
   local mask="${1#*/}"

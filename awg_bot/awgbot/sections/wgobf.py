@@ -98,7 +98,7 @@ async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
         (f"{'✅' if d.get('clean') else '⬜️'} Чистый WG", act.data("clean", "0" if d.get("clean") else "1")),
         ("🔄 Перезапустить", act.data("restart")),
         ("🔑 Сменить ключ", act.data("key")),
-        ("📜 Журнал", "diag:log:wgobf"),
+        ("📜 Журнал", "diag:log:wgobf|wo"),
         ("🗑 Удалить", act.data("rm")),
         ui.back()))
 
@@ -218,9 +218,15 @@ async def _list(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     def dot(r: dict) -> str:
         return "🟢" if r.get("ago") is not None and r["ago"] < 180 else "⚪️"
 
+    # Текст — те же клиенты, что и кнопки этой страницы (страница — как у ui.paged)
+    pages = max(1, (len(rows) + 19) // 20)
+    page = min(page, pages - 1)
     lines = [f"{dot(r)} <b>{esc(r['name'])}</b> <code>{esc(r['ip'])}</code>"
-             + (f" · {ui.fmt_dur(r['ago'])} назад" if r.get("ago") is not None else "") for r in rows[:40]]
-    await ui.render(cb, "<b>👥 Клиенты WG + обфускатор</b>\n\n" + ("\n".join(lines) or "Клиентов нет."),
+             + (f" · {ui.fmt_dur(r['ago'])} назад" if r.get("ago") is not None else "")
+             for r in rows[page * 20:(page + 1) * 20]]
+    await ui.render(cb, "<b>👥 Клиенты WG + обфускатор</b>"
+                        + (f" · стр. {page + 1} из {pages}" if pages > 1 else "") + "\n\n"
+                        + ("\n".join(lines) or "Клиентов нет."),
                     ui.kb(ui.paged([(f"{dot(r)} {r['name']}", act.data("v", r["name"])) for r in rows],
                                    page, lambda p: act.data("list", str(p))),
                           ui.back("wo")))

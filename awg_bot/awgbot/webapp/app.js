@@ -73,16 +73,38 @@ const S = { me: null, version: "", channel: "", update: "", status: null, client
   select: null, live: null, listShown: false, listRedraw: null };
 
 // ── Связь с ботом ─────────────────────────────────────────
-async function post(path, body = {}) {
-  const r = await fetch(url(path), {
-    method: "POST",
-    credentials: "same-origin",
-    headers: WEB ? { "Content-Type": "application/json" }
-      : { "Content-Type": "application/json", Authorization: "tma " + (tg ? tg.initData : "") },
-    body: JSON.stringify(body),
-  });
-  const d = await r.json().catch(() => ({}));
-  if (WEB && r.status === 401 && d.login) { showLogin(); throw new Error("Нужен вход"); }
+// bg — фоновый опрос (живая скорость): сессию веб-панели он не продлевает,
+// иначе открытый обзор держал бы вход вместо «12 часов без действий»
+// ms — сколько ждать ответа: /api/call — таймаут awg2 и ещё 15 с, удаление
+// и другие записи — как у awg2 (до 180 с), остальное — минута. Не ответил —
+// понятная ошибка, а не вечная «Загрузка…»
+// Ждём чуть дольше сервера: по умолчанию он ждёт awg2 до 180 с, отправка в чат — до 300 с
+const postWait = (path, body) => (path === "/api/call" ? ((+body.timeout || 120) + 15) * 1000
+  : path === "/api/client/del" ? 615e3 : path === "/api/send" ? 315e3 : 195e3);
+async function post(path, body = {}, bg = false, ms = 0) {
+  const headers = WEB ? { "Content-Type": "application/json" }
+    : { "Content-Type": "application/json", Authorization: "tma " + (tg ? tg.initData : "") };
+  if (bg) headers["X-Awg-Bg"] = "1";
+  const wait = ms || postWait(path, body);
+  const ac = window.AbortController ? new AbortController() : null;
+  const timer = ac ? setTimeout(() => ac.abort(), wait) : 0;
+  let r, d;
+  try {
+    r = await fetch(url(path), {
+      method: "POST",
+      credentials: "same-origin",
+      headers,
+      body: JSON.stringify(body),
+      signal: ac ? ac.signal : undefined,
+    });
+    d = await r.json().catch(() => ({}));
+  } catch (e) {
+    // «Failed to fetch» / «Load failed» — это обрыв связи, так и пишем
+    throw new Error(ac && ac.signal.aborted ? `Сервер не ответил за ${Math.round(wait / 1000)} с — действие могло завершиться на сервере`
+      : "Нет связи с сервером");
+  } finally { clearTimeout(timer); }
+  if (ac && ac.signal.aborted) throw new Error(`Сервер не ответил за ${Math.round(wait / 1000)} с — действие могло завершиться на сервере`);
+  if (WEB && r.status === 401 && d.login) { showLogin(); const e = new Error("Нужен вход"); e.login = true; throw e; }
   if (!r.ok || d.ok === false) {
     const e = new Error(d.error || `HTTP ${r.status}`);
     e.log = d.log || "";
@@ -95,10 +117,11 @@ const call = async (...args) => (await post("/api/call", { args })).data;
 // Файл: в Mini App — в чат с ботом, в веб-панели — скачиванием
 async function download(body) {
   const r = await fetch(url("/api/download"), { method: "POST", credentials: "same-origin",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+    .catch(() => { throw new Error("Нет связи с сервером"); });
   if (!r.ok || (r.headers.get("Content-Type") || "").startsWith("application/json")) {
     const d = await r.json().catch(() => ({}));
-    if (r.status === 401 && d.login) { showLogin(); throw new Error("Нужен вход"); }
+    if (r.status === 401 && d.login) { showLogin(); const e = new Error("Нужен вход"); e.login = true; throw e; }
     const e = new Error(d.error || `HTTP ${r.status}`);
     e.log = d.log || "";
     throw e;
@@ -139,7 +162,7 @@ const plural = (n, one, few, many) => {
 function fmtBytes(n) {
   n = Number(n || 0);
   for (const u of ["Б", "КБ", "МБ", "ГБ"]) {
-    if (n < 1024) return u === "Б" ? `${n} ${u}` : `${n.toFixed(1)} ${u}`;
+    if (u === "Б" ? n < 1024 : n < 1023.95) return u === "Б" ? `${n} ${u}` : `${n.toFixed(1)} ${u}`;
     n /= 1024;
   }
   return `${n.toFixed(1)} ТБ`;
@@ -487,8 +510,9 @@ function lookPanel() {
   draw();
   tpanel.classList.add("on");
   syncScrim();
+  trapOpen(tpanel);
 }
-function closeLook() { tpanel.classList.remove("on"); syncScrim(); }
+function closeLook() { tpanel.classList.remove("on"); syncScrim(); trapClose(tpanel); }
 
 const SUPPORT_URL = "https://t.me/awgToolza/156/157";
 // Меню бота утонуло под конфигами — бот присылает его вниз чата, панель закрывается
@@ -617,7 +641,7 @@ function drawNav() {
     const wide = railWide();
     const a = (p, ic, t, onclick, cls) => h("a", { href: onclick ? "#" : "#" + p,
       class: [cls, !onclick && isOn(p) ? "on" : null].filter(Boolean).join(" ") || null, "aria-label": t,
-      onclick: onclick ? (ev) => { ev.preventDefault(); onclick(); } : null },
+      onclick: (ev) => { if (onclick) { ev.preventDefault(); onclick(); } else sameTab(ev, p); } },
       icon(ic), h("span", { class: wide ? "lbl" : "tip" }, t), p === "/update" && hasUpd() ? h("i", { class: "badge" }) : null);
     railEl.replaceChildren(...[h("a", { class: "logo", href: "#/", title: "AWG Toolza", "aria-label": "Обзор" }, logoImg()),
       ...NAV.map(([p, ic, t]) => a(p, ic, t)), h("div", { class: "sp" }),
@@ -633,13 +657,16 @@ function drawNav() {
   if (!tabs) { tabEl.replaceChildren(); closeMore(); return; }
   const more = MORE();
   const moreOn = more.some(([p]) => p.startsWith("/") && isOn(p));
-  tabEl.replaceChildren(...TABS.map(([p, ic, t]) => h("a", { href: "#" + p, class: isOn(p) ? "on" : null }, icon(ic), t)),
+  tabEl.replaceChildren(...TABS.map(([p, ic, t]) => h("a", { href: "#" + p, class: isOn(p) ? "on" : null,
+    onclick: (ev) => sameTab(ev, p) }, icon(ic), t)),
     h("a", { class: moreOn ? "on" : null, role: "button", onclick: toggleMore }, icon("layout-grid"), "Ещё",
       hasUpd() ? h("i", { class: "tdot" }) : null));
   moreEl.replaceChildren(h("div", { class: "mg" }, more.map(([p, ic, t]) => h("a", {
     class: p.startsWith("/") && isOn(p) ? "on" : null, role: "button", onclick: () => moreGo(p) },
   h("span", { class: "mi" }, icon(ic), p === "/update" && hasUpd() ? h("i", { class: "badge" }) : null), t))));
 }
+// Нажали раздел, который уже открыт: адрес тот же, hashchange не будет — обновить экран
+function sameTab(ev, p) { if (curPath() === p) { ev.preventDefault(); render(); } }
 function moreGo(p) {
   closeMore();
   if (p === "look") lookPanel();
@@ -670,6 +697,7 @@ async function accountMenu() {
 }
 
 // ── Командная палитра: Ctrl+K — раздел, клиент или действие ──
+const AWG0_RESTART = "Перезапустить awg0? Клиенты переподключатся сами за несколько секунд.";
 const palEl = document.getElementById("pal"), palQ = document.getElementById("palq"), palL = document.getElementById("pall");
 let palItems = [], palSel = 0;
 function palCatalog() {
@@ -681,7 +709,7 @@ function palCatalog() {
     { ic: "download", t: WEB ? "Скачать все конфиги архивом" : "Все конфиги архивом в чат", g: "действие",
       run: () => busy(null, () => deliver({ what: "export" }, "Архив всех конфигов — в чате с ботом")) },
     { ic: "refresh-cw", t: "Перезапустить awg0", g: "действие",
-      run: () => quickAsk(null, "Перезапустить awg0? Клиенты переподключатся сами за несколько секунд.", "awg0 перезапущен", ["server", "restart"], () => {}) },
+      run: () => quickAsk(null, AWG0_RESTART, "awg0 перезапущен", ["server", "restart"], () => {}) },
     { ic: "stethoscope", t: "Проверить сервер", g: "действие", run: () => go("/diag") },
     { ic: "sliders-horizontal", t: "Тема и цвета", g: "вид", run: lookPanel },
     { ic: dark ? "sun" : "moon", t: dark ? "Светлая тема" : "Тёмная тема", g: "вид",
@@ -713,10 +741,10 @@ function openPal() {
   if (!inApp()) return;
   closeMore();
   palSel = 0; palQ.value = "";
-  palEl.classList.add("on"); drawPal(); palQ.focus();
+  palEl.classList.add("on"); drawPal(); trapOpen(palEl.querySelector(".w"), palQ);
   if (!S.clients) loadClients().then(() => { if (palEl.classList.contains("on")) drawPal(); }).catch(() => {});
 }
-function closePal() { palEl.classList.remove("on"); }
+function closePal() { palEl.classList.remove("on"); trapClose(palEl.querySelector(".w")); }
 palQ.addEventListener("input", () => { palSel = 0; drawPal(); });
 palQ.addEventListener("keydown", (ev) => {
   if (ev.key === "ArrowDown") { ev.preventDefault(); palSel = Math.min(palItems.length - 1, palSel + 1); markPal(); }
@@ -729,7 +757,7 @@ document.addEventListener("keydown", (ev) => {
     ev.preventDefault(); palEl.classList.contains("on") ? closePal() : openPal();
   } else if (ev.key === "Escape") {
     const sheetBg = [...document.querySelectorAll(".sheet-bg")].pop();
-    if (sheetBg) sheetBg.click();                         // как нажатие мимо окна — «Отмена»
+    if (sheetBg) sheetBg.close ? sheetBg.close() : sheetBg.remove();   // как нажатие мимо окна — «Отмена»
     else if (palEl.classList.contains("on")) closePal();
     else if (tpanel.classList.contains("on")) closeLook();
     else if (moreEl.classList.contains("on")) closeMore();
@@ -747,13 +775,28 @@ function toast(text, ms = 2000) {
 }
 // showAlert/showConfirm — это showPopup: текст длиннее 256 символов не
 // обрезается, а бросает WebAppPopupParamInvalid, и окно не появляется вовсе.
+// Режем середину: последний абзац — это вопрос («…Применить?»), он остаётся
 const POPUP_MAX = 256;
-const popupText = (text) => (text.length > POPUP_MAX ? text.slice(0, POPUP_MAX - 1) + "…" : text);
+function popupText(text) {
+  if (text.length <= POPUP_MAX) return text;
+  const i = text.lastIndexOf("\n"), tail = i > 0 ? text.slice(i) : "";
+  if (tail && tail.length <= POPUP_MAX - 60) return text.slice(0, POPUP_MAX - tail.length - 1).replace(/\s+$/, "") + "…" + tail;
+  return text.slice(0, 60).replace(/\s+$/, "") + "…" + text.slice(text.length - (POPUP_MAX - 61));
+}
+// Хвост журнала к ошибке — без строк, повторяющих её текст («× нет места» при
+// ошибке «нет места»): префиксы журнала awg2 при сравнении не в счёт
+function logTail(e, n) {
+  const msg = String(e.message || "").trim();
+  return (e.log || "").trim().split("\n").filter((l) => l.trim().replace(/^[×→▲√]\s*/, "") !== msg)
+    .slice(-n).join("\n").trim();
+}
 function fail(e) {
+  if (e.login) return;                     // сессия кончилась — на экране уже форма входа
   haptic("error");
-  const tail = (e.log || "").trim().split("\n").slice(-6).join("\n");
-  const text = "❌ " + e.message + (tail && tail !== e.message ? "\n\n" + tail : "");
-  if (!tg || !tg.showAlert) return alert(text);
+  const tail = logTail(e, 6);
+  const text = "❌ " + e.message + (tail ? "\n\n" + tail : "");
+  // Без Telegram (веб-панель) — тем же листом, что и длинная ошибка, а не окном браузера
+  if (!tg || !tg.showAlert) return logSheet("❌ " + e.message, tail || false);
   // Длинная ошибка с хвостом журнала — листом снизу, целиком
   if (text.length <= POPUP_MAX) tg.showAlert(text); else logSheet("❌ " + (e.message || "Ошибка").slice(0, 80), text);
 }
@@ -761,14 +804,61 @@ function confirmTg(text) {
   text = popupText(text);
   return new Promise((ok) => (tg && tg.showConfirm ? tg.showConfirm(text, ok) : ok(window.confirm(text))));
 }
-// Выбор снизу: [{label, value, cls}] → значение или null
+// Окно поверх страницы (лист, палитра, карточка справа, «Тема»): фокус —
+// внутрь, Tab не уходит на страницу под ним, закрыли — фокус обратно к кнопке,
+// которая его открыла
+const traps = [];
+const focusables = (el) => [...el.querySelectorAll("button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])")]
+  .filter((x) => !x.disabled && x.getClientRects().length);
+function trapOpen(el, first) {
+  el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true");
+  if (!traps.some((t) => t.el === el)) traps.push({ el, back: document.activeElement });
+  const f = first || focusables(el)[0];
+  if (f) f.focus();
+}
+function trapClose(el) {
+  const i = traps.findIndex((t) => t.el === el);
+  if (i < 0) return;
+  const back = traps.splice(i, 1)[0].back;
+  // В Telegram фокус в поле ввода вернул бы экранную клавиатуру — только кнопкам
+  if (back && back.focus && document.body.contains(back) && (WEB || !/^(INPUT|TEXTAREA|SELECT)$/.test(back.tagName))) back.focus();
+}
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Tab" || !traps.length) return;
+  const el = traps[traps.length - 1].el, f = focusables(el), a = document.activeElement;
+  if (!f.length) { ev.preventDefault(); return; }
+  if (!el.contains(a)) { ev.preventDefault(); f[0].focus(); }
+  else if (ev.shiftKey && a === f[0]) { ev.preventDefault(); f[f.length - 1].focus(); }
+  else if (!ev.shiftKey && a === f[f.length - 1]) { ev.preventDefault(); f[0].focus(); }
+});
+// Лист снизу (на ПК — окно по центру): мимо него, Esc, «Отмена» и смена экрана
+// закрывают; onClose(nav) — nav = закрыт сменой экрана (render)
+function sheetOpen(box, onClose) {
+  const bg = h("div", { class: "sheet-bg", onclick: (ev) => { if (ev.target === bg) close(); } }, box);
+  function close(nav) {
+    if (!bg.parentNode) return;
+    bg.remove(); trapClose(box);
+    if (onClose) onClose(!!nav);
+  }
+  bg.close = close;
+  if (!box.hasAttribute("aria-label")) { const t = box.querySelector("h3"); if (t) box.setAttribute("aria-label", t.textContent); }
+  document.body.append(bg);
+  trapOpen(box);
+  return close;
+}
+// Смена экрана: листы и «Тема» прежнего экрана не остаются поверх нового
+function closeOverlays() {
+  document.querySelectorAll(".sheet-bg").forEach((bg) => (bg.close ? bg.close(true) : bg.remove()));
+  closeLook();
+}
+// Выбор снизу: [{label, value, cls}] → значение или null (и когда лист закрыт сменой экрана)
 function sheet(title, options) {
   return new Promise((done) => {
-    const bg = h("div", { class: "sheet-bg", onclick: (ev) => { if (ev.target === bg) { bg.remove(); done(null); } } },
-      h("div", { class: "sheet" }, h("h3", {}, title),
-        options.map((o) => h("button", { class: o.cls || "", onclick: () => { bg.remove(); done(o.value); } }, o.label)),
-        h("button", { class: "muted", onclick: () => { bg.remove(); done(null); } }, "Отмена")));
-    document.body.append(bg);
+    let close = null;
+    const box = h("div", { class: "sheet" }, h("h3", {}, title),
+      options.map((o) => h("button", { class: o.cls || "", onclick: () => { done(o.value); close(); } }, o.label)),
+      h("button", { class: "muted", onclick: () => close() }, "Отмена"));
+    close = sheetOpen(box, () => done(null));
   });
 }
 // Кнопка на время действия гаснет; ошибка — всплывающим окном
@@ -790,7 +880,8 @@ async function copy(text) {
 const routes = [];
 let token = 0;
 const route = (re, fn) => { routes.push([re, fn]); return re; };
-const go = (path) => { location.hash = path; };
+// Тот же адрес события hashchange не даёт — экран просто обновляется
+const go = (path) => { if (curPath() === path) render(); else location.hash = path; };
 const replace = (path) => { location.replace("#" + path); };
 const back = () => (history.length > 1 ? history.back() : go("/"));
 const CLIENT_SUB = /^\/client\//;
@@ -805,6 +896,7 @@ function openDrawer(path) {
     h("div", { class: "body" }));
   drawerEl.classList.add("on");
   syncScrim();
+  trapOpen(drawerEl);
   // Строка клиента в таблице — подсвечена, пока открыта его карточка
   root.querySelectorAll("[data-name]").forEach((el) => el.classList.toggle("cur", el.dataset.name === name));
   return drawerEl.querySelector(".body");
@@ -814,6 +906,7 @@ function closeDrawer() {
   drawerEl.classList.remove("on");
   root.querySelectorAll(".cur").forEach((el) => el.classList.remove("cur"));
   syncScrim();
+  trapClose(drawerEl);
 }
 
 // Две и больше карточки (.ecard) подряд — в одну сетку: на ПК в два столбца
@@ -872,8 +965,9 @@ async function show(path, target, my) {
       // Карточка поменяла клиента — список за ней показывает то же самое
       if (inDrawer && live() && S.listRedraw) S.listRedraw();
     } catch (e) {
+      const tail = logTail(e, 12);
       ctx.put(h("div", { class: "card" }, h("div", { class: "bad" }, "❌ " + e.message),
-        e.log ? h("pre", {}, e.log.trim().split("\n").slice(-12).join("\n")) : null,
+        tail ? h("pre", {}, tail) : null,
         h("button", { class: "btn-block", onclick: render }, "Повторить")));
     } finally {
       if (live()) target.classList.remove("reloading");
@@ -883,10 +977,31 @@ async function show(path, target, my) {
   return false;
 }
 
+// Шаг назад с поправкой: экран, на который вернулись, заменяется адресом
+// fix(путь) (null — остаётся). После переименования и удаления клиента в
+// истории не остаётся шагов на «Клиента bob нет» и двух списков подряд
+let backFix = null;
+function backWith(fix) {
+  if (history.length < 2) return replace(fix(curPath()) || "/");
+  const my = backFix = fix;
+  history.back();
+  // «Назад» не сработал (истории внутри панели нет) — просто заменить адрес
+  setTimeout(() => { if (backFix === my) { backFix = null; const p = fix(curPath()); if (p) replace(p); } }, 1000);
+}
+
+let shownPath = null;
 async function render() {
   const path = curPath();
   const my = ++token;
   if (badPath(path)) return replace("/clients");
+  if (backFix) {
+    const fix = backFix, to = fix(path);
+    backFix = null;
+    if (to && to !== path) return replace(to);
+  }
+  // Другой экран — листы и панели прежнего закрываются (выбор в них уже ни к чему)
+  if (path !== shownPath) closeOverlays();
+  shownPath = path;
   closePal(); closeMore();
   if (tg && tg.BackButton) tg.BackButton[path === "/" ? "hide" : "show"]();
   drawNav();
@@ -906,15 +1021,17 @@ const tidy = (l) => {
 // ── Задача с живым журналом ────────────────────────────────
 // Долгое (массовое создание, установка, сборка) идёт задачей awg2: журнал —
 // по ходу, итог — на том же экране. done(data) рисует кнопки итога;
-// opts.stdin — ввод задачи, opts.onBack — куда «Назад» (по умолчанию экран,
+// opts.stdin — ввод задачи, opts.onBack(ok) — куда «Назад» (по умолчанию экран,
 // с которого задачу запустили, уже с новым состоянием).
+// Ушли с экрана — задача на сервере идёт дальше: опрос продолжается без
+// отрисовки, итог — подсказкой.
 async function runJob(ctx, title, args, done, opts = {}) {
-  const started = Date.now();
+  const started = Date.now(), name = plainTitle(title);
   const state = pill("идёт", "accent");
-  const head = h("h1", {}, plainTitle(title), state), time = h("div", { class: "muted small mono" }), log = h("pre", {}, "запускаю…");
+  const head = h("h1", {}, name, state), time = h("div", { class: "muted small mono" }), log = h("pre", {}, "запускаю…");
   const finish = (ok, text) => { state.className = "pill " + (ok ? "ok" : "bad"); state.textContent = text; };
   const foot = h("div");
-  const backBtn = () => h("button", { class: "btn-block", onclick: () => (opts.onBack || render)() }, "◀️ Назад");
+  const backBtn = (ok) => h("button", { class: "btn-block", onclick: () => (opts.onBack || render)(ok) }, "◀️ Назад");
   ctx.put(head, time, log, foot);
   let id;
   try {
@@ -922,35 +1039,53 @@ async function runJob(ctx, title, args, done, opts = {}) {
   } catch (e) {
     finish(false, "ошибка"); time.textContent = e.message;
     log.textContent = (e.log || "").trim() || "задача не запустилась";
-    haptic("error"); foot.replaceChildren(backBtn());
+    haptic("error"); foot.replaceChildren(backBtn(false));
     return;
   }
-  let offset = 0, text = "", misses = 0;
-  while (ctx.live()) {
+  let offset = 0, text = "", lostAt = 0;
+  for (;;) {
     await new Promise((ok) => setTimeout(ok, 1500));
     let st;
     try {
-      st = (await post("/api/job/status", { id, offset })).data;
-      misses = 0;
+      st = (await post("/api/job/status", { id, offset }, false, 75000)).data;
+      lostAt = 0;
     } catch (e) {
+      if (e.login) return;                 // сессия веб-панели кончилась — на экране уже вход
       // Бот мог перезапуститься по ходу задачи — задача awg2 от этого не встаёт
-      if (++misses < 60) continue;
-      throw e;
+      lostAt = lostAt || Date.now();
+      if (ctx.live()) time.textContent = `${e.message} — пробую снова…`;
+      if (Date.now() - lostAt < (window.AWG_JOB_LOST_MS || 90000)) continue;
+      if (!ctx.live()) { toast(`⚠️ ${name}: нет связи с сервером — итог не известен`, 6000); return; }
+      // Связи нет давно: не бросаем ошибку в никуда, а говорим как есть
+      finish(false, "нет связи");
+      time.textContent = "Нет связи с сервером — задача могла продолжиться на сервере";
+      haptic("error");
+      await new Promise((ok) => foot.replaceChildren(
+        h("button", { class: "btn-primary btn-block", onclick: ok }, "🔄 Повторить проверку"), backBtn(false)));
+      state.className = "pill accent"; state.textContent = "идёт"; time.textContent = "проверяю…";
+      foot.replaceChildren(); lostAt = 0;
+      continue;
     }
     offset = st.offset || offset;
-    if (st.log) {
-      text += st.log;
+    if (st.log) text += st.log;
+    const live = ctx.live();
+    if (live && st.log) {
       // Рамки заголовков из терминального вывода awg2 здесь не нужны
       log.textContent = text.split("\n").filter((l) => !/^[\s━─═—–-]*$/.test(l)).map(tidy).slice(-300).join("\n") || "идёт…";
       log.scrollTop = log.scrollHeight;
     }
-    time.textContent = fmtDur((Date.now() - started) / 1000);
+    if (live) time.textContent = fmtDur((Date.now() - started) / 1000);
     if (st.state === "running") continue;
     const ok = st.state === "done" && st.ok;
+    if (!live) {
+      haptic(ok ? "success" : "error");
+      toast(ok ? `✅ ${name}: готово` : `❌ ${name}: ошибка — журнал: Диагностика → Журналы`, 6000);
+      return;
+    }
     finish(ok, ok ? "готово" : "ошибка");
     if (!ok) time.textContent = st.state === "lost" ? "Задача прервана: awg2 остановлен или сервер перезагружен" : (st.error || "ошибка");
     haptic(ok ? "success" : "error");
-    foot.replaceChildren(...[].concat(ok && done ? done(st.data) : [], backBtn()).flat(Infinity)
+    foot.replaceChildren(...[].concat(ok && done ? done(st.data) : [], backBtn(ok)).flat(Infinity)
       .filter((n) => n != null && n !== false));
     return;
   }
@@ -996,12 +1131,12 @@ function logCard(log, ...head) {
 }
 // Вывод awg2 без рамок заголовков — на телефоне они переносятся в мусор
 const plainLog = (text) => (text || "").split("\n").filter((l) => !/^[\s━─═]+$/.test(l) || !l.trim()).map(tidy).join("\n").trim();
-// Длинный вывод (диагностика) — снизу, поверх экрана
+// Длинный вывод (диагностика) — снизу, поверх экрана; text === false — без вывода
 function logSheet(title, text) {
-  const bg = h("div", { class: "sheet-bg", onclick: (ev) => { if (ev.target === bg) bg.remove(); } },
-    h("div", { class: "sheet" }, h("h3", {}, title), h("pre", {}, plainLog(text) || "пусто"),
-      h("button", { onclick: () => bg.remove() }, "Закрыть")));
-  document.body.append(bg);
+  let close = null;
+  const box = h("div", { class: "sheet" }, h("h3", {}, title), text === false ? null : h("pre", {}, plainLog(text) || "пусто"),
+    h("button", { onclick: () => close() }, "Закрыть"));
+  close = sheetOpen(box);
 }
 // Переключатель строкой: onToggle(новое) — промис; ошибка оставляет как было
 function switchRow(title, sub, on, onToggle) {
@@ -1029,8 +1164,20 @@ function fileField(ta) {
 const copyBtn = (label, text, cls = "btn-block") => h("button", { class: cls, onclick: () => copy(text) }, icon("copy"), label);
 const btn = (label, onclick, cls) => h("button", { class: cls || null, onclick: (ev) => onclick(ev.currentTarget) }, label);
 const hint = (text) => h("div", { class: "muted small", style: "margin:8px 4px" }, text);
-const IP_RE = /^(\d{1,3}\.){3}\d{1,3}$/;
-const DOMAIN_RE = /^(?=.{4,253}$)([A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,63}$/;
+// IPv4 и домен — как valid_ip и valid_domain в awg2: октет до 255 без ведущих
+// нулей; метки домена не начинаются и не кончаются дефисом, одни цифры — не домен
+const IP_RE = /^(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})$/;
+const validIp = (v) => { const m = IP_RE.exec(v); return !!m && m.slice(1).every((o) => +o <= 255); };
+const DOMAIN_RE = /^(?=.{1,253}$)(?![\d.]+$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
+// Enter в поле — как нажатие кнопки формы (в многострочном — Ctrl+Enter)
+function enterTo(button, ...fields) {
+  fields.forEach((f) => f.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter" || ev.isComposing || (f.tagName === "TEXTAREA" && !(ev.ctrlKey || ev.metaKey))) return;
+    ev.preventDefault();
+    if (!button.disabled) button.click();
+  }));
+  return button;
+}
 const validPort = (v, min = 1) => /^\d{1,5}$/.test(v) && +v >= min && +v <= 65535;
 
 // Строка меню раздела: иконка (из эмодзи в подписи), заголовок, пояснение, «›»
@@ -1311,7 +1458,7 @@ async function liveLoop(ctx, onTick) {
       try {
         // Вкладка была скрыта: первый замер охватил бы весь провал — скорость и «в сети» считаются с нуля
         if (L.at && Date.now() - L.at > 10000) { L.prev = null; L.rx = []; L.tx = []; L.per = {}; L.act = {}; L.since = 0; }
-        const d = await call("traffic", "now");
+        const d = (await post("/api/call", { args: ["traffic", "now"] }, true, 8000)).data;
         if (d && d.peers) {
           if (L.prev && d.ts > L.prev.ts) {
             const dt = d.ts - L.prev.ts, per = {};
@@ -1329,9 +1476,10 @@ async function liveLoop(ctx, onTick) {
             L.per = per;
           }
           L.prev = d; L.at = Date.now(); L.since = L.since || L.at;
-          if (ctx.live()) onTick(L);
         }
       } catch (_) { /* сервер не ответил — следующий замер */ }
+      // И без ответа: давний замер обзор показывает как «нет связи», а не застывшую скорость
+      if (ctx.live()) onTick(L);
     }
     await new Promise((ok) => setTimeout(ok, 3000));
   }
@@ -1415,6 +1563,8 @@ const linkTo = (text, path) => h("a", { onclick: () => go(path) }, text);
 const kpi = (label, value, small, d, onclick) => h("div", { class: "kpi" + (onclick ? " tap" : ""), onclick },
   h("div", { class: "eyebrow" }, label), h("div", { class: "v" }, value, small ? (small instanceof Node ? small : h("small", {}, small)) : null),
   h("div", { class: "d" }, d));
+// Текстовое значение (ОС, адрес) — переносится, а не режется многоточием
+const kpiTxt = (...a) => { const k = kpi(...a); k.querySelector(".v").classList.add("txt"); return k; };
 function uptimeParts(sec) {
   sec = Math.max(0, sec || 0);
   const d = Math.floor(sec / 86400), hh = Math.floor(sec % 86400 / 3600), mm = Math.floor(sec % 3600 / 60);
@@ -1428,7 +1578,8 @@ function setStatus(d) {
 }
 
 route(/^\/$/, async (ctx) => {
-  const [me, d, cl, traffic, evlog] = await Promise.all([post("/api/me"), post("/api/status"), post("/api/clients").catch(() => null),
+  let clErr = null;
+  const [me, d, cl, traffic, evlog] = await Promise.all([post("/api/me"), post("/api/status"), post("/api/clients").catch((e) => { clErr = e; return null; }),
     call("traffic", "daily", "all", 14).catch(() => null), callR(["log", "expire", "80"]).catch(() => null)]);
   S.me = me;
   setStatus(d);
@@ -1444,6 +1595,10 @@ route(/^\/$/, async (ctx) => {
   const byExp = rows.filter((c) => c.blocked && c.blocked_by !== "traffic").length;
   const today = rows.reduce((a, c) => a + (c.today || 0), 0), month = rows.reduce((a, c) => a + (c.month || 0), 0);
   const foot = h("div", { class: "foot" }, WEB ? `${me.name} · веб-панель · ${me.bot}` : `${me.name} · ${me.owner ? "владелец" : "админ"} · бот ${me.bot}`);
+  // Список клиентов не пришёл — не «Клиентов пока нет» и «Лимитов нет», а честно и с повтором
+  const clFail = () => h("div", { class: "card warn", "data-name": "clients-error" },
+    h("div", {}, "Не удалось загрузить клиентов" + (clErr && clErr.message ? ": " + clErr.message : "")),
+    h("button", { class: "btn-block", onclick: () => render() }, "🔄 Повторить"));
 
   if (!s.exists) {
     // Сервера ещё нет: компоненты и мастер создания
@@ -1452,9 +1607,9 @@ route(/^\/$/, async (ctx) => {
       btn("🖥 Сервер", () => go("/server"))]),
     alerts.length ? h("div", { class: "card warn" }, alerts.map(([a, path]) => h("div", { class: "row", style: "cursor:pointer;padding:3px 0",
       onclick: () => go(path) }, icon("triangle-alert"), a))) : null,
-    h("div", { class: "kpis" }, kpi("система", d.os || "—", null, h("span", {}, d.kernel || "")),
+    h("div", { class: "kpis" }, kpiTxt("система", d.os || "—", null, h("span", {}, d.kernel || "")),
       kpi("компоненты", comp.installed ? "есть" : "нет", null, h("span", {}, comp.module ? "модуль " + comp.module : "модуль не собран")),
-      kpi("адрес", d.ip || "—", null, h("span", {}, d.host || "")),
+      kpiTxt("адрес", d.ip || "—", null, h("span", {}, d.host || "")),
       kpi("аптайм", ...((p) => [p[0], p[1] + (p[2] != null ? ` ${p[2]}${p[3]}` : "")])(uptimeParts(d.uptime)), h("span", {}, "сервер не создан"))),
     foot);
   }
@@ -1466,6 +1621,7 @@ route(/^\/$/, async (ctx) => {
   const speedD = h("span", { style: "display:contents" }, h("span", { class: "dn" }, "↓ приём"), h("span", { class: "up" }, "↑ отдача"));
   const lrx = h("span", {}, "—"), ltx = h("span", {}, "—"), lrxU = h("small", {}, "↓"), ltxU = h("small", {}, "↑");
   const chart = h("div", { class: "lsvg" }, liveSvg(S.live || { rx: [], tx: [] }));
+  const livePill = pill("live", "ok"), liveT0 = Date.now();
   const topToday = [...rows].filter((c) => c.today).sort((a, b) => b.today - a.today).slice(0, 5);
   const tmax = Math.max(1, ...topToday.map((c) => c.today));
   const lims = rows.filter((c) => c.limit).map((c) => [c, Math.min(999, Math.round((c.used || 0) * 100 / c.limit))]).sort((a, b) => b[1] - a[1]);
@@ -1476,6 +1632,7 @@ route(/^\/$/, async (ctx) => {
   const routesIn = h("div", { class: "in" });
   const drawRoutes = () => {
     if (!ctx.live()) return;
+    if (clErr) { routesIn.replaceChildren(clFail()); return; }
     if (!rows.length) { routesIn.replaceChildren(h("div", { class: "empty" }, "Клиентов пока нет — ", linkTo("создать первого", "/add"))); return; }
     const v = pref("routes", "map") === "list" ? "list" : "map";
     const topo = v === "map" ? h("div", { class: "topo" }) : null;
@@ -1500,6 +1657,7 @@ route(/^\/$/, async (ctx) => {
       btn("🩺 Проверить", () => go("/diag")), btn("➕ Новый клиент", () => go("/add"), "btn-primary")]),
     alerts.length ? h("div", { class: "card warn" }, alerts.map(([a, path]) => h("div", { class: "row", style: "cursor:pointer;padding:3px 0",
       onclick: () => go(path) }, icon("triangle-alert"), a))) : null,
+    clErr ? clFail() : null,
     h("div", { class: "kpis" },
       kpi("в сети", kOnline, `/ ${rows.length}`, h("span", {}, tun ? `${tun} через ${via}` : "все напрямую"), () => go("/clients")),
       kpi("сейчас", speedV, speedU, speedD),
@@ -1509,7 +1667,7 @@ route(/^\/$/, async (ctx) => {
     h("div", { class: "g ov1" },
       h("section", { class: "box" }, h("header", {}, h("h3", {}, "Маршруты трафика"), h("div", { class: "r" }, linkTo("туннели →", "/tunnels"))),
         routesIn),
-      h("section", { class: "box live" }, h("header", {}, h("h3", {}, "Скорость сейчас"), h("div", { class: "r" }, pill("live", "ok"))),
+      h("section", { class: "box live" }, h("header", {}, h("h3", {}, "Скорость сейчас"), h("div", { class: "r" }, livePill)),
         h("div", { class: "in" }, h("div", { class: "big" }, h("div", { class: "dn" }, lrx, lrxU), h("div", { class: "up" }, ltx, ltxU)), chart,
           h("div", { class: "eyebrow", style: "margin-top:16px" }, "больше всех сегодня"),
           topToday.length ? h("div", { class: "talk" }, topToday.map((c) => h("div", { class: "trow", onclick: () => go("/client/" + encodeURIComponent(c.name)) },
@@ -1517,13 +1675,14 @@ route(/^\/$/, async (ctx) => {
             h("span", { class: "s mono" }, fmtBytes(c.today))))) : h("div", { class: "muted small" }, "сегодня трафика ещё не было")))),
     h("div", { class: "g ov2" },
       box("Лимиты", lims.length ? `${lims.length} ${plural(lims.length, "клиент", "клиента", "клиентов")}` : null,
-        lims.length ? h("div", { class: "rings" }, lims.map(([c, p]) => h("div", { class: "ring", onclick: () => go("/client/" + encodeURIComponent(c.name)) },
+        clErr ? h("div", { class: "muted small" }, "Клиенты не загрузились — лимиты неизвестны.")
+          : lims.length ? h("div", { class: "rings" }, lims.map(([c, p]) => h("div", { class: "ring", onclick: () => go("/client/" + encodeURIComponent(c.name)) },
           ringSvg(p, 40, 5), h("div", { class: "t" }, h("b", {}, c.name),
             h("span", { style: `color:${p >= 100 ? "var(--red)" : p >= 85 ? "var(--amber)" : "var(--acc)"}` }, p + "%"),
             h("span", { class: "dim" }, ` из ${fmtBytes(c.limit)}`)))))
-          : h("div", { class: "muted small" }, "Лимитов нет. Лимит ставится в карточке клиента: исчерпал — клиент блокируется до нового месяца.")),
+          : h("div", { class: "muted small" }, "Лимитов нет. Лимит ставится в карточке клиента: исчерпал — клиент блокируется (лимит «в месяц» — до нового месяца).")),
       box("Сроки", "ближайшие 30 дней",
-        exps.length ? h("div", { class: "talk" }, exps.map((c) => {
+        clErr ? h("div", { class: "muted small" }, "Клиенты не загрузились — сроки неизвестны.") : exps.length ? h("div", { class: "talk" }, exps.map((c) => {
           const left = c.expires - nowS, warn = left < 3 * 86400;
           return h("div", { class: "trow", onclick: () => go("/client/" + encodeURIComponent(c.name)) }, h("span", { class: "n" }, c.name),
             h("div", { class: "tbar" }, h("i", { style: `width:${Math.max(3, Math.min(100, left * 100 / D30)).toFixed(1)}%;background:${warn ? "var(--amber)" : "var(--acc)"}` })),
@@ -1557,6 +1716,11 @@ route(/^\/$/, async (ctx) => {
       if (!v && L.act[c.name]) c.ago = Math.round((Date.now() - L.act[c.name]) / 1000);
     }
     if (moved) { kOnline.textContent = String(rows.filter((c) => c.online).length); sub.textContent = subText(); drawRoutes(); }
+    // Последний замер старше 10 с — связи нет: скорость не застывает на старом числе
+    const stale = Date.now() - Math.max(L.at || 0, liveT0) > 10000;
+    livePill.className = "pill " + (stale ? "bad" : "ok");
+    livePill.textContent = stale ? "нет связи" : "live";
+    if (stale) { [lrx, ltx, speedV].forEach((el) => { el.textContent = "—"; }); speedD.replaceChildren(h("span", {}, "нет связи")); return; }
     const rx = L.rx.length ? L.rx[L.rx.length - 1] : 0, tx = L.tx.length ? L.tx[L.tx.length - 1] : 0;
     if (!L.rx.length) return;
     const [a, au] = fmtRate(rx), [b, bu] = fmtRate(tx), [c, cu] = fmtRate(rx + tx);
@@ -1593,6 +1757,8 @@ async function loadClients() {
   return S.clients;
 }
 const byName = (name) => (S.clients && S.clients.rows || []).find((c) => c.name === name);
+// Веб-панель без Telegram-бота: уведомлений и автобэкапов в чат не будет
+const noBot = () => !!WEB && !(S.me && S.me.tg_bot);
 
 // Состояние клиента: рамка и точка карточки, пометка справа, чипы
 const clientState = (c) => (c.blocked ? "bad" : c.online ? "on" : "");
@@ -1749,21 +1915,24 @@ const CLIENTS_RE = route(/^\/clients$/, async (ctx) => {
       } }, icon(S.sort === "name" ? "arrow-down-a-z" : "activity")),
       h("button", { class: S.select ? "btn-primary" : null, onclick: () => { S.select = S.select ? null : new Set(); draw(); } },
         icon("list-checks"), "Выбрать"));
-    const empty = h("div", { class: "card empty" }, d.rows.length ? "Никого не нашлось" : "Клиентов пока нет — создай первого");
-    list.className = S.view === "cards" ? "clist" : "";
+    const noSrv = S.status && S.status.server && S.status.server.exists === false;
+    const empty = h("div", { class: "card empty" }, d.rows.length ? "Никого не нашлось"
+      : noSrv ? ["Сервер ещё не создан — ", linkTo("создать сервер", "/server/create")] : "Клиентов пока нет — создай первого");
+    list.className = S.view === "cards" ? "clist" : S.view === "table" ? "tscroll" : "";
     list.replaceChildren(...(!rows.length ? [empty] : S.view === "table" ? [table(rows)] : S.view === "list"
       ? [h("div", { class: "card list" }, rows.map(row))] : rows.map(card)));
     // Строка, чья карточка открыта справа, — подсвечена
     const cur = (curPath().match(/^\/client\/([^/]+)/) || [])[1];
     if (cur) list.querySelectorAll("[data-name]").forEach((el) => el.classList.toggle("cur", el.dataset.name === decodeURIComponent(cur)));
+    const picked = S.select ? rows.filter((c) => S.select.has(c.name)).map((c) => c.name) : [];
     if (S.select) {
       bar.style.display = "";
       bar.replaceChildren(
         h("button", { onclick: () => { const all = rows.every((c) => S.select.has(c.name));
           rows.forEach((c) => (all ? S.select.delete(c.name) : S.select.add(c.name))); draw(); } }, "Все"),
-        h("button", { class: "btn-danger", disabled: !S.select.size || null,
-          onclick: (ev) => removeClients(ev.currentTarget, [...S.select], () => { S.select = null; render(); }) },
-        icon("trash-2"), `Удалить ${S.select.size || ""}`),
+        h("button", { class: "btn-danger", disabled: !picked.length || null,
+          onclick: (ev) => removeClients(ev.currentTarget, picked, () => { S.select = null; render(); }) },
+        icon("trash-2"), `Удалить ${picked.length || ""}`),
         h("button", { onclick: () => { S.select = null; draw(); } }, "Отмена"));
     } else {
       bar.style.display = "none";
@@ -1860,9 +2029,12 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
     area("traf", h("div", { class: "card" },
       kv("За месяц", fmtBytes(c.month)), kv("Сегодня", fmtBytes(c.today)),
       kv("Лимит", c.limit ? limitText(c) : "нет"), c.limit ? meter(c.used, c.limit) : null, chartBox)),
-    area("mon", switchRow("Мониторинг активности", "уведомления в чат, когда клиент пропал и вернулся", c.mon, async (on) => {
+    // Сообщает Telegram-бот: в веб-панели без бота присылать некому — так и говорим
+    area("mon", switchRow("Мониторинг активности", noBot() ? "уведомления присылает Telegram-бот — он не установлен"
+      : "уведомления в чат, когда клиент пропал и вернулся", c.mon, async (on) => {
       await post("/api/client/mon", { name, on });
-      toast(on ? "🔔 Бот сообщит, когда клиент пропадёт и вернётся" : "🔕 Мониторинг выключен", 3000);
+      toast(!on ? "🔕 Мониторинг выключен" : noBot() ? "🔔 Включено — но сообщать некому: Telegram-бот не установлен"
+        : "🔔 Бот сообщит, когда клиент пропадёт и вернётся", 3500);
     })),
     area("acts", h("div", { class: "actions" },
       h("button", { class: "btn-primary", onclick: () => go(`/client/${enc}/qr`) }, icon("qr-code"), "Конфиг и QR"),
@@ -1871,7 +2043,9 @@ route(/^\/client\/([^/]+)$/, async (ctx, name) => {
       h("button", { onclick: (ev) => setLimit(ev.currentTarget) }, "📶 Лимит"),
       h("button", { onclick: () => go(`/client/${enc}/mimicry`) }, "🎭 Мимикрия"),
       h("button", { onclick: () => go(`/client/${enc}/note`) }, "📝 Заметка"))),
-    area("del", h("button", { class: "btn-danger btn-block", onclick: (ev) => removeClients(ev.currentTarget, [name], () => replace("/clients")) },
+    // После удаления — шаг назад к списку, а не второй список поверх первого
+    area("del", h("button", { class: "btn-danger btn-block", onclick: (ev) => removeClients(ev.currentTarget, [name],
+      () => backWith((p) => (/^\/client\//.test(p) ? "/clients" : null))) },
       "🗑 Удалить клиента"))));
 });
 
@@ -1901,12 +2075,13 @@ route(/^\/client\/([^/]+)\/qr$/, async (ctx, name) => {
 route(/^\/client\/([^/]+)\/rename$/, async (ctx, name) => {
   const input = h("input", { value: name, maxlength: 32, autocapitalize: "off", autocomplete: "off" });
   ctx.put(title("✏️ Новое имя"), h("label", {}, "Латиница, цифры, _ и -, до 32"), input,
-    h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.target, async () => {
+    enterTo(h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.currentTarget, async () => {
       const v = input.value.trim();
       if (!/^[A-Za-z0-9_-]{1,32}$/.test(v)) throw new Error("Имя: латиница, цифры, _ и -, до 32 символов");
       if (v !== name) await post("/api/client/rename", { old: name, new: v });
-      haptic(); replace("/client/" + encodeURIComponent(v));
-    }) }, "Сохранить"));
+      // Карточка со старым именем в истории заменяется новой: «Назад» не ведёт на «Клиента bob нет»
+      haptic(); backWith(() => "/client/" + encodeURIComponent(v));
+    }) }, "Сохранить"), input));
   input.focus();
 });
 
@@ -1914,10 +2089,11 @@ route(/^\/client\/([^/]+)\/note$/, async (ctx, name) => {
   await loadClients();
   const c = byName(name) || {};
   const ta = h("textarea", { maxlength: 190 }, c.note || "");
-  ctx.put(title("📝 Заметка · " + name), h("label", {}, "До 190 символов; пусто — удалить"), ta,
-    h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.target, async () => {
+  ctx.put(title("📝 Заметка · " + name), h("label", {}, "До 190 символов; пусто — удалить" + (WEB ? " · Ctrl+Enter — сохранить" : "")), ta,
+    enterTo(h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.currentTarget, async () => {
       await post("/api/client/note", { name, text: ta.value.trim() }); haptic(); back();
-    }) }, "Сохранить"));
+    }) }, "Сохранить"), ta));
+  ta.focus();
 });
 
 // Лимит в поле — так, чтобы сохранение без правки дало те же байты (как
@@ -1940,14 +2116,15 @@ route(/^\/client\/([^/]+)\/limit$/, async (ctx, name) => {
   const drawSeg = () => seg.replaceChildren(segText([["month", "В месяц"], ["total", "Всего"]], period, (p) => { period = p; drawSeg(); }));
   drawSeg();
   ctx.put(title("📶 Лимит · " + name),
-    h("label", {}, "Размер: 50G, 500M, 1.5T; число без буквы — гигабайты"), input, seg,
+    h("label", {}, "Размер: 50G, 500MB, 1.5T; число без буквы — гигабайты"), input, seg,
     hint("Исчерпал лимит — клиент блокируется, как истёкший. «В месяц» — счётчик обнуляется 1-го числа, и клиент "
       + "разблокируется сам; «всего» — считается с этой минуты, без сброса."),
-    h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.target, async () => {
-      const v = input.value.trim().replace(/\s+/g, "").toUpperCase().replace("ГБ", "G").replace("МБ", "M").replace("ТБ", "T");
-      if (!/^\d{1,7}([.,]\d{1,3})?[KMGT]?$/.test(v)) throw new Error("Размер: например 50G или 500M");
+    enterTo(h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.currentTarget, async () => {
+      const v = input.value.trim().replace(/\s+/g, "").toUpperCase().replace("ГБ", "G").replace("МБ", "M").replace("ТБ", "T").replace("КБ", "K");
+      // Как parse_size в awg2: 50G, 50GB, 50GiB, 500M; число без буквы — гигабайты
+      if (!/^\d{1,7}([.,]\d{1,3})?([KMGT](I?B)?)?$/.test(v)) throw new Error("Размер: например 50G или 500M");
       await call("client", "limit", name, v, period); haptic(); toast("Лимит установлен"); back();
-    }) }, "Сохранить"));
+    }) }, "Сохранить"), input));
   input.focus();
 });
 
@@ -1955,12 +2132,12 @@ route(/^\/client\/([^/]+)\/date$/, async (ctx, name) => {
   const def = new Date(Date.now() + 30 * 86400e3);
   def.setMinutes(def.getMinutes() - def.getTimezoneOffset());
   const input = h("input", { type: "datetime-local", value: def.toISOString().slice(0, 16) });
-  ctx.put(title("📅 Срок · " + name), h("label", {}, "Клиент заблокируется в это время (время телефона)"), input,
-    h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.target, async () => {
+  ctx.put(title("📅 Срок · " + name), h("label", {}, "Клиент заблокируется в это время (время этого устройства)"), input,
+    enterTo(h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.currentTarget, async () => {
       const ts = Math.floor(new Date(input.value).getTime() / 1000);
       if (!ts || ts < Date.now() / 1000 + 60) throw new Error("Нужна дата в будущем");
       await call("client", "expire", name, ts); haptic(); toast("Срок обновлён"); back();
-    }) }, "Сохранить"));
+    }) }, "Сохранить"), input));
 });
 
 // Мимикрия: профиль и уровень; новый конфиг — сразу на экран QR
@@ -1989,12 +2166,25 @@ async function mimicryPicker(onPick) {
 }
 
 route(/^\/client\/([^/]+)\/mimicry$/, async (ctx, name) => {
-  ctx.put(title("🎭 Мимикрия · " + name), ...await mimicryPicker((spec) => busy(null, async () => {
-    toast("Генерирую мимикрию…", 4000);
-    await call("client", "mimicry", name, spec);
-    haptic(); toast("Мимикрия обновлена — старый конфиг больше не подключится", 3500);
-    replace(`/client/${encodeURIComponent(name)}/qr`);
-  })));
+  // Смена — с вопросом (старый конфиг перестанет подключаться) и одна за раз:
+  // двойной тап не шлёт второй запрос, список на время запроса не нажимается
+  const box = h("div");
+  let running = false;
+  box.append(...await mimicryPicker(async (spec) => {
+    if (running) return;
+    running = true;
+    try {
+      if (!await confirmTg(`Сменить мимикрию ${name}? Старый конфиг перестанет подключаться — понадобится новый (QR или файл).`)) return;
+      box.classList.add("reloading");
+      await busy(null, async () => {
+        toast("Генерирую мимикрию…", 4000);
+        await call("client", "mimicry", name, spec);
+        haptic(); toast("Мимикрия обновлена — старый конфиг больше не подключится", 3500);
+        replace(`/client/${encodeURIComponent(name)}/qr`);
+      });
+    } finally { running = false; box.classList.remove("reloading"); }
+  }));
+  ctx.put(title("🎭 Мимикрия · " + name), box);
 });
 
 // ── Новый клиент ──────────────────────────────────────────
@@ -2026,18 +2216,19 @@ route(/^\/add$/, async (ctx) => {
     exp.nodes,
     pro ? h("div", { style: "margin-top:12px" }, mimLabel, h("button", { class: "btn-block", onclick: async () => {
       const box = h("div", { class: "sheet" }, h("h3", {}, "🎭 Мимикрия"));
-      const bg = h("div", { class: "sheet-bg", onclick: (ev) => ev.target === bg && bg.remove() }, box);
-      box.append(...await mimicryPicker((s) => { spec = s; mimLabel.textContent = "Мимикрия: " + (s === "server" ? "как у сервера" : s === "none" ? "без I1-I5" : s); bg.remove(); }));
-      document.body.append(bg);
+      let close = null;
+      box.append(...await mimicryPicker((s) => { spec = s; mimLabel.textContent = "Мимикрия: " + (s === "server" ? "как у сервера" : s === "none" ? "без I1-I5" : s); close(); }));
+      if (ctx.live()) close = sheetOpen(box);
     } }, "🎭 Выбрать мимикрию")) : null,
-    h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.target, async () => {
+    enterTo(h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.currentTarget, async () => {
       const v = name.value.trim() || free();
       if (!/^[A-Za-z0-9_-]{1,32}$/.test(v)) throw new Error("Имя: латиница, цифры, _ и -, до 32 символов");
       if (taken.has(v)) throw new Error(`Имя ${v} уже занято`);
       await post("/api/client/add", { name: v, expire: exp.value(), mimicry: spec });
       haptic(); toast("Клиент создан");
       replace(`/client/${encodeURIComponent(v)}/qr`);
-    }) }, "Создать"));
+    }) }, "Создать"), name));
+  if (WEB) name.focus();          // в Telegram клавиатура закрыла бы срок и «Создать», а имя необязательно
 });
 
 route(/^\/bulk$/, async (ctx) => {
@@ -2056,31 +2247,32 @@ route(/^\/bulk$/, async (ctx) => {
       : [h("label", {}, "Имена через запятую"), names]));
   };
   draw();
-  ctx.put(title("➕ Несколько клиентов"), tabs, box, exp.nodes,
-    h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.target, async () => {
-      let spec;
-      if (mode === "prefix") {
-        const p = prefix.value.trim(), n = Number(count.value);
-        if (!/^[A-Za-z0-9_-]{1,27}$/.test(p)) throw new Error("Префикс: латиница, цифры, _ и -, до 27 символов");
-        if (!(n >= 1 && n <= 200)) throw new Error("Количество — от 1 до 200");
-        spec = `${p}:${n}`;
-      } else {
-        const list = names.value.split(",").map((s) => s.trim()).filter(Boolean);
-        if (!list.length || !list.every((s) => /^[A-Za-z0-9_-]{1,32}$/.test(s))) throw new Error("Имена: латиница, цифры, _ и -, через запятую");
-        spec = list.join(",");
-      }
-      const e = exp.value();
-      await runJob(ctx, "Создание клиентов", ["clients", "bulk", spec, ...(e ? [`expire=${e}`] : [])], (created) => {
-        const list = Array.isArray(created) ? created : [];
-        return [
-          h("div", { class: "card" }, h("b", {}, `Создано: ${list.length}`), h("div", { class: "muted small" }, list.join(", "))),
-          list.length ? h("button", { class: "btn-primary btn-block", onclick: (ev2) => busy(ev2.target, async () => {
-            await deliver({ what: "zip", names: list }, "Архив конфигов — в чате с ботом");
-          }) }, TO("📦 Конфиги архивом в чат", "📦 Скачать конфиги архивом")) : null,
-          h("button", { class: "btn-block", onclick: () => replace("/clients") }, "👥 К списку"),
-        ];
-      }, { onBack: back });
-    }) }, "Создать"));
+  const make = h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.currentTarget, async () => {
+    let spec;
+    if (mode === "prefix") {
+      const p = prefix.value.trim(), n = Number(count.value);
+      if (!/^[A-Za-z0-9_-]{1,27}$/.test(p)) throw new Error("Префикс: латиница, цифры, _ и -, до 27 символов");
+      // Только целое: «2.5» awg2 не поймёт
+      if (!/^\d{1,3}$/.test(count.value.trim()) || !(n >= 1 && n <= 200)) throw new Error("Количество — целое от 1 до 200");
+      spec = `${p}:${n}`;
+    } else {
+      const list = names.value.split(",").map((s) => s.trim()).filter(Boolean);
+      if (!list.length || !list.every((s) => /^[A-Za-z0-9_-]{1,32}$/.test(s))) throw new Error("Имена: латиница, цифры, _ и -, через запятую");
+      spec = list.join(",");
+    }
+    const e = exp.value();
+    await runJob(ctx, "Создание клиентов", ["clients", "bulk", spec, ...(e ? [`expire=${e}`] : [])], (created) => {
+      const list = Array.isArray(created) ? created : [];
+      return [
+        h("div", { class: "card" }, h("b", {}, `Создано: ${list.length}`), h("div", { class: "muted small" }, list.join(", "))),
+        list.length ? h("button", { class: "btn-primary btn-block", onclick: (ev2) => busy(ev2.currentTarget, async () => {
+          await deliver({ what: "zip", names: list }, "Архив конфигов — в чате с ботом");
+        }) }, TO("📦 Конфиги архивом в чат", "📦 Скачать конфиги архивом")) : null,
+        h("button", { class: "btn-block", onclick: () => replace("/clients") }, "👥 К списку"),
+      ];
+    }, { onBack: back });
+  }) }, "Создать");
+  ctx.put(title("➕ Несколько клиентов"), tabs, box, exp.nodes, enterTo(make, prefix, count, names));
 });
 
 // ── Сервер ────────────────────────────────────────────────
@@ -2101,7 +2293,7 @@ route(/^\/server$/, async (ctx) => {
       meta: [tag("AWG " + (d.proto || "?"), "accent"), tag(d.profile_label || PROFILES[d.profile] || d.profile || ""),
         tag("MTU " + d.mtu), tag(d.region === "ru" ? "Россия" : "мир", "", "globe")],
       lines: [h("span", { onclick: (ev) => { ev.stopPropagation(); copy(d.endpoint); }, style: "cursor:pointer" }, d.endpoint || "", " ", icon("copy"))],
-      acts: [act("refresh-cw", "Рестарт", (b) => quick(b, "awg0 перезапущен", ["server", "restart"])),
+      acts: [act("refresh-cw", "Рестарт", (b) => quickAsk(b, AWG0_RESTART, "awg0 перезапущен", ["server", "restart"])),
         act("shuffle", "Протокол", () => go("/server/proto")), act("globe", "Endpoint", () => go("/server/endpoint"))] })
       : ecard({ name: "Сервер не создан", right: pill(d.installed ? "компоненты есть" : "нет компонентов", d.installed ? "ok" : "warn"),
         lines: ["Создай сервер — те же вопросы, что в меню awg2"] }),
@@ -2158,7 +2350,7 @@ route(/^\/server\/create$/, async (ctx) => {
   const mtu = h("input", { type: "number", min: 1280, max: 1500 });
   const net = h("input", { placeholder: "случайная 10.x.y.0/24", autocapitalize: "off", autocomplete: "off" });
   const port = h("input", { type: "number", min: 1024, max: 65535, placeholder: "случайный" });
-  const ep = h("input", { placeholder: "IP этого сервера", autocapitalize: "off", autocomplete: "off" });
+  const ep = h("input", { placeholder: "vpn.example.com", autocapitalize: "off", autocomplete: "off" });
   const first = h("input", { placeholder: "случайное", maxlength: 32, autocapitalize: "off", autocomplete: "off" });
 
   function draw() {
@@ -2183,7 +2375,8 @@ route(/^\/server\/create$/, async (ctx) => {
       hint(info.proto31 ? "3.1 — быстрее, заголовки под шифром; клиентам нужен AmneziaVPN 5.0.1.5+ или AmneziaWG с 3.1. "
         + "2.0 — подключится любой клиент AmneziaWG" : why31),
       !info.proto31 && ["tools", "module"].includes(info.proto31_why)
-        ? btn("⬆️ Обновить модуль и tools", () => runJob(ctx, "Обновление модуля и tools", ["module", "all"]), "btn-block") : null,
+        ? btn("⬆️ Обновить модуль и tools", () => jobAsk(ctx, "Собрать и поставить последние модуль ядра и amneziawg-tools? "
+          + "Обычно 5-10 минут; модуль перезагрузится.", "Обновление модуля и tools", ["module", "all"]), "btn-block") : null,
       h("label", {}, "DNS для клиентов"), dnsSel, dnsSel.value === "manual" ? dnsIn : null,
       h("label", {}, `MTU — рекомендуется ${rec}`), mtu,
       h("label", {}, "Подсеть клиентов"), net,
@@ -2200,7 +2393,7 @@ route(/^\/server\/create$/, async (ctx) => {
     const pro = f.profile === "pro", a = [`profile=${f.profile}`, `proto=${f.proto}`, `region=${f.region}`];
     let dns = dnsSel.value === "manual" ? dnsIn.value : DNS[+dnsSel.value][1];
     const ips = dns.split(",").map((x) => x.trim()).filter(Boolean);
-    if (!ips.length || !ips.every((x) => IP_RE.test(x))) throw new Error("DNS: IPv4-адреса через запятую");
+    if (!ips.length || !ips.every(validIp)) throw new Error("DNS: IPv4-адреса через запятую");
     dns = ips.join(", ");
     const m = mtu.value.trim() || (pro ? "1320" : "1280");
     if (!/^\d+$/.test(m) || +m < 1280 || +m > 1500) throw new Error("MTU — число 1280-1500");
@@ -2229,18 +2422,20 @@ route(/^\/server\/create$/, async (ctx) => {
     }
     return a;
   }
-  ctx.put(title("✨ Создание сервера"), box,
-    h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.currentTarget, async () => {
-      const a = args();
-      await runJob(ctx, "Создание сервера", ["server", "create", ...a], (res) => {
-        const name = res && res.client;
-        return name ? [
-          h("div", { class: "card" }, kv("Первый клиент", name)),
-          h("button", { class: "btn-primary btn-block", onclick: () => replace(`/client/${encodeURIComponent(name)}/qr`) }, "📄 Конфиг и QR"),
-          confBtns(name, false),
-        ] : null;
-      }, { onBack: () => replace("/server") });
-    }) }, "✨ Создать сервер"));
+  const createBtn = h("button", { class: "btn-primary btn-block", onclick: (ev) => busy(ev.currentTarget, async () => {
+    const a = args();
+    await runJob(ctx, "Создание сервера", ["server", "create", ...a], (res) => {
+      const name = res && res.client;
+      return name ? [
+        h("div", { class: "card" }, kv("Первый клиент", name)),
+        h("button", { class: "btn-primary btn-block", onclick: () => replace(`/client/${encodeURIComponent(name)}/qr`) }, "📄 Конфиг и QR"),
+        confBtns(name, false),
+      ] : null;
+    // Не вышло — «Назад» к той же форме с введёнными полями, а не к пустой
+    }, { onBack: (ok) => (ok ? replace("/server") : showForm()) });
+  }) }, "✨ Создать сервер");
+  const showForm = () => { ctx.put(title("✨ Создание сервера"), box, createBtn); window.scrollTo(0, 0); };
+  showForm();
 });
 
 route(/^\/server\/proto$/, async (ctx) => {
@@ -2272,8 +2467,8 @@ route(/^\/server\/proto$/, async (ctx) => {
 // (server params check), запись одним вызовом (server params set force)
 const PARAM_GROUPS = [
   ["Мусорные пакеты", 3, [["Jc", "Jc", "сколько"], ["Jmin", "Jmin", "байт"], ["Jmax", "Jmax", "байт"]]],
-  ["Паддинг", 4, [["S1", "S1", "инициация"], ["S2", "S2", "ответ"], ["S3", "S3", "cookie"], ["S4", "S4", "данные"]]],
-  ["Заголовки", 1, [["H1", "H1", "инициация"], ["H2", "H2", "ответ"], ["H3", "H3", "cookie"], ["H4", "H4", "данные"]]],
+  ["Паддинг", 4, [["S1", "S1", "запрос"], ["S2", "S2", "ответ"], ["S3", "S3", "cookie"], ["S4", "S4", "данные"]]],
+  ["Заголовки", 1, [["H1", "H1", "запрос"], ["H2", "H2", "ответ"], ["H3", "H3", "cookie"], ["H4", "H4", "данные"]]],
   ["AWG 3.x", 2, [["ContentPaddingAddition", "Паддинг данных", "байт, a-b"], ["RekeyAfterTime", "RekeyAfter", "с"],
     ["RekeyTimeout", "RekeyTimeout", "с"], ["RejectAfterTime", "RejectAfter", "с"], ["KeepaliveTimeout", "Keepalive", "с"],
     ["MaxHandshakeAttempts", "MaxHandshake", "попыток"]]],
@@ -2312,9 +2507,11 @@ route(/^\/server\/params$/, async (ctx) => {
     const r = last || {};
     if ((r.errors || []).length || !(r.changed || []).length) return;
     const breaking = r.breaking || [];
-    const text = [`Меняются: ${r.changed.join(", ")}.`, ...(r.warnings || []).map((w) => "▲ " + w),
+    // Главное — сразу после списка: длинный текст в Telegram режется с середины (предупреждения)
+    const text = [`Меняются: ${r.changed.join(", ")}.`,
       breaking.length ? `${breaking.join(", ")} обязаны совпадать у клиентов: все клиенты (${d.clients || 0}) потеряют связь `
         + "до получения нового конфига." : "Старые конфиги продолжат работать.",
+      ...(r.warnings || []).map((w) => "▲ " + w),
       "Перед записью — авто-бэкап; не поднимется awg0 — вернутся прежние. Применить?"].join("\n");
     if (!await confirmTg(text)) return;
     const res = await callR(["server", "params", "set", "force", ...edits()]);
@@ -2391,7 +2588,8 @@ route(/^\/server\/module$/, async (ctx) => {
       btn("📋 Версия модуля", pickTag),
       btn("🔁 Перезагрузить", () => jobAsk(ctx, "Перезагрузить модуль? Туннели лягут на несколько секунд, клиенты "
         + "переподключатся сами.", "Перезагрузка модуля", ["module", "reload"])),
-      btn("🧱 Под все ядра", () => runJob(ctx, "Сборка модуля под все ядра", ["module", "rebuild"])),
+      btn("🧱 Под все ядра", () => jobAsk(ctx, "Собрать модуль под все установленные ядра? Несколько минут: заголовки ядер и сборка DKMS.",
+        "Сборка модуля под все ядра", ["module", "rebuild"])),
       d.backups ? btn("⏪ Откат", rollback) : null,
       btn("🔎 Проверить", (b) => quick(b, "Версии проверены", ["module", "check"])),
       btn("📜 Журнал сборки", () => go("/log/module"))),
@@ -2404,6 +2602,7 @@ const STATE_WORD = { up: "включён", off: "выключен", none: "не 
 const TUNNELS = [["warp", "☁️", "WARP", "Cloudflare"], ["xray", "🛰", "Xray", "VLESS, VMess, Trojan, SS"],
   ["tun2socks", "🧦", "tun2socks", "внешний SOCKS5"], ["exits", "🚪", "Exit-ноды WG", "другие AWG/WG-серверы"]];
 const TUNNEL_ICON = { warp: "cloud", xray: "satellite", tun2socks: "waypoints", exits: "door-open" };
+const tunnelDown = (t) => `Выключить ${t}? Клиенты, идущие через него, пойдут напрямую через сервер; настройки сохранятся.`;
 route(/^\/tunnels$/, async (ctx) => {
   const d = (await call("tunnels", "status")) || {};
   const n = d.cascade || 0;
@@ -2434,11 +2633,23 @@ route(/^\/tunnels\/(warp|xray)\/clients$/, async (ctx, kind) => {
   const t = kind === "warp" ? "WARP" : "Xray";
   const rows = (await call("tunnels", "clients", kind)) || [];
   const list = h("div", { class: "card list" });
-  const draw = () => list.replaceChildren(...(rows.length ? rows.map((c) => h("div", { class: "item", onclick: () => busy(null, async () => {
-    await call("tunnels", "client", kind, c.name, c.on ? "off" : "on");
-    c.on = !c.on; haptic(); draw();
-  }) }, h("div", { class: "main" }, h("div", { class: "title" }, c.name), h("div", { class: "sub" }, `${c.ip} · ${c.on ? "через " + t : "напрямую"}`)),
-  h("div", { class: "switch" + (c.on ? " on" : "") }))) : [h("div", { class: "empty" }, "Клиентов нет")]));
+  // Строка на время запроса не нажимается (двойной тап — один запрос), итог —
+  // то, что отправили, а не «наоборот от того, что было»
+  const flip = (c, row) => {
+    if (c.busy) return;
+    const next = !c.on;
+    c.busy = true; row.classList.add("reloading");
+    busy(null, async () => {
+      await call("tunnels", "client", kind, c.name, next ? "on" : "off");
+      c.on = next; haptic();
+    }).then(() => { c.busy = false; draw(); });
+  };
+  const draw = () => list.replaceChildren(...(rows.length ? rows.map((c) => {
+    const row = h("div", { class: "item" + (c.busy ? " reloading" : ""), "data-name": c.name, onclick: () => flip(c, row) },
+      h("div", { class: "main" }, h("div", { class: "title" }, c.name), h("div", { class: "sub" }, `${c.ip} · ${c.on ? "через " + t : "напрямую"}`)),
+      h("div", { class: "switch" + (c.on ? " on" : "") }));
+    return row;
+  }) : [h("div", { class: "empty" }, "Клиентов нет")]));
   draw();
   ctx.put(title(`👥 Клиенты в ${t}`), hint(`Включено — клиент выходит через ${t}, выключено — напрямую через сервер.`), list,
     rows.length ? h("div", { class: "bar" },
@@ -2462,7 +2673,7 @@ route(/^\/tunnels\/warp$/, async (ctx) => {
       (on) => call("warp", "health", on ? "on" : "off")) : null,
     h("div", { class: "actions" },
       conf && !d.up ? btn("▶️ Включить", () => runJob(ctx, "Включение WARP", ["warp", "up"]), "btn-primary") : null,
-      d.up ? btn("⏹ Выключить", (b) => quick(b, "WARP выключен", ["warp", "down"])) : null,
+      d.up ? btn("⏹ Выключить", (b) => quickAsk(b, tunnelDown("WARP"), "WARP выключен", ["warp", "down"])) : null,
       conf ? btn("👥 Клиенты", () => go("/tunnels/warp/clients")) : null,
       btn(conf ? "📦 Переустановить" : "📦 Установить", () => runJob(ctx, conf ? "Переустановка WARP" : "Установка WARP", ["warp", "install"]),
         conf ? null : "btn-primary"),
@@ -2558,8 +2769,9 @@ route(/^\/tunnels\/xray$/, async (ctx) => {
     inst ? h("div", { class: "actions" },
       btn("📦 Обновить", () => runJob(ctx, "Обновление Xray", ["xray", "install"])),
       tags.length && !d.up ? btn("▶️ Включить", () => runJob(ctx, "Включение Xray", ["xray", "up"]), "btn-primary") : null,
-      d.up ? btn("⏹ Выключить", (b) => quick(b, "Xray выключен", ["xray", "down"])) : null,
-      d.up ? btn("🔄 Перезапустить", () => runJob(ctx, "Перезапуск Xray", ["xray", "restart"])) : null,
+      d.up ? btn("⏹ Выключить", (b) => quickAsk(b, tunnelDown("Xray"), "Xray выключен", ["xray", "down"])) : null,
+      d.up ? btn("🔄 Перезапустить", () => jobAsk(ctx, "Перезапустить Xray? Клиенты, идущие через него, на несколько секунд "
+        + "потеряют связь.", "Перезапуск Xray", ["xray", "restart"])) : null,
       btn("👥 Клиенты", () => go("/tunnels/xray/clients")),
       btn("🩺 Диагностика", () => runJob(ctx, "Диагностика Xray", ["xray", "diag"])),
       btn("🛠 Починить", (b) => busy(b, async () => {
@@ -2595,7 +2807,7 @@ route(/^\/tunnels\/tun2socks$/, async (ctx) => {
         return runJob(ctx, "Включение tun2socks", ["t2s", "up", v]);
       }, "btn-primary btn-block")],
     h("div", { class: "actions", style: "margin-top:8px" },
-      d.up ? btn("⏹ Выключить", (b) => quick(b, "tun2socks выключен", ["t2s", "down"])) : null,
+      d.up ? btn("⏹ Выключить", (b) => quickAsk(b, tunnelDown("tun2socks"), "tun2socks выключен", ["t2s", "down"])) : null,
       btn("📜 Журнал", () => go("/log/tun2socks")),
       d.proxy ? btn("🗑 Удалить", (b) => quickAsk(b, "Удалить tun2socks (служба, бинарь, адрес прокси)?", "tun2socks удалён",
         ["t2s", "remove"]), "btn-danger") : null));
@@ -2746,7 +2958,7 @@ route(/^\/tunnels\/cascade\/add$/, async (ctx) => {
     btn("Добавить", (b) => {
       const a = pin.value.trim(), ip = dst.value.trim(), o = pout.value.trim() || a, c = cm.value.trim();
       if (!validPort(a)) return fail(new Error("Порт на этом сервере — число 1-65535"));
-      if (!IP_RE.test(ip)) return fail(new Error("Нужен IPv4, например 5.6.7.8"));
+      if (!validIp(ip)) return fail(new Error("Нужен IPv4, например 5.6.7.8"));
       if (!validPort(o)) return fail(new Error("Порт назначения — число 1-65535"));
       return quick(b, "Правило добавлено", ["cascade", "add", proto, a, ip, o, ...(c ? [c] : [])], () => back());
     }, "btn-primary btn-block"));
@@ -2872,7 +3084,8 @@ async function uploadBackup(file) {
   if (file.size > BACKUP_MAX) throw new Error("Файл больше 20 МБ — это не бэкап awg2");
   const r = await fetch(url("/api/backup/upload"), { method: "POST", body: file, credentials: "same-origin",
     headers: WEB ? { "Content-Type": "application/octet-stream" }
-      : { Authorization: "tma " + (tg ? tg.initData : ""), "Content-Type": "application/octet-stream" } });
+      : { Authorization: "tma " + (tg ? tg.initData : ""), "Content-Type": "application/octet-stream" } })
+    .catch(() => { throw new Error("Нет связи с сервером"); });
   const d = await r.json().catch(() => ({}));
   if (!r.ok || d.ok === false) throw new Error(d.error || `HTTP ${r.status}`);
   return d.path;
@@ -2892,9 +3105,10 @@ function autoBackupCard(a, redraw) {
     haptic(); if (msg) toast(msg, 3000);
     redraw(r);
   });
+  // Веб-панель без Telegram-бота: присылать некому — настройки не показываем
   return h("div", { class: "card", "data-name": "autobackup", style: "margin-top:12px" },
     h("div", { class: "kv" }, h("b", {}, "Автобэкап"), h("span", { class: "muted small" }, autoLine(b))),
-    a.owner ? [
+    a.owner && !noBot() ? [
       segText(BACKUP_MODES, b.mode, (m) => set({ backup_mode: m }, m === "off" ? "Автобэкап выключен" : "Первый автобэкап придёт в чат в течение пары минут")),
       h("div", { class: "row", style: "gap:8px;align-items:center;margin-top:8px" }, h("span", { class: "muted small" }, "Хранить на сервере:"),
         segText([3, 7, 14, 30].map((n) => [n, String(n)]), b.keep, (n) => set({ backup_keep: n }))),
@@ -2908,7 +3122,7 @@ function autoBackupCard(a, redraw) {
     ] : null,
     hint((WEB ? "Автобэкап присылает Telegram-бот" + (S.me && S.me.tg_bot ? "" : " — он не установлен") + ". " : "")
       + "Полный бэкап по расписанию — файлом в чат, только владельцам: в нём приватные ключи. "
-      + "Из автобэкапов на сервере остаются последние N, сделанные вручную не трогаются."));
+      + `Из автобэкапов на сервере остаются последние ${b.keep || 7}, сделанные вручную не трогаются.`));
 }
 
 route(/^\/backup$/, async (ctx) => {
@@ -3161,7 +3375,8 @@ route(/^\/wgobf$/, async (ctx) => {
         tag("wg-obfuscator " + (d.version || ""))],
       lines: [h("span", { style: "cursor:pointer", onclick: (ev) => { ev.stopPropagation(); copy(d.endpoint); } },
         d.endpoint || "", " ", icon("copy"))],
-      acts: [act("refresh-cw", "Рестарт", (b) => quick(b, "Перезапущено", ["wgobf", "restart"])),
+      acts: [act("refresh-cw", "Рестарт", (b) => quickAsk(b, "Перезапустить обфускатор? Его клиенты на несколько секунд потеряют "
+        + "связь и переподключатся сами.", "Перезапущено", ["wgobf", "restart"])),
         act("key", "Ключ", (b) => quickAsk(b, "Сменить ключ обфускатора? Все клиенты отключатся, пока не получат новый комплект.",
           "Ключ сменён", ["wgobf", "rotate-key"])),
         act("file-text", "Журнал", () => go("/log/wgobf"))] }),
@@ -3218,13 +3433,13 @@ route(/^\/wgobf\/client\/([^/]+)$/, async (ctx, name) => {
         d.link.length > 90 ? d.link.slice(0, 90) + "…" : d.link),
       h("div", { class: "muted small", style: "margin-top:4px" }, `AWG Manager → «Phobos» — одной вставкой · ${d.link.length} символов`)),
       copyBtn("Скопировать ссылку", d.link, "btn-primary btn-block")] : null,
-    d.conf ? [h("h2", {}, "Конфиг"), hint("WireGuard и секция [instance] обфускатора — тот же файл .conf, что приходит в чат."),
+    d.conf ? [h("h2", {}, "Конфиг"), hint("WireGuard и секция [instance] обфускатора — тот же файл .conf, что " + TO("приходит в чат.", "скачивается кнопкой.")),
       h("pre", {}, d.conf), copyBtn("Скопировать конфиг", d.conf)] : null,
     d.direct ? [h("h2", {}, "Чистый WireGuard"), hint("Без обфускатора — для iOS и обычного WireGuard. DPI его видит."),
       d.png ? h("img", { class: "qr", src: "data:image/png;base64," + d.png, alt: "QR" }) : null,
       copyBtn("Скопировать конфиг", d.direct)] : null,
     btn("🗑 Удалить клиента", (b) => quickAsk(b, `Удалить клиента ${name}?`, "Клиент удалён", ["wgobf", "del", name],
-      () => replace("/wgobf")), "btn-danger btn-block"));
+      () => backWith((p) => (/^\/wgobf\/client\//.test(p) ? "/wgobf" : null))), "btn-danger btn-block"));
 });
 
 // ── Бот ───────────────────────────────────────────────────
@@ -3256,8 +3471,9 @@ async function botRestarting(started, what, running = true) {
 function panelMoved(ctx, head, text) {
   post("/api/bot/webapp/restart").catch(() => {});
   ctx.put(title(head), h("div", { class: "card" }, text),
-    hint("Закрой панель и открой её снова кнопкой «Меню» в чате с ботом."),
-    btn("Закрыть панель", () => (tg && tg.close ? tg.close() : null), "btn-primary btn-block"));
+    hint(WEB ? "Mini App в Telegram откроется по новому адресу: закрой её и открой снова кнопкой «Меню» в чате с ботом."
+      : "Закрой панель и открой её снова кнопкой «Меню» в чате с ботом."),
+    tg ? btn("Закрыть панель", () => (tg.close ? tg.close() : null), "btn-primary btn-block") : null);
 }
 
 route(/^\/bot$/, async (ctx) => {
@@ -3380,7 +3596,7 @@ route(/^\/bot\/admins$/, async (ctx) => {
     const r = await busy(b, () => post("/api/bot/invite"));
     if (!r) return;
     const box = h("div", { class: "sheet" });
-    const bg = h("div", { class: "sheet-bg", onclick: (ev) => { if (ev.target === bg) { bg.remove(); render(); } } }, box);
+    let close = null;
     const until = new Date(r.expires * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
     box.append(h("h3", {}, "Приглашение"),
       hint(`Одноразовая ссылка, сгорит в ${until}. Перешли тому, кому даёшь доступ.`),
@@ -3391,8 +3607,9 @@ route(/^\/bot\/admins$/, async (ctx) => {
         if (tg && tg.openTelegramLink) tg.openTelegramLink(share); else window.open(share, "_blank", "noopener");
       } }, icon("share-2"), "Переслать в Telegram"),
       hint("⚠️ Админ может всё, кроме управления списком админов: бот — это root на сервере."),
-      h("button", { class: "btn-primary", onclick: () => { bg.remove(); render(); } }, "Готово"));
-    document.body.append(bg);
+      h("button", { class: "btn-primary", onclick: () => close() }, "Готово"));
+    // Закрыли — список приглашений обновляется; закрыт сменой экрана — обновлять нечего
+    close = sheetOpen(box, (nav) => { if (!nav) render(); });
   }
   const who = (x) => (x.username ? "@" + x.username : String(x.uid));
   ctx.put(title("Админы"),
@@ -3434,9 +3651,9 @@ route(/^\/bot\/look$/, async (ctx) => {
   });
   ctx.put(title("Оформление"),
     ecard({ state: ic.active ? "on" : "", name: "Иконки в боте", right: pill(ic.active ? "включены" : "выключены", ic.active ? "ok" : ""),
-      meta: [ic.pack ? tag(ic.pack, "accent", "palette") : tag("набор не выбран"), ic.count ? tag(`${ic.count} иконок`) : null],
+      meta: [ic.pack ? tag(ic.pack, "accent", "palette") : tag("набор не выбран"), ic.count ? tag(`${ic.count} ${plural(ic.count, "иконка", "иконки", "иконок")}`) : null],
       lines: ["custom emoji вместо эмодзи в тексте и на кнопках"] }),
-    hint("Цветные кнопки в боте — всегда. Иконки бот может показывать, только если у владельца бота (аккаунт, создавший "
+    hint("Иконки бот может показывать, только если у владельца бота (аккаунт, создавший "
       + "его в @BotFather) есть Telegram Premium или у бота имя с Fragment. Перестанут быть видны — бот сам вернётся к эмодзи."),
     btn(`📥 Набор ${ic.default || "TgAndroidIcons"}`, (b) => apply(b, { action: "pack", name: ic.default }), "btn-primary btn-block"),
     h("label", {}, "Свой набор — ссылка на набор эмодзи"), pack,
@@ -3462,7 +3679,7 @@ route(/^\/bot\/app$/, async (ctx) => {
   // После выпуска — перезапуск сервера Mini App: иначе при смене домен ↔ IP
   // адрес панели и кнопка «Меню» остаются старыми при новом сертификате.
   const issueJob = (head, args, after) => runJob(ctx, head, args, () => [
-    hint(after), btn("Закрыть панель", () => (tg && tg.close ? tg.close() : null), "btn-primary btn-block")])
+    hint(after), tg ? btn("Закрыть панель", () => (tg.close ? tg.close() : null), "btn-primary btn-block") : null])
     .then(() => post("/api/bot/webapp/restart").catch(() => {}));
   // Готовый сертификат сервера: выбрать из найденных и сослаться на него
   const useFound = async () => {
@@ -3540,9 +3757,9 @@ route(/^\/bot\/app$/, async (ctx) => {
 });
 
 // ── Журналы служб ─────────────────────────────────────────
-const LOGS = { manager: "awg2 — действия", install: "компоненты", module: "сборка модуля", awg: "awg0 (awg-quick)",
-  expire: "сроки клиентов", warp: "WARP", "warp-health": "WARP health-check", usque: "usque (WARP MASQUE)", xray: "Xray",
-  "xray-routing": "маршруты Xray", tun2socks: "tun2socks", exits: "exit-ноды", cascade: "каскад", dns: "dnscrypt-proxy",
+const LOGS = { manager: "awg2 — действия", install: "Компоненты", module: "Сборка модуля", awg: "awg0 (awg-quick)",
+  expire: "Сроки клиентов", warp: "WARP", "warp-health": "WARP health-check", usque: "usque (WARP MASQUE)", xray: "Xray",
+  "xray-routing": "Маршруты Xray", tun2socks: "tun2socks", exits: "Exit-ноды", cascade: "Каскад", dns: "dnscrypt-proxy",
   "dns-health": "DNS health-check", wgobf: "WG + обфускатор", bot: "Telegram-бот" };
 
 route(/^\/log\/([a-z0-9-]+)$/, async (ctx, name) => {
@@ -3561,11 +3778,11 @@ function showLogin(err = "") {
   root.classList.remove("reloading");
   delete root.dataset.path;
   SNAP.clear();
-  closeDrawer(); closeLook(); closePal();
+  closeDrawer(); closeOverlays(); closePal();
   drawTop();
-  const user = h("input", { autocomplete: "username", placeholder: "Логин", maxlength: "64", "aria-label": "Логин" });
+  const user = h("input", { autocomplete: "username", placeholder: "Логин", maxlength: "64", "aria-label": "Логин", required: "" });
   const pass = h("input", { type: "password", autocomplete: "current-password", placeholder: "Пароль", maxlength: "256",
-    "aria-label": "Пароль" });
+    "aria-label": "Пароль", required: "" });
   const msg = h("div", { class: "bad small", style: "min-height:18px;margin:6px 2px" }, err);
   const enter = h("button", { class: "btn-primary btn-block", type: "submit" }, icon("lock"), "Войти");
   const form = h("form", { class: "card login", onsubmit: async (ev) => {
@@ -3575,7 +3792,8 @@ function showLogin(err = "") {
     try {
       const r = await fetch(url("/api/login"), { method: "POST", credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user: user.value.trim(), password: pass.value }) });
+        body: JSON.stringify({ user: user.value.trim(), password: pass.value }) })
+        .catch(() => { throw new Error("Нет связи с сервером"); });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       pass.value = "";
@@ -3627,12 +3845,12 @@ route(/^\/account$/, async (ctx) => {
       + "Настоящий: sudo awg2 → Веб-панель → Сертификат (на IP — Let's Encrypt, нужен свободный порт 80).") : null,
     h("h2", {}, "Сменить пароль"),
     h("div", { class: "card" }, old, nw, nw2,
-      btn("🔑 Сменить пароль", (b) => busy(b, async () => {
+      enterTo(btn("🔑 Сменить пароль", (b) => busy(b, async () => {
         if (nw.value !== nw2.value) throw new Error("Новые пароли не совпадают");
         const r = await post("/api/web/password", { old: old.value, new: nw.value });
         old.value = nw.value = nw2.value = "";
         haptic(); toast(`✅ Пароль сменён${r.dropped ? `, другие сессии завершены: ${r.dropped}` : ""}`, 4000); render();
-      }), "btn-primary btn-block")),
+      }), "btn-primary btn-block"), old, nw, nw2)),
     hint("Пароль хранится на сервере только хешем (scrypt). Забыли — sudo awg2 → Веб-панель → Сменить пароль."),
     h("h2", {}, "Сессии"),
     h("div", { class: "card list" }, (d.sessions || []).map((x) => h("div", { class: "item" },
@@ -3685,7 +3903,7 @@ if (tg && tg.initData && /Edge\/1\d\./.test(navigator.userAgent) && pref("wv2", 
   const bar = h("div", { class: "card warn wv2", style: "margin:10px 14px 0" },
     "Telegram открыл панель в старом движке Edge — вид упрощён. Поставь Microsoft Edge WebView2 Runtime и перезапусти Telegram: "
     + "панель будет как на телефоне. ",
-    h("a", { href: WV2_URL, onclick: (ev) => { ev.preventDefault(); if (tg.openLink) tg.openLink(WV2_URL); else window.open(WV2_URL, "_blank"); } },
+    h("a", { href: WV2_URL, onclick: (ev) => { ev.preventDefault(); if (tg.openLink) tg.openLink(WV2_URL); else window.open(WV2_URL, "_blank", "noopener"); } },
       "Скачать WebView2"),
     " · ",
     h("a", { href: "#", onclick: (ev) => { ev.preventDefault(); setPref("wv2", new Date().toDateString()); bar.remove(); } }, "Скрыть"));

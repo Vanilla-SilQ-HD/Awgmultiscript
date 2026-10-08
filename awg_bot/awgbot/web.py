@@ -195,7 +195,8 @@ class Sessions:
         self.items[self._key(token)] = {"user": user, "created": now, "seen": now, "ip": ip, "ua": ua[:160]}
         return token
 
-    def get(self, token: str, now: float | None = None) -> dict | None:
+    def get(self, token: str, now: float | None = None, touch: bool = True) -> dict | None:
+        """touch=False — фоновый опрос панели: проверяет, но не продлевает простой."""
         if not token or len(token) > 100:
             return None
         key = self._key(token)
@@ -204,7 +205,7 @@ class Sessions:
         if s and (now - s["seen"] > IDLE or now - s["created"] > LIFETIME):
             self.items.pop(key, None)
             return None
-        if s:
+        if s and touch:
             s["seen"] = now
         return s
 
@@ -319,7 +320,7 @@ class WebPanel:
 
     # ── пользователь запроса ──
     def user_of(self, request: web.Request) -> dict:
-        s = self.sessions.get(request.cookies.get(COOKIE, ""))
+        s = self.sessions.get(request.cookies.get(COOKIE, ""), touch=request.headers.get("X-Awg-Bg") != "1")
         if not s:
             raise web.HTTPUnauthorized(text=json.dumps({"error": "Нужен вход", "login": True}),
                                        content_type="application/json")

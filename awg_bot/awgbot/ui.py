@@ -244,7 +244,7 @@ def clip(text: str, limit: int = TEXT_MAX) -> str:
 def fmt_bytes(n: int | None) -> str:
     n = int(n or 0)
     for unit in ("Б", "КБ", "МБ", "ГБ"):
-        if n < 1024:
+        if n < (1024 if unit == "Б" else 1023.95):      # иначе «1024.0 КБ»
             return f"{n} {unit}" if unit == "Б" else f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} ТБ"
@@ -368,7 +368,9 @@ async def render(target: Target, text: str, markup: InlineKeyboardMarkup | None 
         with contextlib.suppress(TelegramBadRequest):   # колбэк старше 15 минут
             await target.answer()
         if not isinstance(msg, Message):
-            return None
+            # Сообщение старше 48 часов (InaccessibleMessage) не правится — отвечаем новым,
+            # иначе кнопка вчерашнего меню или уведомления молча ничего не делает
+            return await show_new(bot, msg.chat.id, text, markup) if msg is not None else None
         try:
             out = await msg.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
         except TelegramBadRequest as e:

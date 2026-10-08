@@ -168,6 +168,105 @@ const say = (ok, label) => console.log(`${ok ? "OK" : "FAIL"} ${label}`);
         if (w[0] !== 0 || w[2] !== 0 || w[1] < w[4] - 20 || w[3] < w[4] - 20) throw new Error("left/width: " + w);
       });
     }
+    if (name === "ПК") {
+      await step("узкий ПК (1001–1100 px): таблица клиентов не раздвигает страницу, логотип не под плашкой сервера", async () => {
+        for (const w of [1001, 1024, 1100]) {
+          await page.setViewportSize({ width: w, height: 800 });
+          await page.goto(u + "#/clients");
+          await page.waitForSelector(".ctable tbody tr[data-name=alice]");
+          await page.waitForTimeout(400);
+          const r = await page.evaluate(() => {
+            const lk = document.querySelector(".top .lockup").getBoundingClientRect(), sv = document.querySelector(".top .srv");
+            return [document.documentElement.scrollWidth, innerWidth, lk.right, sv ? sv.getBoundingClientRect().left : 1e9];
+          });
+          if (r[0] > r[1]) throw new Error(`${w}: страница ${r[0]} > ${r[1]}`);
+          if (r[2] > r[3] + 1) throw new Error(`${w}: логотип до ${r[2]}, плашка с ${r[3]}`);
+        }
+        await page.setViewportSize({ width: 1366, height: 860 });
+      });
+      await step("выбор нескольких: поиск спрятал выбранного — удалять нечего; плашка над нижней панелью", async () => {
+        await page.goto(u + "#/clients");
+        await page.waitForSelector(".ctable tbody tr[data-name=alice]");
+        await page.click("button:has-text('Выбрать')");
+        await page.click(".ctable tbody tr[data-name=alice]");
+        await page.waitForSelector(".bar button.btn-danger:not([disabled])");
+        await page.fill("input[type=search]", "bob");
+        await page.waitForFunction(() => !document.querySelector(".ctable tbody tr[data-name=alice]"));
+        const del = await page.evaluate(() => { const b = document.querySelector(".bar button.btn-danger"); return [b.disabled, b.textContent.trim()]; });
+        if (!del[0] || /\d/.test(del[1])) throw new Error("скрытый поиском клиент остаётся к удалению: " + del);
+        await page.fill("input[type=search]", "");
+        await page.setViewportSize({ width: 800, height: 900 });
+        await page.waitForTimeout(300);
+        const pos = await page.evaluate(() => [document.querySelector(".bar").getBoundingClientRect().bottom,
+          document.querySelector("#tabbar").getBoundingClientRect().top]);
+        await page.setViewportSize({ width: 1366, height: 860 });
+        await page.click(".bar button:has-text('Отмена')");
+        if (pos[0] > pos[1] + 1) throw new Error("плашка выбора на нижней панели: " + pos);
+      });
+    } else {
+      await step("длинное имя без пробелов в заголовке не раздвигает страницу", async () => {
+        const r = await page.evaluate(() => {
+          const t = document.createElement("h1");
+          t.textContent = "abcdefghijklmnopqrstuvwxyz012345";
+          document.getElementById("app").prepend(t);
+          const w = document.documentElement.scrollWidth;
+          t.remove();
+          return [w, innerWidth];
+        });
+        if (r[0] > r[1]) throw new Error("страница " + r[0] + " > " + r[1]);
+      });
+    }
+    await step("новый клиент: фокус в поле имени, Enter создаёт", async () => {
+      const nm = name === "ПК" ? "enterpc" : "enterph";
+      await page.goto(u + "#/add");
+      await page.waitForSelector("#app input[placeholder=anna_phone]");
+      await page.waitForFunction(() => document.activeElement && document.activeElement.placeholder === "anna_phone", null, { timeout: 3000 })
+        .catch(() => { throw new Error("фокус не в поле имени"); });
+      await page.keyboard.type(nm);
+      await page.keyboard.press("Enter");
+      await page.waitForURL(new RegExp(`#/client/${nm}/qr$`), { timeout: 10000 });
+    });
+    await step("ошибка — листом панели с текстом, а не окном браузера; Enter в переименовании", async () => {
+      const dialogs = [];
+      const onDialog = (d) => { dialogs.push(d.message()); d.dismiss().catch(() => {}); };
+      page.on("dialog", onDialog);
+      await page.goto(u + "#/client/alice/rename");
+      await page.waitForSelector("input[maxlength='32']");
+      await page.fill("input[maxlength='32']", "bad name!");
+      await page.press("input[maxlength='32']", "Enter");
+      await page.waitForSelector(".sheet[role=dialog] h3:has-text('Имя: латиница')", { timeout: 5000 })
+        .catch(() => { throw new Error("нет листа с ошибкой; окна браузера: " + JSON.stringify(dialogs)); });
+      page.off("dialog", onDialog);
+      if (dialogs.length) throw new Error("окно браузера: " + dialogs.join(" | "));
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(() => !document.querySelector(".sheet-bg"));
+    });
+    if (name === "ПК") {
+      await step("окна поверх страницы: фокус внутрь, Tab не уходит под окно, закрыли — фокус к кнопке", async () => {
+        await page.goto(u + "#/clients");
+        await page.waitForSelector(".ctable tbody tr[data-name=alice]");
+        await page.click(".head button:has-text('Новый клиент')");
+        await page.waitForSelector(".sheet[role=dialog][aria-modal=true]");
+        const inSheet = () => page.evaluate(() => !!(document.activeElement && document.activeElement.closest(".sheet")));
+        if (!await inSheet()) throw new Error("фокус не в листе");
+        for (let i = 0; i < 5; i++) await page.keyboard.press("Tab");
+        if (!await inSheet()) throw new Error("Tab увёл фокус из листа");
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(() => !document.querySelector(".sheet-bg"));
+        const back = await page.evaluate(() => (document.activeElement || {}).textContent || "");
+        if (!/Новый клиент/.test(back)) throw new Error("фокус после закрытия: " + back);
+        await page.keyboard.press("Control+k");
+        await page.waitForSelector(".pal.on [role=dialog]");
+        for (let i = 0; i < 4; i++) await page.keyboard.press("Tab");
+        if (!await page.evaluate(() => !!document.activeElement.closest(".pal"))) throw new Error("Tab увёл фокус из палитры");
+        await page.keyboard.press("Escape");
+        await page.click("tr[data-name=alice]");
+        await page.waitForSelector(".drawer.on[role=dialog]");
+        if (!await page.evaluate(() => !!document.activeElement.closest("#drawer"))) throw new Error("фокус не в карточке справа");
+        await page.keyboard.press("Escape");
+        await page.waitForURL(/#\/clients$/);
+      });
+    }
     await step("аккаунт: смена пароля и сессии", async () => {
       await page.goto(u + "#/account");
       await page.waitForSelector("text=Сменить пароль");

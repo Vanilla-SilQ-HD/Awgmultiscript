@@ -159,6 +159,9 @@ async def _sort(cb: CallbackQuery, state: FSMContext, mode: str) -> None:
     await list_screen(cb)
 
 
+ACTIVITY_MAX = 3600          # текст одной страницы «Трафика»: с шапкой — в лимит Telegram
+
+
 @act("activity")
 async def _activity(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     rows = await clients()
@@ -172,11 +175,26 @@ async def _activity(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
                      + (f" · месяц {ui.fmt_bytes(c['month'])}" if c.get("month") else "")
                      + (f"\n    📶 {limit_text(c)}" if c.get("limit") else "")
                      + (f"\n    ⏳ {ui.fmt_expire(c['expires'])}" if c.get("expires") and not c.get("blocked") else ""))
-    text = "<b>📊 Активность и трафик</b>\n\n" + "\n".join(lines)
-    if len(text) > ui.TEXT_MAX:
-        text = text[:ui.TEXT_MAX - 20].rsplit("\n", 1)[0] + "\n…"
-    await ui.render(cb, text, ui.kb(("🔄 Обновить", act.data("activity")), ("📈 По дням", act.data("tsrv")),
-                                    ui.back("cl")))
+    # Страницы — по объёму текста, а не по числу клиентов: у кого лимит и срок,
+    # тот длиннее. Срез одним сообщением прятал всех после ~50-го
+    pages: list[list[str]] = [[]]
+    size = 0
+    for line in lines:
+        if pages[-1] and size + len(line) > ACTIVITY_MAX:
+            pages.append([])
+            size = 0
+        pages[-1].append(line)
+        size += len(line) + 1
+    page = min(int(arg) if arg.isdigit() else 0, len(pages) - 1)
+    text = ("<b>📊 Активность и трафик</b>"
+            + (f" · стр. {page + 1} из {len(pages)}" if len(pages) > 1 else "") + "\n\n" + "\n".join(pages[page]))
+    nav: list[ui.Button] = []
+    if page > 0:
+        nav.append((f"◀️ Стр. {page}", act.data("activity", str(page - 1))))
+    if page < len(pages) - 1:
+        nav.append((f"Стр. {page + 2} ▶️", act.data("activity", str(page + 1))))
+    await ui.render(cb, text, ui.kb(("🔄 Обновить", act.data("activity", str(page))),
+                                    ("📈 По дням", act.data("tsrv")), nav, ui.back("cl")))
 
 
 @act("export")
@@ -289,7 +307,7 @@ def card_text(c: dict, route: dict) -> str:
         f"Лимит: {limit_text(c)}" if c.get("limit") else "",
         f"Адрес клиента: <code>{esc(c['endpoint'].rsplit(':', 1)[0])}</code>" if c.get("endpoint") else "",
         f"Срок: {ui.fmt_expire(c.get('expires'))}",
-        f"Мимикрия: {esc(c.get('mimicry') or 'none')}",
+        f"Мимикрия: {esc(c['mimicry']) if c.get('mimicry') not in (None, '', 'none') else 'без I1-I5'}",
         f"Маршрут: {route_of(c, route)}",
         f"Заметка: {esc(note)}" if note else "",
         f"Мониторинг: {'🔔 вкл' if store.monitored(name) else '🔕 выкл'}",
@@ -369,8 +387,8 @@ async def _pick_screen(target: ui.Target, state: FSMContext, page: int = 0) -> N
     await ui.render(target, "<b>🗑 Удалить клиентов</b>\nОтметь, кого удалить. Их конфиги перестанут работать.\n\n"
                             + (f"Отмечено: {len(sel)}" if sel else "Никто не отмечен.") + odd_note(odd),
                     ui.kb(ui.paged(buttons, page, lambda p: act.data("dsp", str(p))),
-                          ("☑️ Отметить всех", act.data("dsa", "all")) if len(sel) < len(rows) else None,
-                          ("⬜️ Снять все", act.data("dsa", "none")) if sel else None,
+                          ("☑️ Отметить всех", act.data("dsa", f"{page}|all")) if len(sel) < len(rows) else None,
+                          ("⬜️ Снять все", act.data("dsa", f"{page}|none")) if sel else None,
                           (f"🗑 Удалить: {len(sel)}", act.data("dsgo")) if sel else None,
                           ui.back("cl")))
 
@@ -399,10 +417,11 @@ async def _dsel_toggle(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 
 
 @act("dsa")
-async def _dsel_all(cb: CallbackQuery, state: FSMContext, what: str) -> None:
+async def _dsel_all(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    page, _, what = arg.rpartition("|")         # страница — та же, что была открыта
     rows, _ = usable(await clients() or [])
     await state.update_data(del_sel=[c["name"] for c in rows] if what == "all" else [])
-    await _pick_screen(cb, state)
+    await _pick_screen(cb, state, int(page) if page.isdigit() else 0)
 
 
 @act("dsgo")
@@ -501,7 +520,7 @@ async def _exp(cb: CallbackQuery, state: FSMContext, name: str) -> None:
 async def _ex(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     name, _, v = arg.partition("|")
     if v == "date":
-        await ask.ask(cb, state, "cl_exdate", "Дата окончания: <code>ГГГГ-ММ-ДД ЧЧ:ММ</code>",
+        await ask.ask(cb, state, "cl_exdate", "Дата окончания: <code>ГГГГ-ММ-ДД ЧЧ:ММ</code> (время сервера)",
                       act.data("exp", name), name=name)
         return
     r = await (api.call("client", "unexpire", name) if v == "none" else api.call("client", "expire", name, v))
@@ -520,11 +539,23 @@ def parse_date(text: str) -> int | None:
     return None
 
 
+def future_date(text: str) -> tuple[int, str]:
+    """Дата окончания из ввода и что с ней не так (пусто — годится). Пример —
+    через месяц от сегодня: зашитая дата сама когда-нибудь станет прошлым."""
+    ts = parse_date(text)
+    example = time.strftime("%Y-%m-%d 23:59", time.localtime(time.time() + 30 * 86400))
+    if not ts:
+        return 0, f"Формат даты: ГГГГ-ММ-ДД ЧЧ:ММ, например {example} (время сервера)"
+    if ts <= time.time() + 60:
+        return 0, f"Эта дата уже прошла: на сервере сейчас {ui.fmt_time(int(time.time()))}. Например {example}"
+    return ts, ""
+
+
 @ask.on("cl_exdate")
 async def _exdate(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
-    ts = parse_date(ask.text_of(msg))
-    if not ts or ts <= time.time() + 60:
-        await ask.retry(msg, state, ctx, "Нужна дата в будущем, например 2026-12-31 23:59")
+    ts, why = future_date(ask.text_of(msg))
+    if why:
+        await ask.retry(msg, state, ctx, why)
         return
     r = await api.call("client", "expire", ctx["name"], ts)
     if not r.ok:
@@ -676,10 +707,12 @@ async def mimicry_screen(target: ui.Target, title: str, pick: str, back_to: str,
 @act("lvl")
 async def _lvl(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     pick, _, rest = arg.partition("|")
+    # «Назад» — к выбору профиля: у клиента (ms) — его мимикрия, у нового (nm) — шаг мастера
+    back_to = act.data("mim", rest.partition("|")[0]) if pick == "ms" else act.data("nmb")
     await ui.render(cb, "<b>Уровень мимикрии</b>\n• Цепочка I1-I5 — полная\n"
                         "• Только I1 — один пакет: Keenetic читает только его\nWireSock не читает I1-I5 вовсе.",
                     ui.kb([(label, act.data(pick, f"{rest}:{lvl}")) for label, lvl in LEVELS],
-                          ui.back("cl")))
+                          ui.back(back_to)))
 
 
 @act("mim")
@@ -808,16 +841,16 @@ async def _new_expire(cb: CallbackQuery, state: FSMContext, v: str) -> None:
         await list_screen(cb)
         return
     if v == "date":
-        await ask.ask(cb, state, "cl_nedate", "Дата окончания: <code>ГГГГ-ММ-ДД ЧЧ:ММ</code>", "cl")
+        await ask.ask(cb, state, "cl_nedate", "Дата окончания: <code>ГГГГ-ММ-ДД ЧЧ:ММ</code> (время сервера)", "cl")
         return
     await _new_mimicry(cb, state, "" if v == "none" else v)
 
 
 @ask.on("cl_nedate")
 async def _new_date(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
-    ts = parse_date(ask.text_of(msg))
-    if not ts or ts <= time.time() + 60:
-        await ask.retry(msg, state, ctx, "Нужна дата в будущем, например 2026-12-31 23:59")
+    ts, why = future_date(ask.text_of(msg))
+    if why:
+        await ask.retry(msg, state, ctx, why)
         return
     await _new_mimicry(msg, state, str(ts))
 
@@ -831,6 +864,16 @@ async def _new_mimicry(target: ui.Target, state: FSMContext, expire: str) -> Non
         await mimicry_screen(target, f"Мимикрия: {new['name']}", "nm", "cl")
     else:
         await _create(target, state, "server")
+
+
+@act("nmb")
+async def _new_mim_back(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    """Возврат с «Уровня мимикрии» к выбору профиля нового клиента."""
+    name = ((await state.get_data()).get("newcl") or {}).get("name")
+    if not name:
+        await list_screen(cb)
+        return
+    await mimicry_screen(cb, f"Мимикрия: {name}", "nm", "cl")
 
 
 @act("nm")
@@ -923,15 +966,16 @@ async def _bulk_count_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> N
 
 @act("bnames")
 async def _bulk_names(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
-    await ask.ask(cb, state, "cl_bnames", "<b>➕ Несколько клиентов</b>\nИмена через запятую, например "
+    await ask.ask(cb, state, "cl_bnames", "<b>➕ Несколько клиентов</b>\nИмена через запятую или пробел, например "
                                           "<code>anna, boris, vera</code>", act.data("bulk"))
 
 
 @ask.on("cl_bnames")
 async def _bulk_names_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
-    names = [n for n in ask.text_of(msg).replace(" ", "").split(",") if n]
+    # Разделитель — запятая, пробел или перевод строки: «anna boris» — два имени, а не «annaboris»
+    names = [n for n in re.split(r"[\s,]+", ask.text_of(msg)) if n]
     if not names or not all(NAME_RE.match(n) for n in names):
-        await ask.retry(msg, state, ctx, "Имена: латиница, цифры, _ и -, до 32 символов, через запятую")
+        await ask.retry(msg, state, ctx, "Имена: латиница, цифры, _ и -, до 32 символов, через запятую или пробел")
         return
     await _bulk_expire_screen(msg, state, ",".join(names))
 
@@ -951,16 +995,16 @@ async def _bulk_expire(cb: CallbackQuery, state: FSMContext, v: str) -> None:
         await list_screen(cb)
         return
     if v == "date":
-        await ask.ask(cb, state, "cl_bedate", "Дата окончания: <code>ГГГГ-ММ-ДД ЧЧ:ММ</code>", "cl")
+        await ask.ask(cb, state, "cl_bedate", "Дата окончания: <code>ГГГГ-ММ-ДД ЧЧ:ММ</code> (время сервера)", "cl")
         return
     await _bulk_create(cb, state, "" if v == "none" else v)
 
 
 @ask.on("cl_bedate")
 async def _bulk_date(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
-    ts = parse_date(ask.text_of(msg))
-    if not ts or ts <= time.time() + 60:
-        await ask.retry(msg, state, ctx, "Нужна дата в будущем, например 2026-12-31 23:59")
+    ts, why = future_date(ask.text_of(msg))
+    if why:
+        await ask.retry(msg, state, ctx, why)
         return
     await _bulk_create(msg, state, str(ts))
 
@@ -976,9 +1020,25 @@ async def _bulk_create(target: ui.Target, state: FSMContext, expire: str) -> Non
     created = list(r.data or [])
     for n in created:               # заметка от удалённого тёзки не наследуется
         store.drop_note(n)
-    shown = ", ".join(created[:30]) + (f" и ещё {len(created) - 30}" if len(created) > 30 else "")
-    await ui.render(target, f"✅ <b>Создано клиентов: {len(created)}</b>\n{esc(shown)}\n\n"
-                            "Конфиги — архивом ниже.",
+    # Как в awg2: «N из M» и его предупреждения (подсеть заполнена — стоп, клиент
+    # не создан). Не созданные из списка имён — поимённо: занятые awg2 пропускает
+    def few(names: list[str]) -> str:
+        return ", ".join(names[:30]) + (f" и ещё {len(names) - 30}" if len(names) > 30 else "")
+
+    warns = [ln.strip()[1:].strip() for ln in r.log.splitlines() if ln.strip().startswith("▲")]
+    skipped = [w.split()[1] for w in warns if w.startswith("Пропущено:") and len(w.split()) > 1]
+    skipped = [n for n in dict.fromkeys(skipped) if n not in created]       # повтор в списке — не пропуск
+    warns = [w for w in warns if not w.startswith("Пропущено:")][-10:]
+    if ":" in spec:
+        asked, missed = int(spec.split(":")[1]), []
+    else:
+        want = list(dict.fromkeys(spec.split(",")))
+        asked, missed = len(want), [n for n in want if n not in created and n not in skipped]
+    notes = ([f"▲ Имя уже занято: {esc(few(skipped))}"] if skipped else []) \
+        + ([f"▲ Не созданы: {esc(few(missed))}"] if missed else []) + [f"▲ {esc(w)}" for w in warns]
+    await ui.render(target, f"✅ <b>Создано клиентов: {len(created)} из {asked}</b>\n{esc(few(created))}"
+                            + ("\n\n" + "\n".join(notes) if notes else "")
+                            + "\n\nКонфиги — архивом ниже.",
                     ui.kb(ui.Row(("👥 Клиенты", "cl"), ui.HOME)))
     files = [c["file"] for c in await clients() or [] if c["name"] in set(created)]
     await ui.chat_of(target).answer_document(

@@ -13,7 +13,7 @@
   :root, [data-theme="dark"] {
     --bg: #0a0c10; --bg2: #0d1015; --panel: #11151c; --panel2: #161b24; --hover: #1a202b;
     --line: #1f2632; --line2: #2a3241;
-    --text: #e8ecf3; --muted: #8b95a8; --dim: #59627a;
+    --text: #e8ecf3; --muted: #8b95a8; --dim: #6b7590;
     --acc: #2fe8a0; --acc-ink: #03211a; --acc-soft: rgba(47, 232, 160, .12);
     --ok: #a9e65a; --ok-soft: rgba(169, 230, 90, .13);
     --amber: #ffb44a; --amber-soft: rgba(255, 180, 74, .13);
@@ -26,7 +26,7 @@
   [data-theme="light"] {
     --bg: #f2f0ea; --bg2: #ebe8e0; --panel: #fbfaf7; --panel2: #f5f3ee; --hover: #efece5;
     --line: #e1dcd1; --line2: #d2ccbf;
-    --text: #17191e; --muted: #676c76; --dim: #a1a5ad;
+    --text: #17191e; --muted: #676c76; --dim: #7a7e87;
     --acc: #0b8f5a; --acc-ink: #eafff5; --acc-soft: rgba(11, 143, 90, .1);
     --ok: #4c8a10; --ok-soft: rgba(76, 138, 16, .1);
     --amber: #b86e00; --amber-soft: rgba(184, 110, 0, .1);
@@ -96,6 +96,7 @@
   .lock img { width: 36px; height: 36px; flex: none; }
   body.rail-on .lock img { display: none; }
   .lockup { display: block; overflow: visible; flex: none; }
+  @media (min-width: 901px) { .lock { flex-shrink: 0; } }
   .srv { display: flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border: 1px solid var(--line2); border-radius: 999px;
          background: var(--panel); min-width: 0; }
   .srv:hover { border-color: var(--acc); }
@@ -154,7 +155,7 @@
 
   /* ── Заголовок экрана ── */
   h1 { margin: 2px 0 18px; font: 800 30px/1.08 var(--sans); letter-spacing: -.035em; display: flex; align-items: center; gap: 10px;
-       flex-wrap: wrap; }
+       flex-wrap: wrap; min-width: 0; overflow-wrap: anywhere; }
   h2 { font: 700 10.5px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--dim); margin: 24px 2px 10px; }
   .head { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
   .head h1 { margin: 0; }
@@ -260,6 +261,7 @@
   .kpi.tap { cursor: pointer; } .kpi.tap:hover { background: var(--hover); }
   .kpi .v { font: 750 30px/1 var(--sans); letter-spacing: -.04em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden;
             text-overflow: ellipsis; }
+  .kpi .v.txt { white-space: normal; overflow-wrap: anywhere; font-size: 22px; line-height: 1.15; }
   .kpi .v small { font-size: 15px; font-weight: 600; color: var(--muted); letter-spacing: -.01em; margin-left: 3px; }
   .kpi .d { margin-top: 8px; color: var(--muted); font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
   .up { color: var(--acc); } .dn { color: var(--cyan); }
@@ -287,6 +289,9 @@
   .bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 8px; z-index: 11; padding: 10px 14px calc(10px + 0px); padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
          background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(12px); border-top: 1px solid var(--line2); }
   body.rail-on .bar { left: var(--rail); padding: 10px 28px; }
+  /* Видна нижняя панель разделов (телефон, планшет, узкое окно ПК) — плашка действий над ней */
+  body:not(.rail-on):not(.bare) .bar { bottom: calc(80px + 0px); bottom: calc(80px + env(safe-area-inset-bottom)); left: 10px; right: 10px;
+    border-radius: 16px; border: 1px solid var(--line2); padding: 8px; }
   .bar button { flex: 1; white-space: nowrap; padding: 9px 6px; }
   input, textarea, select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line2); border-radius: var(--rc);
                             padding: 10px 12px; width: 100%; outline: none; min-height: 42px; }
@@ -383,7 +388,7 @@
   .rhead { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
   .rhead .legend { margin: 6px 0 0; min-width: 0; }
   .rseg { flex: none; padding: 3px; gap: 2px; }
-  .rseg button { flex: none; min-height: 26px; padding: 3px 10px; font-size: 12px; }
+  .rseg button { flex: none; min-height: 30px; padding: 4px 12px; font-size: 12px; }
   .topo { position: relative; }
   .topo > svg { display: block; width: 100%; overflow: visible; }
   .topo .lbl { font: 600 12px var(--sans); fill: var(--text); }
@@ -477,6 +482,7 @@
   .foot { margin: 26px 0 4px; color: var(--dim); font: 500 11px var(--mono); text-align: center; letter-spacing: .04em; }
 
   /* ── Клиенты ── */
+  .tscroll { overflow-x: auto; }
   .ctable { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--panel); border: 1px solid var(--line);
             border-radius: var(--rb); overflow: hidden; }
   .ctable th { text-align: left; font: 700 10.5px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
@@ -699,7 +705,7 @@
 <div id="more" class="more"></div>
 <div id="scrim" class="scrim"></div>
 <aside id="drawer" class="drawer" aria-label="Подробно"></aside>
-<div id="pal" class="pal"><div class="w"><input id="palq" placeholder="Раздел, клиент или действие…" autocomplete="off" aria-label="Команда"><ul id="pall"></ul></div></div>
+<div id="pal" class="pal"><div class="w" aria-label="Команды"><input id="palq" placeholder="Раздел, клиент или действие…" autocomplete="off" aria-label="Команда"><ul id="pall"></ul></div></div>
 <script src="icons.js"></script>
 <script src="app.js"></script>
 </body>

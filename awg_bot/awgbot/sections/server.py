@@ -44,7 +44,7 @@ async def screen(target: ui.Target) -> None:
             f" · MTU {d.get('mtu')}",
             f"Endpoint: <code>{esc(d.get('endpoint', ''))}</code>",
             f"Подсеть: <code>{esc(d.get('net', ''))}</code> · регион {esc(d.get('region', ''))}",
-            f"Мимикрия: {esc(d.get('mimicry') or 'none')}"
+            f"Мимикрия: {esc(d['mimicry']) if d.get('mimicry') not in (None, '', 'none') else 'без I1-I5'}"
             + (f" ({esc(d['mimicry_domain'])})" if d.get("mimicry_domain") else ""),
             f"Клиентов: {d.get('clients', 0)}",
         ]
@@ -202,7 +202,9 @@ async def _wizard_set(msg: Message, state: FSMContext, key: str, val: str) -> No
 async def _dns_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
     v = ask.text_of(msg)
     ips = [x.strip() for x in v.split(",") if x.strip()]
-    if not ips or not all(re.fullmatch(r"(\d{1,3}\.){3}\d{1,3}", x) for x in ips):
+    # Октеты до 255 без ведущих нулей — как valid_ip в awg2, иначе отказ только в конце мастера
+    if not ips or not all(re.fullmatch(r"((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)", x)
+                          for x in ips):
         await ask.retry(msg, state, ctx, "Нужны IPv4-адреса через запятую")
         return
     await _wizard_set(msg, state, "dns", ", ".join(ips))
@@ -683,12 +685,20 @@ async def _mod_rebuild(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await jobs.start(cb, "Сборка модуля под все ядра", "module", "rebuild", back_to="mod")
 
 
+def _bk_label(b: dict) -> str:
+    """«v1.0.2 · 08.10.2026 12:00»: тег версии — из имени копии src-ТЕГ-ДАТА-ВРЕМЯ.tar.gz."""
+    m = re.match(r"src-(.+)-\d{8}-\d{6}\.tar\.gz$", b.get("name") or "")
+    return f"{m.group(1)} · {ui.fmt_time(b['time'])}" if m else ui.fmt_time(b["time"])
+
+
 @mod("backups")
 async def _mod_backups(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     rows = await api.data("module", "backups", default=[]) or []
     await ui.remember(state, "modbk", [b["path"] for b in rows])
-    await ui.render(cb, "<b>⏪ Резервные копии исходников модуля</b>\nСверху — новые.",
-                    ui.kb([(ui.fmt_time(b["time"]), mod.data("rb", str(i))) for i, b in enumerate(rows)],
+    # По страницам: у клавиатуры Telegram есть предел числа кнопок
+    await ui.render(cb, f"<b>⏪ Резервные копии исходников модуля</b>: {len(rows)}\nСверху — новые.",
+                    ui.kb(ui.paged([(_bk_label(b), mod.data("rb", str(i))) for i, b in enumerate(rows)],
+                                   int(arg) if arg.isdigit() else 0, lambda p: mod.data("backups", str(p))),
                           ui.back("mod")))
 
 

@@ -356,7 +356,7 @@ _choose_dns() {
     5) while true; do
          read_line d "${C}  DNS через запятую: ${N}"
          [[ -n "$d" ]] || { S_DNS="1.1.1.1, 1.0.0.1"; break; }
-         [[ "$d" =~ ^[0-9.,[:space:]]+$ ]] && { S_DNS="$d"; break; }
+         valid_dns_list "$d" && { S_DNS="$d"; break; }
          warn "Нужны IPv4-адреса через запятую"
        done ;;
   esac
@@ -553,7 +553,7 @@ server_create_opts() {
       profile) [[ "$v" =~ ^(lite|pro)$ ]] || { err "profile: lite | pro"; return 1; }; S_PROFILE="$v" ;;
       proto) [[ "$v" =~ ^(2\.0|3\.1)$ ]] || { err "proto: 2.0 | 3.1"; return 1; }; S_PROTO="$v" ;;
       region) [[ "$v" =~ ^(world|ru)$ ]] || { err "region: world | ru"; return 1; }; S_REGION="$v" ;;
-      dns) [[ "$v" =~ ^[0-9.,[:space:]]+$ ]] || { err "dns: IPv4 через запятую"; return 1; }; S_DNS="$v" ;;
+      dns) valid_dns_list "$v" || { err "dns: IPv4 через запятую"; return 1; }; S_DNS="$v" ;;
       mtu) [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1280 && v <= 1500 )) || { err "mtu: 1280-1500"; return 1; }; MTU="$v" ;;
       port) valid_port "$v" && (( v >= 1024 )) || { err "port: 1024-65535"; return 1; }
             udp_port_busy "$v" && { err "UDP $v занят"; return 1; }; S_PORT="$v" ;;

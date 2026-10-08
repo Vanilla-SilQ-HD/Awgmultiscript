@@ -35,7 +35,7 @@ def _attention(d: dict) -> str:
     """То, что требует действий: только когда есть что сказать."""
     c, s = d.get("components") or {}, d.get("server") or {}
     return block(
-        "⚠️ awg0 не поднят — <i>Сервер → Проверить и починить</i>" if s.get("exists") and not s.get("up") else "",
+        "⚠️ awg0 не поднят — <i>Сервер → 🛠 Починить</i>" if s.get("exists") and not s.get("up") else "",
         f"▲ {esc(c['reboot'])}" if c.get("installed") and c.get("reboot") else "",
         f"⚠️ Ядро {esc(c['kernel_gap'])} без модуля AWG — после перезагрузки VPN не поднимется: "
         "<i>Сервер → Модуль ядра → Под все ядра</i>" if c.get("kernel_gap") else "",
@@ -46,7 +46,7 @@ def _attention(d: dict) -> str:
 def _server(d: dict) -> str:
     c, s = d.get("components") or {}, d.get("server") or {}
     if not c.get("installed"):
-        return block("❌ Компоненты не установлены", "<i>Сервер → Установить компоненты</i>")
+        return block("❌ Компоненты не установлены", "<i>Сервер → 📦 Компоненты</i>")
     module = f"🧩 модуль <code>{esc(c.get('module') or '?')}</code> " + (
         f"· ⬆️ есть {esc(c['module_update'])}" if c.get("module_update") else "✓")
     if not s.get("exists"):

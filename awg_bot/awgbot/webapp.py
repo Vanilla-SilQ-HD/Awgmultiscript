@@ -129,6 +129,7 @@ class MiniApp:
             self._mtime = CERT_FULL.stat().st_mtime
             app = web.Application(client_max_size=64 * 1024)
             app["bot"] = bot
+            app.on_response_prepare.append(self._headers)
             app.router.add_get("/", self._index)
             app.router.add_get("/app.js", self._static)
             app.router.add_get("/icons.js", self._static)
@@ -208,6 +209,18 @@ class MiniApp:
             raise web.HTTPForbidden(text=json.dumps({"error": "Нет доступа"}), content_type="application/json")
         # «owner»/«web» ставит только веб-панель — из данных Telegram их не берём
         return {k: v for k, v in user.items() if k not in ("owner", "web")}
+
+    @staticmethod
+    async def _headers(request: web.Request, resp: web.StreamResponse) -> None:
+        """Как у веб-панели, но рамку не запрещаем: Telegram Web открывает Mini App
+        во фрейме; скрипт Telegram — с telegram.org."""
+        resp.headers["Server"] = "awg"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "
+            "script-src 'self' https://telegram.org; connect-src 'self'; object-src 'none'; base-uri 'none'; "
+            "form-action 'self'")
 
     @staticmethod
     async def _index(request: web.Request) -> web.StreamResponse:

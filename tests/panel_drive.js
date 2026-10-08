@@ -256,9 +256,16 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.waitForSelector(".meter");
     await page.waitForSelector(".tag >> text=/лимит \\d+%/");
   });
+  await step("лимит трафика: «50GB» — как parse_size в awg2", async () => {
+    await nav("/client/alice/limit", "#app:not(.reloading) input");
+    await page.fill("#app input", "50GB");
+    await page.click("button:has-text('Сохранить')");
+    await page.waitForSelector(".kv >> text=/из 50.0 ГБ за месяц/");
+  });
   await step("лимит трафика: свой размер «всего»", async () => {
-    await nav("/client/alice/limit", "input");
-    await page.fill("input", "1.5T");
+    // Экран был открыт шагом выше — сначала снимок; поле — из свежего
+    await nav("/client/alice/limit", "#app:not(.reloading) input");
+    await page.fill("#app input", "1.5T");
     await page.click(".seg button:has-text('Всего')");
     await page.click("button:has-text('Сохранить')");
     await page.waitForSelector(".kv >> text=/из 1.5 ТБ всего/");
@@ -277,6 +284,21 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.click(".actions button:has-text('Срок')"); await page.waitForSelector(".sheet"); await shot("05-expire-sheet");
     await page.click(".sheet >> text=7 дней"); await page.waitForSelector(".sgrid >> text=/^6д/");
   });
+  await step("смена экрана закрывает лист и «Тему»: выбор в них уже ни к чему", async () => {
+    await nav("/clients", "[data-name=alice]");
+    await page.click("[data-name=alice] .name");
+    await page.waitForURL(/#\/client\/alice$/);
+    await page.click(".actions button:has-text('Срок')"); await page.waitForSelector(".sheet");
+    await page.evaluate(() => window.__back());                     // кнопка «Назад» Telegram
+    await page.waitForURL(/#\/clients$/);
+    await page.waitForFunction(() => !document.querySelector(".sheet-bg"), null, { timeout: 3000 })
+      .catch(() => { throw new Error("лист срока остался поверх списка"); });
+    await page.click(".top button[aria-label='Тема']");
+    await page.waitForSelector(".drawer.on >> text=Тема");
+    await page.evaluate(() => { location.hash = "/server"; });
+    await page.waitForSelector("text=Endpoint");
+    if (await page.locator(".drawer.on").count()) throw new Error("«Тема» осталась поверх нового экрана");
+  });
   await step("новый клиент", async () => {
     await nav("/add", "input");
     await page.fill("input", "carol");
@@ -284,6 +306,42 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await shot("06-add");
     await page.click("text=Создать");
     await page.waitForURL(/#\/client\/carol\/qr/); await page.waitForSelector("img.qr, .card.muted");
+  });
+  await step("переименование: «Назад» не ведёт на карточку со старым именем", async () => {
+    await nav("/clients", "[data-name=carol]");
+    await page.click("[data-name=carol] .name");
+    await page.waitForURL(/#\/client\/carol$/);
+    await page.click(".actions button:has-text('Имя')");
+    await page.waitForURL(/#\/client\/carol\/rename$/);
+    await page.waitForSelector("#app input");
+    await page.fill("#app input", "dave");
+    await page.click("button:has-text('Сохранить')");
+    await page.waitForURL(/#\/client\/dave$/);
+    await page.waitForSelector("text=Мониторинг активности");
+    await page.evaluate(() => window.__back());
+    await page.waitForURL(/#\/clients$/, { timeout: 5000 }).catch(() => { throw new Error("«Назад» после переименования: " + page.url()); });
+    await nav("/client/dave/rename", "#app input");
+    await page.fill("#app input", "carol");
+    await page.click("button:has-text('Сохранить')");
+    await page.waitForURL(/#\/client\/carol$/);
+  });
+  await step("мимикрия клиента: с вопросом и один запрос на двойной тап", async () => {
+    await nav("/client/carol/mimicry", ".item");
+    let n = 0;
+    const count = (r) => { if (/"client","mimicry"/.test(r.postData() || "")) n++; };
+    page.on("request", count);
+    await page.evaluate(() => { const it = [...document.querySelectorAll(".item")].find((x) => /Без I1-I5/.test(x.textContent)); it.click(); it.click(); });
+    await page.waitForURL(/#\/client\/carol\/qr$/);
+    await page.waitForTimeout(500);
+    page.off("request", count);
+    const asked = (await page.evaluate(() => window.__log)).filter((l) => l.startsWith("confirm:Сменить мимикрию carol"));
+    if (n !== 1 || asked.length !== 1) throw new Error(`запросов ${n}, вопросов ${asked.length}`);
+  });
+  await step("массовое создание: количество — только целое", async () => {
+    await nav("/bulk", "input");
+    await page.fill("input >> nth=0", "t");
+    await page.fill("input[type=number]", "2.5");
+    await expectAlert("Количество", () => page.click("button.btn-primary:has-text('Создать')"));
   });
   await step("массовое создание", async () => {
     await nav("/bulk", "input");
@@ -309,15 +367,24 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.waitForSelector(".item:has-text('Как у сервера') .sub");
     await shot("09-mimicry");
   });
-  await step("удалить клиента", async () => {
-    await nav("/client/carol", "text=Удалить клиента");
+  await step("удалить клиента: возврат к списку, первое «Назад» уводит с него", async () => {
+    await nav("/clients", "[data-name=carol]");
+    await page.click("[data-name=carol] .name");
+    await page.waitForURL(/#\/client\/carol$/);
     await page.click("text=Удалить клиента");
     await page.waitForURL(/#\/clients$/);
+    await page.waitForSelector("[data-name=carol]", { state: "detached" });
+    await page.evaluate(() => window.__back());
+    await page.waitForFunction(() => location.hash !== "#/clients", null, { timeout: 5000 })
+      .catch(() => { throw new Error("после удаления в истории — второй список подряд"); });
   });
 
   // ── Сервер ──
   await step("сервер", async () => { await nav("/server", "text=Endpoint"); await page.waitForSelector("text=Модуль ядра"); await shot("20-server"); });
-  await step("рестарт awg0", async () => { await page.click(".ecard button:has-text('Рестарт')"); await page.waitForSelector(".toast"); });
+  await step("рестарт awg0 — с вопросом, как в палитре", async () => {
+    await page.click(".ecard button:has-text('Рестарт')"); await page.waitForSelector(".toast");
+    if (!(await page.evaluate(() => window.__log)).some((l) => l.startsWith("confirm:Перезапустить awg0"))) throw new Error("без подтверждения");
+  });
   await step("протокол", async () => { await nav("/server/proto", "text=Перейти на 3.1"); await shot("21-proto"); });
   await step("параметры AWG", async () => {
     await nav("/server/params", "input[data-key=Jc]");
@@ -385,6 +452,21 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.click(".item >> text=alice");
     await page.waitForSelector(".item:has-text('alice') >> text=напрямую");
     await shot("32-warp-clients");
+  });
+  await step("клиенты в WARP: двойной тап — один запрос, на экране — отправленное", async () => {
+    await nav("/tunnels/warp/clients", ".item");
+    const sel = ".item:has-text('alice')", was = await page.textContent(sel + " .sub");
+    let n = 0;
+    const count = (r) => { if (/"tunnels","client"/.test(r.postData() || "")) n++; };
+    page.on("request", count);
+    await page.evaluate(() => { const it = [...document.querySelectorAll(".item")].find((x) => /alice/.test(x.textContent)); it.click(); it.click(); });
+    await page.waitForTimeout(400);
+    await page.waitForFunction(() => !document.querySelector(".item.reloading"));
+    page.off("request", count);
+    const now = await page.textContent(sel + " .sub");
+    if (n !== 1 || /напрямую/.test(was) === /напрямую/.test(now)) throw new Error(`запросов ${n}: «${was}» → «${now}»`);
+    await nav("/tunnels/warp/clients", ".item");
+    if (await page.textContent(sel + " .sub") !== now) throw new Error("на сервере другое: " + await page.textContent(sel + " .sub"));
   });
   await step("Xray", async () => { await nav("/tunnels/xray", "text=Установить"); await shot("33-xray"); });
   await step("tun2socks", async () => {
@@ -519,6 +601,46 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.waitForSelector("#tabbar a.on:has-text('Ещё')");      // раздел из «Ещё» — подсвечено «Ещё»
   });
 
+  await step("нажатие на открытую вкладку обновляет экран", async () => {
+    await nav("/clients", "[data-name]");
+    await page.evaluate(() => { document.querySelector("#app h1").dataset.keep = "1"; });
+    await page.click("#tabbar a:has-text('Клиенты')");
+    await page.waitForFunction(() => document.querySelector("#app h1") && !document.querySelector("#app h1[data-keep]"), null, { timeout: 5000 })
+      .catch(() => { throw new Error("экран не обновился"); });
+  });
+  await step("ошибка: строки журнала, повторяющие её текст, не дублируются", async () => {
+    const before = (await alerts()).length;
+    await page.evaluate(() => { const e = new Error("Нет места на диске"); e.log = "→ Проверяю диск\n  × Нет места на диске"; fail(e); });
+    const got = (await alerts()).slice(before).join("\n");
+    await page.evaluate(() => { window.__log = window.__log.filter((l) => !l.startsWith("alert:")); });
+    if (!/Проверяю диск/.test(got) || /×/.test(got) || got.split("Нет места на диске").length !== 2) throw new Error(JSON.stringify(got));
+  });
+  await step("длинный вопрос в окне Telegram режется с середины — вопрос в конце остаётся", async () => {
+    const r = await page.evaluate(() => {
+      const t = "Меняются: S1, S2.\nS1, S2 обязаны совпадать у клиентов: все клиенты потеряют связь.\n" + "▲ предупреждение. ".repeat(20)
+        + "\nПеред записью — авто-бэкап. Применить?";
+      const p = popupText(t);
+      return [p.length, p.startsWith("Меняются"), p.endsWith("Применить?")];
+    });
+    if (r[0] > 256 || !r[1] || !r[2]) throw new Error(JSON.stringify(r));
+  });
+  await step("обрыв связи — «Нет связи с сервером», а не «Failed to fetch»", async () => {
+    await nav("/client/alice/note", "textarea");
+    await page.route(/\/api\/client\/note$/, (r) => r.abort());
+    try { await expectAlert("Нет связи с сервером", () => page.click("button:has-text('Сохранить')")); }
+    finally { await page.unroute(/\/api\/client\/note$/); }
+  });
+  await step("обзор: клиенты не загрузились — так и сказано, с повтором", async () => {
+    await page.route(/\/api\/clients$/, (r) => r.abort());
+    try {
+      await nav("/", ".head h1");
+      await page.waitForSelector("[data-name=clients-error] button:has-text('Повторить')");
+      if (await page.locator("text=Клиентов пока нет").count() || await page.locator("text=/^Лимитов нет/").count())
+        throw new Error("без списка клиентов — «Клиентов пока нет» / «Лимитов нет»");
+    } finally { await page.unroute(/\/api\/clients$/); }
+    await page.click("[data-name=clients-error] button:has-text('Повторить')");
+    await page.waitForSelector(".topo svg .node[data-c=alice], .rlist");
+  });
   await step("палитра команд", async () => {
     await page.click(".top .kbar");
     await page.waitForSelector(".pal.on input");
@@ -549,6 +671,32 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.click("text=Домены мимикрии: мир");
     await page.waitForSelector("button:has-text('Назад')", { timeout: 90000 });
     await shot("41-domains");
+  });
+  await step("задача: связь пропала — «нет связи», «Повторить проверку» доводит до итога", async () => {
+    await nav("/diag", "text=Система");
+    await page.evaluate(() => { window.AWG_JOB_LOST_MS = 2500; });
+    await page.route(/\/api\/job\/status$/, (r) => r.abort());
+    try {
+      await page.click("text=Домены мимикрии: мир");
+      await page.waitForSelector("h1 .pill:has-text('нет связи')", { timeout: 20000 });
+      await page.waitForSelector("text=задача могла продолжиться на сервере");
+      await page.waitForSelector("button:has-text('Назад')");
+    } finally { await page.unroute(/\/api\/job\/status$/); await page.evaluate(() => { delete window.AWG_JOB_LOST_MS; }); }
+    await page.click("button:has-text('Повторить проверку')");
+    await page.waitForFunction(() => /готово|ошибка/.test((document.querySelector("#app h1 .pill") || {}).textContent || ""),
+      null, { timeout: 90000 });
+  });
+  await step("задача: ушли с экрана — итог подсказкой", async () => {
+    await nav("/diag", "text=Система");
+    // Первый ответ о задаче — уже после ухода с экрана
+    await page.route(/\/api\/job\/status$/, async (r) => { await new Promise((ok) => setTimeout(ok, 2500)); r.continue().catch(() => {}); });
+    try {
+      await page.click("text=Домены мимикрии: мир");
+      await page.waitForSelector("h1 .pill:has-text('идёт')");
+      await page.evaluate(() => { location.hash = "/server"; });
+      await page.waitForSelector("text=Endpoint");
+      await page.waitForSelector(".toast >> text=/Домены мимикрии \\(мир\\): (готово|ошибка)/", { timeout: 90000 });
+    } finally { await page.unroute(/\/api\/job\/status$/); }
   });
   await step("журналы", async () => {
     await nav("/diag/logs", ".item");

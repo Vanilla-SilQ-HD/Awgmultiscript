@@ -215,6 +215,10 @@ rc, out, err = bash('valid_ip 010.0.0.1 || echo a; valid_ip 1.2.3.04 || echo b; 
                     'valid_ip 0.0.0.0 && valid_ip 10.0.0.1 && valid_ip 255.255.255.255 && echo d; '
                     'valid_cidr 010.8.0.0/24 || echo e')
 chk("valid_ip: октеты с ведущими нулями — отказ", out.split() == ["a", "b", "c", "d", "e"] and not err, out + err)
+rc, out, err = bash('for d in "1.1.1.1, 1.0.0.1" "8.8.8.8" "1.1.1.1 8.8.8.8" "999.999.999.999, 8.8.8.8" "1.1.1" "" ", "; do '
+                    'valid_dns_list "$d" && echo y || echo n; done')
+chk("DNS клиентов: каждый адрес — настоящий IPv4 (999.999.999.999 — отказ)",
+    out.split() == ["y", "y", "y", "n", "n", "n", "n"] and not err, out + err)
 rc, out, _ = bash('for d in 010.0.0.1 1.2.3.04 1.2.3.4 example.com; do valid_domain "$d" && echo "$d"; done')
 chk("valid_domain: цифры с точками (и с нулями) — не домен", out.split() == ["example.com"], out)
 

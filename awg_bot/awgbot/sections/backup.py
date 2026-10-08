@@ -53,10 +53,13 @@ async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
 async def _auto(cb: CallbackQuery, state: FSMContext, arg: str = "", note: str = "") -> None:
     b = alerts.backup_info()
     mark = lambda ok: "🔘" if ok else "⚪️"                                  # noqa: E731
+    # Ряд чисел без подписи непонятен — подпись текстом, как в Mini App
     await ui.render(cb, "<b>🕒 Автобэкап</b>\n\nПолный бэкап по расписанию — файлом сюда, в чат, и только "
-                        "владельцам: в нём приватные ключи. На сервере остаются последние N автобэкапов, "
-                        "сделанные вручную не трогаются.\n\n"
-                        f"Сейчас: {esc(auto_line(b))}" + (f"\n\n{note}" if note else ""),
+                        "владельцам: в нём приватные ключи.\n\n"
+                        f"Сейчас: {esc(auto_line(b))}\n\n"
+                        "• Первый ряд — расписание\n"
+                        f"• Второй — хранить на сервере: последние {b['keep']} автобэкапов "
+                        "(сделанные вручную не трогаются)" + (f"\n\n{note}" if note else ""),
                     ui.kb(ui.Row(*[(f"{mark(b['mode'] == m)} {label}", abk.data("m", m))
                                    for m, label in (("off", "Выкл"), ("day", "День"), ("week", "Неделя"))]),
                           ui.Row(*[(f"{mark(b['keep'] == n)} {n}", abk.data("k", str(n))) for n in alerts.BACKUP_KEEP]),

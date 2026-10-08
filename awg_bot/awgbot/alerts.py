@@ -55,7 +55,7 @@ SEND_MAX = 49 * 1024 * 1024                     # документ бота — 
 
 # id, подпись кнопки (полстроки в боте), полное название
 KINDS = [("iface", "awg0 упал", "awg0 упал и поднялся"), ("reboot", "Перезагрузка", "Сервер перезагрузился"),
-         ("update", "Новая версия", "Новая версия Тулзы"), ("kernel", "Новое ядро", "Ядро без модуля AWG"),
+         ("update", "Новая версия", "Новая версия Тулзы"), ("kernel", "Ядро без AWG", "Ядро без модуля AWG"),
          ("cert", "Сертификат", "Сертификат Mini App истекает"), ("disk", f"Диск {DISK_WARN}%", f"Диск заполнен на {DISK_WARN}%")]
 KIND_IDS = {k for k, _, _ in KINDS}
 BACKUP_MODES = {"off": "выключен", "day": "ежедневно", "week": "еженедельно"}
@@ -215,7 +215,7 @@ async def tick(bot: Bot, st: dict[str, Any]) -> bool:
             st["down_since"] = now
         if st["down"] == IFACE_STRIKES and enabled("iface"):
             await notify(bot, f"🔴 <b>{host}: awg0 не работает</b> — клиенты без связи.\n"
-                              "Сервер → Проверить и починить.", ui.kb(("🛠 Починить", "srv:repair")))
+                              "Сервер → 🛠 Починить.", ui.kb(("🛠 Починить", "srv:repair")))
             st["down_sent"] = True
     else:
         # «Снова работает» — только если awg0 и правда поднят: сервер могли
@@ -261,7 +261,7 @@ async def tick(bot: Bot, st: dict[str, Any]) -> bool:
             if enabled("cert"):
                 left = "истёк" if expires <= now else f"истекает через {ui.fmt_dur(expires - now)}"
                 await notify(bot, f"🔐 <b>Сертификат Mini App {left}</b>\n"
-                                  "Автопродление не сработало: Telegram-бот → Mini App → Выпустить заново.",
+                                  "Автопродление не сработало: Telegram-бот → 📱 Mini App → 🔐 На IP или 🌍 На домен…",
                              ui.kb(("📱 Mini App", "app")), owner_markup=True)
             st["cert"] = expires
     return True

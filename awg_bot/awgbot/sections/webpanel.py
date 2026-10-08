@@ -61,7 +61,7 @@ async def screen(target: ui.Target, note: str = "") -> None:
         ("🔑 Новый пароль", act.data("pw")), ("🔀 Новый адрес", act.data("path")),
         ("🔄 Перезапустить", act.data("restart")),
         ("⏹ Остановить", act.data("stop")) if d.get("active") else ("▶️ Запустить", act.data("start")),
-        ("📜 Журнал входов", "diag:log:web"), ("🔐 Сертификат", "app"),
+        ("📜 Журнал входов", "diag:log:web|web"), ("🔐 Сертификат", "app"),
         ("🗑 Удалить", act.data("rm")), ui.back(),
     ]
     text = "\n".join(lines)
