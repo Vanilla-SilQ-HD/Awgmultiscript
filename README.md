@@ -375,7 +375,7 @@ Mini App и HTTPS-сертификат** (или в боте: **Telegram-бот 
 **Установка:** `sudo awg2` → **Telegram-бот** → Установить. Или вручную:
 
 ```bash
-sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/pumbaX/awg-multi-script/main/awg-bot-install.sh -o /tmp/awg-bot-install.sh && bash /tmp/awg-bot-install.sh'
+sudo bash -c 'd=$(mktemp -d) && curl -fsSL https://raw.githubusercontent.com/pumbaX/awg-multi-script/main/awg-bot-install.sh -o "$d/awg-bot-install.sh" && bash "$d/awg-bot-install.sh"; rm -rf "$d"'
 ```
 
 Установщик спросит:

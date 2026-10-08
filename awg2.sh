@@ -132,6 +132,34 @@ read_yesno() {
   printf -v "$__var" '%s' "$__v"
 }
 
+# Путь, подменить который может только root: он сам и все каталоги до /
+# принадлежат root и закрыты на запись группе и остальным. Код оттуда можно
+# запускать от root; из /tmp или домашнего каталога пользователя — нет:
+# туда подложит или переименует любой пользователь сервера.
+root_only_path() {  # путь
+  local p m
+  p=$(readlink -f -- "$1" 2>/dev/null) && [[ -e "$p" ]] || return 1
+  while :; do
+    [[ "$(stat -c %u -- "$p" 2>/dev/null)" == 0 ]] || return 1
+    m=$(stat -c %a -- "$p" 2>/dev/null) || return 1
+    (( 8#$m & 8#022 )) && return 1
+    [[ "$p" == / ]] && return 0
+    p=$(dirname -- "$p")
+  done
+}
+
+# То же для каталога и всего, что в нём.
+root_only_tree() {  # каталог
+  local p
+  # find — по настоящему пути: каталог-ссылку он сам не обходит
+  p=$(readlink -f -- "$1" 2>/dev/null) && root_only_path "$p" || return 1
+  [[ -z "$(find "$p" \( ! -user 0 -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null)" ]]
+}
+
+# Путь для вывода через echo -e: без управляющих символов и \-последовательностей
+# (имя каталога задаёт кто угодно — оно не должно перерисовать вопрос).
+shown() { local s="${1//\\/\\\\}"; printf '%s' "$s" | tr '\000-\037\177' '?'; }
+
 # ask_yes "вопрос" [y|n] — то же как условие: if ask_yes ...; then
 ask_yes() {
   local __a
@@ -8387,6 +8415,9 @@ _script_ver() {  # файл awg2 → v1.2.0d (версия и буква тес�
 # awg2 работают с установленной копией $SCRIPT_PATH — предложить заменить её.
 self_install_offer() {
   local self cur def=y
+  # $0 без «/» — не путь к файлу («bash» при запуске через curl | bash):
+  # readlink нашёл бы ./bash в текущем каталоге и предложил поставить его
+  [[ "$0" == */* ]] || return 0
   self=$(readlink -f "$0" 2>/dev/null) || return 0
   [[ -f "$self" && "$self" != "$(readlink -f "$SCRIPT_PATH" 2>/dev/null)" ]] || return 0
   head -c 4096 "$self" | grep -q '^VERSION="' || return 0
@@ -8396,14 +8427,14 @@ self_install_offer() {
     warn "Команда awg2 не установлена: бот и таймеры ищут $SCRIPT_PATH"
   else
     cur=$(_script_ver "$SCRIPT_PATH")
-    warn "Запущена копия $self ($VERSION_SHOW), а установлена ${cur:-другая} в $SCRIPT_PATH"
+    warn "Запущена копия $(shown "$self") ($VERSION_SHOW), а установлена ${cur:-другая} в $SCRIPT_PATH"
     info "Бот, панель и команда awg2 работают с установленной"
     if [[ "$cur" =~ ^v?[0-9] ]] && (( 10#$(ver_num "$cur") > 10#$(ver_num "$VERSION") )); then
       warn "Установленная новее — замена будет откатом"
       def=n
     fi
   fi
-  ask_yes "  Установить эту копию в $SCRIPT_PATH? [$([[ $def == y ]] && echo Y/n || echo y/N)]: " "$def" || return 0
+  ask_yes "  Установить эту копию ($(shown "$self")) в $SCRIPT_PATH? [$([[ $def == y ]] && echo Y/n || echo y/N)]: " "$def" || return 0
   [[ -f "$SCRIPT_PATH" ]] && cp -a "$SCRIPT_PATH" "$SCRIPT_PATH.bak" 2>/dev/null \
     && info "Прежняя копия: $SCRIPT_PATH.bak"
   # Через rename: работающие копии awg2 дочитывают свой файл, а не новый
@@ -8801,13 +8832,20 @@ _bot_src_version() {
 # Локальный код бота из распакованного архива Тулзы: рядом с awg2, в
 # текущем каталоге, в /opt, /root и /home/*. Из нескольких — самая новая
 # версия бота (дата файла после распаковки ни о чём не говорит), при
-# равных — найденная раньше.
+# равных — найденная раньше. Только каталоги, которые может менять лишь
+# root (root_only_tree): установщик и код бота из них запускаются от root,
+# а из бота и панели — ещё и без вопроса. Иначе любой пользователь сервера
+# подложил бы ~/awg-toolza-x с версией побольше и получил root.
 _bot_local_src() {
   local d best="" bv="" v
   for d in "$(dirname "$(readlink -f "$0")")" "$PWD" /opt/awg-toolza-*/ /root/awg-toolza-*/ \
            /home/*/awg-toolza-*/ /opt/awg-toolza/; do
-    d="${d%/}"
-    [[ -d "$d/awg_bot/awgbot" && -f "$d/awg_bot/run.py" ]] || continue
+    # Дальше — только настоящий путь: проверенный каталог-ссылку подменили
+    # бы между проверкой и запуском установщика
+    [[ "$d" != *$'\n'* ]] && d=$(readlink -f -- "$d" 2>/dev/null) || continue
+    [[ -n "$d" && "$d" != *$'\n'* && -d "$d/awg_bot/awgbot" && -f "$d/awg_bot/run.py" ]] || continue
+    root_only_tree "$d/awg_bot" || continue
+    [[ ! -e "$d/awg-bot-install.sh" ]] || root_only_path "$d/awg-bot-install.sh" || continue
     v=$(_bot_src_version "$d/awg_bot")
     if [[ -z "$best" ]] || [[ "$v" != "$bv" && "$(printf '%s\n%s\n' "$bv" "$v" | sort -V | tail -1)" == "$v" ]]; then
       best="$d/awg_bot"; bv="$v"
@@ -8819,10 +8857,13 @@ _bot_local_src() {
 bot_install() {
   local src installer
   src=$(_bot_local_src || true)
-  mktmp installer || return 1
+  # Установщик — в своём каталоге (700): рядом с ним он ищет awg_bot/, и в
+  # общем /tmp его мог подложить любой пользователь
+  mktmp installer -d || return 1
+  installer+="/awg-bot-install.sh"
   local lv iv
   lv=$(_bot_src_version "$src"); iv=$(bot_version)
-  if [[ -n "$src" ]] && ask_yes "  Найден локальный код бота ${lv:-?} ($src)${iv:+, установлен $iv}. Ставить из него? [Y/n]: " y; then
+  if [[ -n "$src" ]] && ask_yes "  Найден локальный код бота $(shown "${lv:-?}") ($(shown "$src"))${iv:+, установлен $iv}. Ставить из него? [Y/n]: " y; then
     if [[ -f "${src%/awg_bot}/awg-bot-install.sh" ]]; then
       bash "${src%/awg_bot}/awg-bot-install.sh" --src "$src"
       return
@@ -8982,11 +9023,13 @@ web_code_install() {
   local src installer
   src=$(_bot_local_src || true)
   if [[ -n "$src" && -f "$src/awgbot/web.py" && -f "${src%/awg_bot}/awg-bot-install.sh" ]]; then
-    info "Код панели: $src"
+    info "Код панели: $(shown "$src")"
     bash "${src%/awg_bot}/awg-bot-install.sh" --src "$src" --web-only
     return
   fi
-  mktmp installer || return 1
+  # Свой каталог (700): рядом с установщиком он ищет awg_bot/ (см. bot_install)
+  mktmp installer -d || return 1
+  installer+="/awg-bot-install.sh"
   curl -fsSL "$BOT_INSTALL_URL" -o "$installer" || { err "Не скачался установщик: $BOT_INSTALL_URL"; return 1; }
   if ! grep -q -- '--web-only' "$installer"; then
     err "В канале $(update_channel_label) веб-панели ещё нет — поставь её из архива с панелью"
@@ -9219,17 +9262,21 @@ _tools_files() {
 
 # Распакованные архивы Тулзы (с awg2.sh и awg_bot): из них «Установить бота»
 # берёт локальный код, поэтому после полного удаления о них спрашиваем.
+# Только свои (root_only_path) и без перевода строки в имени: список
+# читается построчно, и «awg-toolza-x\nroot» дал бы rm -rf root —
+# относительный путь от текущего каталога.
 toolza_unpacked() {
   local d
   for d in /root/awg-toolza-*/ /home/*/awg-toolza-*/; do
     d="${d%/}"
-    [[ -d "$d" && -f "$d/awg2.sh" && -d "$d/awg_bot" ]] && echo "$d"
+    [[ "$d" != *$'\n'* && -d "$d" && -f "$d/awg2.sh" && -d "$d/awg_bot" ]] || continue
+    root_only_path "$d" && echo "$d"
   done
   return 0
 }
 
 do_uninstall() {
-  local del_bot=n del_wgobf=n del_web=n del_self=n del_src=n opts src=()
+  local del_bot=n del_wgobf=n del_web=n del_self=n del_src=n opts src=() d
   hdr "Удаление AWG Toolza"
   warn "Будет удалено:"
   echo -e "  ${R}—${N} сервер awg0, его клиенты и автозапуск"
@@ -9249,7 +9296,7 @@ do_uninstall() {
   mapfile -t src < <(toolza_unpacked)
   if (( ${#src[@]} )); then
     echo -e "  ${D}Распакованные архивы Тулзы — из них ставится бот «из локального кода»:${N}"
-    printf "  ${D}  %s${N}\n" "${src[@]}"
+    for d in "${src[@]}"; do printf "  ${D}  %s${N}\n" "$(shown "$d")"; done
     read_yesno del_src "  Удалить и их? [y/N]: " n
   fi
   opts=()
@@ -9259,7 +9306,8 @@ do_uninstall() {
   [[ "$del_self" == y ]] && opts+=(self)
   uninstall_all "${opts[@]}"
   if [[ "$del_src" == y ]]; then
-    rm -rf "${src[@]}" && ok "Распакованные архивы удалены: ${#src[@]}"
+    for d in "${src[@]}"; do [[ "$d" == /* ]] && rm -rf -- "$d"; done
+    ok "Распакованные архивы удалены: ${#src[@]}"
   fi
   (( UNINSTALLED_SELF )) && exit 0
   return 0
@@ -14844,5 +14892,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=b2a1ded5e3ea34d7
+_BUILD_SUM=7fbee33119e65c78
 main "$@"

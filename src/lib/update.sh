@@ -196,6 +196,9 @@ _script_ver() {  # файл awg2 → v1.2.0d (версия и буква тес�
 # awg2 работают с установленной копией $SCRIPT_PATH — предложить заменить её.
 self_install_offer() {
   local self cur def=y
+  # $0 без «/» — не путь к файлу («bash» при запуске через curl | bash):
+  # readlink нашёл бы ./bash в текущем каталоге и предложил поставить его
+  [[ "$0" == */* ]] || return 0
   self=$(readlink -f "$0" 2>/dev/null) || return 0
   [[ -f "$self" && "$self" != "$(readlink -f "$SCRIPT_PATH" 2>/dev/null)" ]] || return 0
   head -c 4096 "$self" | grep -q '^VERSION="' || return 0
@@ -205,14 +208,14 @@ self_install_offer() {
     warn "Команда awg2 не установлена: бот и таймеры ищут $SCRIPT_PATH"
   else
     cur=$(_script_ver "$SCRIPT_PATH")
-    warn "Запущена копия $self ($VERSION_SHOW), а установлена ${cur:-другая} в $SCRIPT_PATH"
+    warn "Запущена копия $(shown "$self") ($VERSION_SHOW), а установлена ${cur:-другая} в $SCRIPT_PATH"
     info "Бот, панель и команда awg2 работают с установленной"
     if [[ "$cur" =~ ^v?[0-9] ]] && (( 10#$(ver_num "$cur") > 10#$(ver_num "$VERSION") )); then
       warn "Установленная новее — замена будет откатом"
       def=n
     fi
   fi
-  ask_yes "  Установить эту копию в $SCRIPT_PATH? [$([[ $def == y ]] && echo Y/n || echo y/N)]: " "$def" || return 0
+  ask_yes "  Установить эту копию ($(shown "$self")) в $SCRIPT_PATH? [$([[ $def == y ]] && echo Y/n || echo y/N)]: " "$def" || return 0
   [[ -f "$SCRIPT_PATH" ]] && cp -a "$SCRIPT_PATH" "$SCRIPT_PATH.bak" 2>/dev/null \
     && info "Прежняя копия: $SCRIPT_PATH.bak"
   # Через rename: работающие копии awg2 дочитывают свой файл, а не новый

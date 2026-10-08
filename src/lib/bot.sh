@@ -278,13 +278,20 @@ _bot_src_version() {
 # Локальный код бота из распакованного архива Тулзы: рядом с awg2, в
 # текущем каталоге, в /opt, /root и /home/*. Из нескольких — самая новая
 # версия бота (дата файла после распаковки ни о чём не говорит), при
-# равных — найденная раньше.
+# равных — найденная раньше. Только каталоги, которые может менять лишь
+# root (root_only_tree): установщик и код бота из них запускаются от root,
+# а из бота и панели — ещё и без вопроса. Иначе любой пользователь сервера
+# подложил бы ~/awg-toolza-x с версией побольше и получил root.
 _bot_local_src() {
   local d best="" bv="" v
   for d in "$(dirname "$(readlink -f "$0")")" "$PWD" /opt/awg-toolza-*/ /root/awg-toolza-*/ \
            /home/*/awg-toolza-*/ /opt/awg-toolza/; do
-    d="${d%/}"
-    [[ -d "$d/awg_bot/awgbot" && -f "$d/awg_bot/run.py" ]] || continue
+    # Дальше — только настоящий путь: проверенный каталог-ссылку подменили
+    # бы между проверкой и запуском установщика
+    [[ "$d" != *$'\n'* ]] && d=$(readlink -f -- "$d" 2>/dev/null) || continue
+    [[ -n "$d" && "$d" != *$'\n'* && -d "$d/awg_bot/awgbot" && -f "$d/awg_bot/run.py" ]] || continue
+    root_only_tree "$d/awg_bot" || continue
+    [[ ! -e "$d/awg-bot-install.sh" ]] || root_only_path "$d/awg-bot-install.sh" || continue
     v=$(_bot_src_version "$d/awg_bot")
     if [[ -z "$best" ]] || [[ "$v" != "$bv" && "$(printf '%s\n%s\n' "$bv" "$v" | sort -V | tail -1)" == "$v" ]]; then
       best="$d/awg_bot"; bv="$v"
@@ -296,10 +303,13 @@ _bot_local_src() {
 bot_install() {
   local src installer
   src=$(_bot_local_src || true)
-  mktmp installer || return 1
+  # Установщик — в своём каталоге (700): рядом с ним он ищет awg_bot/, и в
+  # общем /tmp его мог подложить любой пользователь
+  mktmp installer -d || return 1
+  installer+="/awg-bot-install.sh"
   local lv iv
   lv=$(_bot_src_version "$src"); iv=$(bot_version)
-  if [[ -n "$src" ]] && ask_yes "  Найден локальный код бота ${lv:-?} ($src)${iv:+, установлен $iv}. Ставить из него? [Y/n]: " y; then
+  if [[ -n "$src" ]] && ask_yes "  Найден локальный код бота $(shown "${lv:-?}") ($(shown "$src"))${iv:+, установлен $iv}. Ставить из него? [Y/n]: " y; then
     if [[ -f "${src%/awg_bot}/awg-bot-install.sh" ]]; then
       bash "${src%/awg_bot}/awg-bot-install.sh" --src "$src"
       return

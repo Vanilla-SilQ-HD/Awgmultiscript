@@ -71,11 +71,13 @@ web_code_install() {
   local src installer
   src=$(_bot_local_src || true)
   if [[ -n "$src" && -f "$src/awgbot/web.py" && -f "${src%/awg_bot}/awg-bot-install.sh" ]]; then
-    info "Код панели: $src"
+    info "Код панели: $(shown "$src")"
     bash "${src%/awg_bot}/awg-bot-install.sh" --src "$src" --web-only
     return
   fi
-  mktmp installer || return 1
+  # Свой каталог (700): рядом с установщиком он ищет awg_bot/ (см. bot_install)
+  mktmp installer -d || return 1
+  installer+="/awg-bot-install.sh"
   curl -fsSL "$BOT_INSTALL_URL" -o "$installer" || { err "Не скачался установщик: $BOT_INSTALL_URL"; return 1; }
   if ! grep -q -- '--web-only' "$installer"; then
     err "В канале $(update_channel_label) веб-панели ещё нет — поставь её из архива с панелью"

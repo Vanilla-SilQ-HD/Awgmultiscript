@@ -60,17 +60,21 @@ _tools_files() {
 
 # Распакованные архивы Тулзы (с awg2.sh и awg_bot): из них «Установить бота»
 # берёт локальный код, поэтому после полного удаления о них спрашиваем.
+# Только свои (root_only_path) и без перевода строки в имени: список
+# читается построчно, и «awg-toolza-x\nroot» дал бы rm -rf root —
+# относительный путь от текущего каталога.
 toolza_unpacked() {
   local d
   for d in /root/awg-toolza-*/ /home/*/awg-toolza-*/; do
     d="${d%/}"
-    [[ -d "$d" && -f "$d/awg2.sh" && -d "$d/awg_bot" ]] && echo "$d"
+    [[ "$d" != *$'\n'* && -d "$d" && -f "$d/awg2.sh" && -d "$d/awg_bot" ]] || continue
+    root_only_path "$d" && echo "$d"
   done
   return 0
 }
 
 do_uninstall() {
-  local del_bot=n del_wgobf=n del_web=n del_self=n del_src=n opts src=()
+  local del_bot=n del_wgobf=n del_web=n del_self=n del_src=n opts src=() d
   hdr "Удаление AWG Toolza"
   warn "Будет удалено:"
   echo -e "  ${R}—${N} сервер awg0, его клиенты и автозапуск"
@@ -90,7 +94,7 @@ do_uninstall() {
   mapfile -t src < <(toolza_unpacked)
   if (( ${#src[@]} )); then
     echo -e "  ${D}Распакованные архивы Тулзы — из них ставится бот «из локального кода»:${N}"
-    printf "  ${D}  %s${N}\n" "${src[@]}"
+    for d in "${src[@]}"; do printf "  ${D}  %s${N}\n" "$(shown "$d")"; done
     read_yesno del_src "  Удалить и их? [y/N]: " n
   fi
   opts=()
@@ -100,7 +104,8 @@ do_uninstall() {
   [[ "$del_self" == y ]] && opts+=(self)
   uninstall_all "${opts[@]}"
   if [[ "$del_src" == y ]]; then
-    rm -rf "${src[@]}" && ok "Распакованные архивы удалены: ${#src[@]}"
+    for d in "${src[@]}"; do [[ "$d" == /* ]] && rm -rf -- "$d"; done
+    ok "Распакованные архивы удалены: ${#src[@]}"
   fi
   (( UNINSTALLED_SELF )) && exit 0
   return 0

@@ -1598,6 +1598,46 @@ chk("откат из меню без force — отказ", "rc=1" in out and op
 out = rollback(0, "force")
 chk("откат из меню с force (после yes) — ставится", "rc=0" in out and "v1.0.0" in open(TGT).read(), out)
 
+print("\n── Код, который запускается от root, — только из каталогов root ──")
+EVIL = os.path.join(TMP, "evil", "awg-toolza-v9")
+os.makedirs(os.path.join(EVIL, "awg_bot", "awgbot"))
+with open(os.path.join(EVIL, "awg_bot", "awgbot", "__init__.py"), "w") as f:
+    f.write('__version__ = "99.0.0"\n')
+open(os.path.join(EVIL, "awg_bot", "run.py"), "w").close()
+with open(os.path.join(EVIL, "awg-bot-install.sh"), "w") as f:
+    f.write("touch " + os.path.join(TMP, "PWNED_BOT") + "\n")
+rc, out, _ = bash(f'root_only_path / && echo ROOT-OK; root_only_path "{TMP}" || echo TMP-NO; '
+                  f'cd "{EVIL}" && echo "[$(_bot_local_src)]"')
+chk("локальный код бота: каталог, куда может писать не только root, не берётся",
+    "ROOT-OK" in out and "TMP-NO" in out and "[]" in out, out)
+rc, out, _ = bash(f'cd "{EVIL}"; AUTO_MODE=1; BOT_INSTALL_URL=file:///nonexistent; bot_install >/dev/null 2>&1; '
+                  f'[[ -e "{TMP}/PWNED_BOT" ]] && echo PWNED || echo SAFE')
+chk("установка бота из API (без вопроса) не запускает чужой установщик", "SAFE" in out, out)
+open(os.path.join(EVIL, "awg_bot", "awgbot", "web.py"), "w").close()
+rc, out, _ = bash(f'cd "{EVIL}"; AUTO_MODE=1; BOT_INSTALL_URL=file:///nonexistent; web_code_install >/dev/null 2>&1; '
+                  f'[[ -e "{TMP}/PWNED_BOT" ]] && echo PWNED || echo SAFE')
+chk("код веб-панели не берётся из чужого каталога (там даже вопроса нет)", "SAFE" in out, out)
+LINKED = os.path.join(TMP, "evil", "link-toolza")
+os.symlink(EVIL, LINKED)
+rc, out, _ = bash(f'BASH_ARGV0=/nonexistent/awg2; root_only_tree() {{ return 0; }}; root_only_path() {{ return 0; }}; '
+                  f'cd "{LINKED}" && echo "[$(_bot_local_src)]"')
+chk("локальный код бота — по настоящему пути, не через ссылку (её подменили бы после проверки)",
+    f"[{os.path.realpath(EVIL)}/awg_bot]" in out and "link-toolza" not in out, out)
+rc, out, _ = bash(f"""eval "$(sed -n '/^root_only() {{/,/^}}/p' "{HERE}/../awg-bot-install.sh")"; """
+                  f'declare -F root_only >/dev/null || echo MISSING; root_only "{EVIL}/awg_bot" || echo NO; '
+                  "root_only /tmp || echo TMP-NO; grep -cF 'root_only \"$SRC\"' \"" + HERE + "/../awg-bot-install.sh\"")
+chk("установщик: awg_bot/ рядом с ним в /tmp или чужом каталоге не берётся", out.split() == ["NO", "TMP-NO", "1"], out)
+rc, out, _ = bash("echo -e \"[$(shown $'a\\\\e[31mb\\e[0m\\nc')]\"")
+chk("путь в вопросе — без управляющих символов и \\-последовательностей", out.strip() == "[a\\e[31mb?[0m?c]", repr(out))
+FAKEBASH = os.path.join(TMP, "evil", "bash")
+with open(FAKEBASH, "w") as f:
+    f.write('#!/usr/bin/env bash\nVERSION="v9.9.9"\n')
+r = subprocess.run(["bash", "-c", PRELUDE + f'SCRIPT_PATH="{TMP}/evil/awg2-target"; VERSION=v1.2.0; AUTO_MODE=1; '
+                    'self_install_offer; echo rc=$?', "bash"], cwd=os.path.dirname(FAKEBASH),
+                   input="", capture_output=True, text=True, env=ENV, timeout=60)
+chk("запуск через curl | bash ($0 = bash): ./bash из текущего каталога не предлагается",
+    "rc=0" in r.stdout and not os.path.exists(os.path.join(TMP, "evil", "awg2-target")), r.stdout + r.stderr)
+
 print("\n── Запуск из распакованного архива ──")
 INST = os.path.join(TMP, "inst")
 os.makedirs(INST)
