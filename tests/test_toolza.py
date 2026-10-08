@@ -1977,6 +1977,22 @@ rc, out, err = bash(ASPRE + 'bash "$ANTISCAN_SCRIPT" heal; echo "rc=$?"')
 chk("таймер: правило снова первое, списки не качались (обновлены меньше суток назад)",
     "rc=0" in out and ipt(4)[0].endswith("--comment awg2-antiscan -j DROP") and "curl" not in calls()
     and ipt(4).count("INPUT -j f2b-sshd") == 1, [out, err, ipt(4)])
+# Выше нашего — DROP обфускатора и ACCEPT DNS только с awg0: сканер через них не
+# пройдёт, правило не двигается (и не дёргается каждый час)
+OURS = [x for x in ipt(4) if "awg2-antiscan" in x]
+SAFE = ["INPUT ! -i lo -p udp --dport 51821 -j DROP -m comment --comment awg-wgobf",
+        "INPUT -i awg0 -d 10.23.45.1 -p udp --dport 5353 -j ACCEPT -m comment --comment awg2-dns"]
+with open(f"{IPT_RULES}.iptables", "w") as f:
+    f.write("\n".join(SAFE + OURS + ["INPUT -j ufw-before-input"]) + "\n")
+reset_calls()
+rc, out, _ = bash(ASPRE + 'antiscan_rules_ok && echo OK; bash "$ANTISCAN_SCRIPT" heal')
+chk("туннели Тулзы выше правила (DROP обфускатора, DNS с awg0) — правило на месте, не двигается",
+    "OK" in out and ipt(4)[:3] == SAFE + OURS[:1] and "-D INPUT" not in calls(), [out, ipt(4)])
+with open(f"{IPT_RULES}.iptables", "w") as f:
+    f.write("\n".join(["INPUT -j ufw-before-input", "INPUT ! -i awg0 -p tcp --dport 22 -j ACCEPT"] + OURS) + "\n")
+rc, out, _ = bash(ASPRE + 'antiscan_rules_ok || echo MOVED; bash "$ANTISCAN_SCRIPT" heal')
+chk("переход в UFW или ACCEPT не только для своих интерфейсов выше — правило снова наверх",
+    "MOVED" in out and "awg2-antiscan" in ipt(4)[0], [out, ipt(4)])
 rc, out, _ = bash(ASPRE + 'sed -i "s/^UPDATED=.*/UPDATED=1/" "$ANTISCAN_CONF"; bash "$ANTISCAN_SCRIPT" heal; '
                   'grep -c "^curl" "$CALLS"')
 chk("таймер: списки старше суток — скачивает заново", out.strip().endswith("3"), out)

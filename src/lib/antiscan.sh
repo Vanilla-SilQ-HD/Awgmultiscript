@@ -150,13 +150,14 @@ _antiscan_rule() {  # набор → ANTISCAN_RULE
   ANTISCAN_RULE=(-m conntrack --ctstate NEW -m set --match-set "$1" src -m comment --comment "$ANTISCAN_TAG" -j DROP)
 }
 
-# Правило — первым в INPUT: ACCEPT своих портов, вставленные позже (UFW,
-# fail2ban, другие программы), иначе пропускали бы сканер раньше него.
+# Правило — выше всего, что может пропустить снаружи: ACCEPT и переходы в
+# чужие цепочки (UFW, fail2ban), вставленные позже, иначе пропускали бы сканер
+# раньше него. Сдвинуто ниже — снимается и ставится первым.
 _antiscan_rule_up() {  # iptables|ip6tables набор
   local ipt="$1"
   _antiscan_rule "$2"
   if "$ipt" -C INPUT "${ANTISCAN_RULE[@]}" 2>/dev/null; then
-    "$ipt" -S INPUT 2>/dev/null | sed -n 2p | grep -q -- "$ANTISCAN_TAG" && return 0
+    _antiscan_rule_first "$ipt" && return 0
     while "$ipt" -D INPUT "${ANTISCAN_RULE[@]}" 2>/dev/null; do :; done
   fi
   "$ipt" -I INPUT 1 "${ANTISCAN_RULE[@]}"
@@ -170,11 +171,22 @@ _antiscan_rule_down() {  # iptables|ip6tables набор
   return 0
 }
 
+# Выше нашего правила можно только то, что сканер не пропускает: DROP и
+# REJECT (порт WireGuard обфускатора) и правила для своих интерфейсов Тулзы
+# (ACCEPT DNS с awg0) — их трафик и так не из внешних сетей.
 _antiscan_rule_first() {  # iptables|ip6tables
-  "$1" -S INPUT 2>/dev/null | sed -n 2p | grep -q -- "$ANTISCAN_TAG"
+  "$1" -S INPUT 2>/dev/null | awk -v tag="$ANTISCAN_TAG" -v own=" $OWN_IFACES lo " '
+    $1 != "-A" { next }
+    {
+      for (i = 1; i <= NF; i++) if ($i == "--comment" && ($(i + 1) == tag || $(i + 1) == "\"" tag "\"")) { ok = 1; exit }
+      for (i = 1; i <= NF; i++) if ($i == "-j" && ($(i + 1) == "DROP" || $(i + 1) == "REJECT")) next
+      for (i = 2; i < NF; i++) if ($i == "-i" && $(i - 1) != "!" && index(own, " " $(i + 1) " ")) next
+      exit
+    }
+    END { exit !ok }'
 }
 
-# Правила на месте: есть набор — правило первое в своей таблице
+# Правила на месте: есть набор — правило выше всего, что пропускает снаружи
 antiscan_rules_ok() {
   ipset list -n "$ANTISCAN_SET" &>/dev/null && _antiscan_rule_first iptables || return 1
   if ipset list -n "$ANTISCAN_SET6" &>/dev/null; then _antiscan_rule_first ip6tables || return 1; fi
@@ -304,6 +316,7 @@ antiscan_run() {
 _antiscan_emit() {
   emit_script "$ANTISCAN_SCRIPT" 'antiscan_run "$@"' \
     ANTISCAN_DIR ANTISCAN_CONF ANTISCAN_ALLOW ANTISCAN_LOG ANTISCAN_SET ANTISCAN_SET6 ANTISCAN_TAG ANTISCAN_SRC \
+    OWN_IFACES \
     write_file _antiscan_lists _antiscan_get _antiscan_set _antiscan_log _antiscan_enabled_lists _antiscan_parse \
     _antiscan_names _antiscan_auto_allow _antiscan_ssh_peers _antiscan_fetch_all _antiscan_rule _antiscan_rule_up \
     _antiscan_rule_down _antiscan_rule_first antiscan_rules_ok _antiscan_load _antiscan_covers _antiscan_allow_rows \
