@@ -20,7 +20,8 @@ from aiogram.types import BotCommand, CallbackQuery, ChatMemberUpdated, ErrorEve
 
 from . import __version__, access, admins, alerts, api, ask, icons, jobs, monitor, net, store, ui, webapp
 from .config import load_config
-from .sections import backup, botself, clients, diag, main as main_menu, server, system, tunnels, webpanel, wgobf
+from .sections import (antiscan, backup, botself, clients, diag, main as main_menu, server, system, tunnels,
+                       webpanel, wgobf)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("awgbot")
@@ -79,7 +80,7 @@ def build(session: BaseSession | None = None) -> tuple[Bot, Dispatcher]:
     dp.errors.register(_on_error)
     dp.include_routers(main_menu.router, ask.router, server.router, clients.router, diag.router,
                        backup.router, tunnels.router, botself.router, system.router, wgobf.router,
-                       webpanel.router, fallback)
+                       webpanel.router, antiscan.router, fallback)
     return bot, dp
 
 

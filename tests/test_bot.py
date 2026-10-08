@@ -1508,6 +1508,69 @@ async def run():
         and not any(d == URL for _, d in buttons), [text, buttons])
     botapi.call = real_call_
 
+    print("Антисканер")
+    text, buttons = screen(await press("srv"))
+    chk("в «Сервере» — кнопка «🛡 Антисканер»", ("🛡 Антисканер", "as") in buttons, buttons)
+    ASST = {"enabled": True, "active": True, "v4": 3100, "v6": 29, "updated": 1791500000, "error": "",
+            "dropped": 1234, "lists": [{"id": "scan", "name": "Сканеры", "on": True, "entries": 165},
+                                       {"id": "skipa", "name": "СКИПА — сканеры РКН", "on": True, "entries": 145},
+                                       {"id": "gov", "name": "Сети госорганов", "on": True, "entries": 2818}],
+            "top": [{"packets": 30, "net": "77.0.3.0/24", "org": "Org <MVD>"}],
+            "allow": ["77.0.7.7", "2a0c:a9c7:157::/48"], "ssh": ["77.0.7.7"]}
+    as_calls = []
+
+    async def as_call(*args, **kw):
+        if args[:1] != ("antiscan",):
+            return await real_call_(*args, **kw)
+        as_calls.append((args[1:], kw.get("timeout")))
+        if args[1] == "status":
+            return botapi.Result(True, data=json.loads(json.dumps(ASST)))
+        if args[1] == "on":
+            ASST["enabled"] = True
+        if args[1] == "off":
+            ASST["enabled"] = False
+        return botapi.Result(True)
+    botapi.call = as_call
+    text, buttons = screen(await press("as"))
+    chk("экран: включён, подсетей и отбито, кто стучался (организация экранирована), списки и исключения",
+        "🟢 Включён · подсетей 3 129" in text and "Отбито: 1 234" in text and "<code>77.0.3.0/24</code>" in text
+        and "Org &lt;MVD&gt;" in text and "✅ Сети госорганов — 2 818" in text and "Исключения: 2" in text
+        and "твой SSH не блокируется" in text, text)
+    chk("кнопки: выключить, обновить, списки переключателями, исключения, журнал, назад в «Сервер»",
+        ("⏹ Выключить", "as:off") in buttons and ("🔄 Обновить списки", "as:upd") in buttons
+        and ("✅ Сети госорганов", "as:l:gov") in buttons and ("📝 Исключения", "as:al") in buttons
+        and ("📜 Журнал", "diag:log:antiscan|as") in buttons and ("◀️ Назад", "srv") in buttons, buttons)
+    await press("as:l:gov")
+    chk("снять список: остальные уходят в awg2, ждёт скачивания", (("lists", "scan,skipa"), 300) in as_calls,
+        as_calls[-3:])
+    ASST["lists"] = [dict(x, on=x["id"] == "gov") for x in ASST["lists"]]
+    n = len(as_calls)
+    sent = await press("as:l:gov")
+    chk("последний список не снимается", "хотя бы один" in " ".join(alerts(sent))
+        and not any(c[0][0] == "lists" for c in as_calls[n:]), [alerts(sent), as_calls[n:]])
+    text, buttons = screen(await press("as:off"))
+    chk("выключение — с подтверждением", ("⏹ Выключить", "as:offok") in buttons, buttons)
+    text, buttons = screen(await press("as:offok"))
+    chk("выключен: «Включить», без «Обновить списки»", "⚪️ Выключен" in text and ("✅ Включить", "as:on") in buttons
+        and not any(d == "as:upd" for _, d in buttons), [text, buttons])
+    text, _ = screen(await press("as:on"))
+    chk("включение: долгий вызов (списки качаются) и снова экран", as_calls[-2] == (("on",), 300)
+        and "✅ Включён" in text, [as_calls[-3:], text])
+    text, buttons = screen(await press("as:al"))
+    chk("исключения: список и кнопки «убрать» — и для IPv6 с двоеточиями",
+        "<code>2a0c:a9c7:157::/48</code>" in text and ("❌ 2a0c:a9c7:157::/48", "as:ad:2a0c:a9c7:157::/48") in buttons
+        and ("➕ Добавить", "as:aa") in buttons, [text, buttons])
+    await press("as:ad:2a0c:a9c7:157::/48")
+    chk("убрать IPv6-исключение — адрес целиком", (("allow", "del", "2a0c:a9c7:157::/48"), None) in as_calls, as_calls[-3:])
+    await press("as:aa")
+    sent = await say("abc")
+    chk("исключение: не адрес — переспрашивает", "⚠️" in screen(sent)[0] and not any(c[0][:2] == ("allow", "add")
+                                                                                   for c in as_calls), screen(sent))
+    await say("1.2.3.0/24")
+    chk("исключение: подсеть уходит в awg2", (("allow", "add", "1.2.3.0/24"), None) in as_calls, as_calls[-3:])
+    no_hourglass("антисканер")
+    botapi.call = real_call_
+
     print("Ширина экрана")
     short = ui.fit("<b>🛡 alice</b>", ui.kb(("📦 Комплект", "a"), ("🗑 Удалить", "b")))
     chk("короткий текст дополняется до ширины кнопок", short.startswith("<b>🛡 alice</b>")

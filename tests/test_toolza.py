@@ -1812,6 +1812,211 @@ chk("api web install (бот): логин admin, пароль сгенериро
     and conf.get("WEB_PASS", "").startswith("scrypt$") and r["data"]["url"].endswith(f":{conf['WEB_PORT']}/{conf['WEB_PATH']}/"),
     r)
 
+print("\n── Антисканер ──")
+# Заглушки с состоянием: ipset (наборы — файлами), iptables/ip6tables (правила
+# INPUT — файлом, -I ставит первым), iptables-save -c (счётчики), curl — отдаёт
+# списки из каталога ASLISTS. Сеть не нужна.
+ASBIN = os.path.join(TMP, "asbin")
+ASLISTS = os.path.join(TMP, "aslists")
+IPSET_DIR = os.path.join(TMP, "ipset")
+IPT_RULES = os.path.join(TMP, "ipt-rules")
+for d in (ASBIN, ASLISTS, os.path.join(IPSET_DIR, "sets"), os.path.join(IPSET_DIR, "gone")):
+    os.makedirs(d, exist_ok=True)
+AS_STUBS = {
+    "ipset": r"""echo "ipset $*" >> "$CALLS"
+S="$IPSET_DIR/sets"
+case "$1" in
+  restore) while read -r op name rest; do
+             case "$op" in
+               create) touch "$S/$name" ;;
+               flush) : > "$S/$name" ;;
+               add) e="${rest% -exist}"; echo "$e" >> "$S/$name" ;;
+             esac
+           done ;;
+  create) touch "$S/$2" ;;
+  add) e="${*:3}"; e="${e% -exist}"; echo "$e" >> "$S/$2" ;;
+  swap) [[ -f "$S/$2" && -f "$S/$3" ]] || exit 1; mv "$S/$2" "$S/.t"; mv "$S/$3" "$S/$2"; mv "$S/.t" "$S/$3" ;;
+  destroy) [[ -f "$S/$2" ]] || exit 1; mv -f "$S/$2" "$IPSET_DIR/gone/$2" ;;
+  list) if [[ "$2" == -n ]]; then [[ -f "$S/$3" ]] && echo "$3"; [[ -f "$S/$3" ]]; exit; fi
+        [[ -f "$S/$2" ]] || exit 1
+        echo "Name: $2"; echo "Members:"
+        while read -r e flag; do
+          n=$(awk -v e="$e" '$1 == e {print $2}' "$IPSET_DIR/hits" 2>/dev/null)
+          if [[ "$flag" == nomatch ]]; then echo "$e nomatch packets 0 bytes 0"; else echo "$e packets ${n:-0} bytes 0"; fi
+        done < "$S/$2" ;;
+esac
+exit 0""",
+    "iptables": r"""echo "${0##*/} $*" >> "$CALLS"
+f="$IPT_RULES.${0##*/}"; touch "$f"
+case "$1" in
+  -C) shift; c="$1"; shift; grep -qxF -- "$c $*" "$f" ;;
+  -I) shift; c="$1"; shift 2; { echo "$c $*"; cat "$f"; } > "$f.n"; mv "$f.n" "$f" ;;
+  -A) shift; c="$1"; shift; echo "$c $*" >> "$f" ;;
+  -D) shift; c="$1"; shift; grep -qxF -- "$c $*" "$f" || exit 1
+      awk -v r="$c $*" 'BEGIN {d = 0} !d && $0 == r {d = 1; next} {print}' "$f" > "$f.n"; mv "$f.n" "$f" ;;
+  -S) echo "-P $2 ACCEPT"; grep "^$2 " "$f" | sed "s/^$2 /-A $2 /" ;;
+  *) exit 0 ;;
+esac""",
+    "iptables-save": r"""t="${0##*/}"; t="${t%-save}"
+if [[ " $* " == *" -c "* ]]; then
+  sed "s/^/[$(cat "$IPT_RULES.$t.cnt" 2>/dev/null || echo 0):0] -A /" "$IPT_RULES.$t" 2>/dev/null
+else cat "$IPT_SAVE"; fi""",
+    "curl": r"""out="" url=""
+while (( $# )); do case "$1" in -o) out="$2"; shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac; done
+echo "curl $url" >> "$CALLS"
+src="$ASLISTS/${url##*/}"
+[[ -f "$src" && -n "$out" ]] || exit 22
+cp "$src" "$out" """,
+    "ss": r"""[[ -n "${FAKE_SSH_PEER:-}" ]] && echo "0 0 203.0.113.10:22 $FAKE_SSH_PEER:51000 users:((\"sshd\",pid=1,fd=4))"
+exit 0""",
+}
+for name, body in AS_STUBS.items():
+    with open(os.path.join(ASBIN, name), "w") as f:
+        f.write("#!/usr/bin/env bash\n" + body + "\n")
+    os.chmod(os.path.join(ASBIN, name), 0o755)
+for alias, target in (("ip6tables", "iptables"), ("ip6tables-save", "iptables-save")):
+    shutil.copy(os.path.join(ASBIN, target), os.path.join(ASBIN, alias))
+# Синтетические списки: мусор, частные сети, слишком широкие — отбрасываются
+with open(os.path.join(ASLISTS, "antiscanner.list"), "w") as f:
+    f.write("# сканеры\n10.0.0.0/8\n1.0.0.0/4\n999.1.1.0/24\n01.2.3.4\n5.6.7.0/24 # с комментарием\n"
+            "8.8.8.8\n192.168.1.0/24\n100.64.1.0/24\nfoo bar\n1.2.3.4/24/5\n"
+            "2a0c:a9c7:157::/48\nfe80::/10\n2001:db8::/32\n2a0c::1::2/64\n2a0c:a9c7:158::/48/9\n"
+            + "".join(f"31.{i}.0.0/16\n" for i in range(1, 21)))
+with open(os.path.join(ASLISTS, "skipa.list"), "w") as f:
+    f.write("".join(f"212.41.12.{i}/32\n" for i in range(1, 25)))
+
+
+def gov_list(n):
+    out = []
+    for i in range(n):
+        out.append(f"# Networks announced by AS{1000 + i}\n# AS-Name: TEST-{i}\n# Org {i} MVD\n# Moscow, Russia\n"
+                   f"77.{i // 250}.{i % 250}.0/24\n")
+    return "\n".join(out)
+
+
+with open(os.path.join(ASLISTS, "government_networks.list"), "w") as f:
+    f.write(gov_list(320))
+ASENV = {"PATH": ASBIN + ":" + ENV["PATH"], "IPSET_DIR": IPSET_DIR, "IPT_RULES": IPT_RULES, "ASLISTS": ASLISTS}
+ASPRE = f'export PATH="{ASBIN}:$PATH" IPSET_DIR="{IPSET_DIR}" IPT_RULES="{IPT_RULES}" ASLISTS="{ASLISTS}"; '
+
+
+def ipset_set(name):
+    try:
+        return open(os.path.join(IPSET_DIR, "sets", name)).read().split("\n")[:-1]
+    except OSError:
+        return None
+
+
+def ipt(fam=4):
+    try:
+        return open(f"{IPT_RULES}.{'iptables' if fam == 4 else 'ip6tables'}").read().split("\n")[:-1]
+    except OSError:
+        return []
+
+
+rc, out, _ = bash(f'_antiscan_parse 4 < "{ASLISTS}/antiscanner.list" | head -4')
+chk("разбор IPv4: мусор, частные и слишком широкие сети отброшены",
+    out.split()[:3] == ["5.6.7.0/24", "8.8.8.8/32", "31.1.0.0/16"], out)
+rc, out, _ = bash(f'_antiscan_parse 6 < "{ASLISTS}/antiscanner.list"')
+chk("разбор IPv6: только глобальные, без link-local, документационных и кривых", out.split() == ["2a0c:a9c7:157::/48"], out)
+rc, out, _ = bash('printf "10.1.2.3\\n1.2.3.4/8\\n1.2.3.4/7\\n" | _antiscan_parse 4 1')
+chk("исключения: частные адреса можно, но не шире /8", out.split() == ["10.1.2.3/32", "1.0.0.0/8"], out)
+
+reset_calls()
+r = api("antiscan", "on", env=dict(ASENV, FAKE_SSH_PEER="77.0.5.9", SSH_CONNECTION="77.0.7.7 5000 203.0.113.10 22"))
+v4 = ipset_set("awg2-antiscan") or []
+chk("api antiscan on: списки скачаны, набор собран, правило первым в INPUT",
+    r.get("ok") and "31.1.0.0/16" in v4 and "212.41.12.1/32" in v4 and "77.0.5.0/24" in v4
+    and "10.0.0.0/8" not in v4 and ipt(4)[:1] == ["INPUT -m conntrack --ctstate NEW -m set --match-set awg2-antiscan src "
+                                                  "-m comment --comment awg2-antiscan -j DROP"], [r, ipt(4), v4[:5]])
+chk("IPv6 — свой набор и правило в ip6tables", ipset_set("awg2-antiscan6") == ["2a0c:a9c7:157::/48"]
+    and any("awg2-antiscan6" in x for x in ipt(6)), [ipset_set("awg2-antiscan6"), ipt(6)])
+allow = open(os.path.join(ROOT, "var/lib/awg2/antiscan/allow")).read()
+chk("SSH-адреса из списка — в исключения насовсем, в наборе nomatch",
+    "77.0.7.7 # SSH" in allow and "77.0.5.9 # SSH" in allow
+    and "77.0.7.7/32 nomatch" in v4 and "77.0.5.9/32 nomatch" in v4, [allow, [x for x in v4 if "nomatch" in x]])
+units = os.listdir(os.path.join(ROOT, "units"))
+svc = open(os.path.join(ROOT, "units", "awg2-antiscan.service")).read()
+chk("служба при загрузке — раньше UFW и netfilter-persistent; таймер раз в час",
+    {"awg2-antiscan.service", "awg2-antiscan-update.service", "awg2-antiscan-update.timer"} <= set(units)
+    and "Before=network-pre.target ufw.service netfilter-persistent.service" in svc
+    and "systemctl enable --now awg2-antiscan-update.timer" in calls(), units)
+
+with open(f"{IPT_RULES}.iptables.cnt", "w") as f:
+    f.write("42")
+with open(os.path.join(IPSET_DIR, "hits"), "w") as f:
+    f.write("77.0.3.0/24 30\n31.2.0.0/16 12\n")
+r = api("antiscan", "status", env=ASENV)
+d = r.get("data") or {}
+lists = {x["id"]: x for x in d.get("lists") or []}
+chk("api antiscan status: включён, правило на месте, счётчик, списки, кто стучался — с организацией",
+    r.get("ok") and d.get("enabled") and d.get("active") and d.get("dropped") == 42 and d.get("v4", 0) > 340
+    and lists["gov"]["entries"] == 320 and lists["scan"]["on"]
+    and d["top"][0] == {"packets": 30, "net": "77.0.3.0/24", "org": "Org 3 MVD"}
+    and "77.0.7.7" in d.get("allow", []), d)
+
+# Оборванный ответ не заменяет прежний список
+with open(os.path.join(ASLISTS, "government_networks.list"), "w") as f:
+    f.write(gov_list(12))
+r = api("antiscan", "update", env=ASENV)
+d = api("antiscan", "status", env=ASENV).get("data") or {}
+chk("короткий ответ сервера списков — прежний список остаётся, ошибка сказана",
+    r.get("ok") and {x["id"]: x for x in d["lists"]}["gov"]["entries"] == 320 and "оставлен прежний" in d.get("error", ""),
+    [r, d])
+with open(os.path.join(ASLISTS, "government_networks.list"), "w") as f:
+    f.write(gov_list(320))
+
+# Правило сдвинули (fail2ban вставил своё первым) — таймер возвращает его наверх без скачивания
+with open(f"{IPT_RULES}.iptables", "w") as f:
+    f.write("INPUT -j f2b-sshd\n" + "\n".join(x for x in ipt(4) if "f2b" not in x) + "\n")
+api("antiscan", "update", env=ASENV)           # ошибка прошлого шага ушла, UPDATED свежий
+with open(f"{IPT_RULES}.iptables", "w") as f:
+    f.write("INPUT -j f2b-sshd\n" + "\n".join(x for x in ipt(4) if "f2b" not in x) + "\n")
+reset_calls()
+rc, out, err = bash(ASPRE + 'bash "$ANTISCAN_SCRIPT" heal; echo "rc=$?"')
+chk("таймер: правило снова первое, списки не качались (обновлены меньше суток назад)",
+    "rc=0" in out and ipt(4)[0].endswith("--comment awg2-antiscan -j DROP") and "curl" not in calls()
+    and ipt(4).count("INPUT -j f2b-sshd") == 1, [out, err, ipt(4)])
+rc, out, _ = bash(ASPRE + 'sed -i "s/^UPDATED=.*/UPDATED=1/" "$ANTISCAN_CONF"; bash "$ANTISCAN_SCRIPT" heal; '
+                  'grep -c "^curl" "$CALLS"')
+chk("таймер: списки старше суток — скачивает заново", out.strip().endswith("3"), out)
+
+r = api("antiscan", "allow", "add", "8.8.4.0/24", env=ASENV)
+r2 = api("antiscan", "allow", "add", "1.2.3.4\nPostUp = x", env=ASENV)
+r3 = api("antiscan", "allow", "add", "300.1.1.1", env=ASENV)
+chk("исключение: подсеть добавлена и сразу в наборе (nomatch); мусор — отказ",
+    r.get("ok") and "8.8.4.0/24 nomatch" in (ipset_set("awg2-antiscan") or []) and not r2.get("ok") and not r3.get("ok"),
+    [r, r2, r3])
+r = api("antiscan", "allow", "del", "8.8.4.0/24", env=ASENV)
+r2 = api("antiscan", "allow", "del", "9.9.9.9", env=ASENV)
+chk("исключение убрано; несуществующее — ошибка",
+    r.get("ok") and "8.8.4.0" not in open(os.path.join(ROOT, "var/lib/awg2/antiscan/allow")).read() and not r2.get("ok"),
+    [r, r2])
+
+r = api("antiscan", "lists", "scan,skipa", env=ASENV)
+v4 = ipset_set("awg2-antiscan") or []
+r2 = api("antiscan", "lists", "foo", env=ASENV)
+chk("списки: без госсетей — их подсетей в наборе нет; неизвестный список — отказ",
+    r.get("ok") and "31.1.0.0/16" in v4 and "77.0.5.0/24" not in v4 and not r2.get("ok"), [r, r2])
+
+heal = os.path.join(ROOT, "var/lib/awg2/antiscan/heal")
+with open(heal, "a"):
+    pass
+os.utime(heal, (time.time() - 4 * 3600,) * 2)
+reset_calls()
+rc, out, _ = bash(ASPRE + "antiscan_watchdog")
+chk("сторож: таймер молчал больше трёх часов — перезапуск",
+    "systemctl start --no-block awg2-antiscan-update.service" in calls(), calls())
+
+r = api("antiscan", "off", env=ASENV)
+chk("api antiscan off: правила сняты, наборы удалены, службы убраны",
+    r.get("ok") and not any("awg2-antiscan" in x for x in ipt(4) + ipt(6))
+    and ipset_set("awg2-antiscan") is None and ipset_set("awg2-antiscan6") is None, [r, ipt(4), ipt(6)])
+rc, out, _ = bash(ASPRE + 'bash "$ANTISCAN_SCRIPT" apply; echo "rc=$?"; ls "$IPSET_DIR/sets"')
+chk("выключен — служба при загрузке ничего не ставит", out.split() == ["rc=0"], out)
+rc, out, _ = bash(ASPRE + 'antiscan_remove; ls "$ANTISCAN_DIR" "$ANTISCAN_SCRIPT" 2>&1')
+chk("удаление вместе со скриптом: каталог и скрипт убраны", out.count("No such file") == 2, out)
+
 print("\n── Проверка новой версии: бета — раз в 20 минут, стабильный — раз в час ──")
 PEEK = 'update_peek() { touch "$STATE_DIR/peeked"; }; rm -f "$STATE_DIR/peeked"; '
 for chan, age, want in (("beta", 1300, True), ("beta", 600, False), ("stable", 1300, False), ("stable", 3700, True)):

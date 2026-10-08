@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-ffffff?style=flat-square&labelColor=000000)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Ubuntu%2024%20%2F%20Debian%2012%2B-E95420?style=flat-square&logo=ubuntu&logoColor=white)](https://ubuntu.com/)
 [![Protocol](https://img.shields.io/badge/AWG-2.0%20%2F%203.1-00d4ff?style=flat-square)](#)
-[![Version](https://img.shields.io/badge/version-v1.2.18-ff6b00?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v1.2.19-ff6b00?style=flat-square)](#)
 
 <br>
 
@@ -247,6 +247,27 @@ journalctl -u awg-bot -n 50 | grep 'Запасные адреса'
 ```
 
 Строка `Запасные адреса Telegram подключены (5 шт.)` — всё на месте.
+
+---
+
+## 🛡 Антисканер
+
+**Сервер → Антисканер** (в боте и панели — там же): новые входящие подключения из сетей
+сканеров РКН, СКИПА и госорганов отбрасываются до SSH, Xray, панелей и Mini App —
+сервер реже попадает в базы, которые собирают по итогам сканирований. Это не защита
+от DPI: блокировку по анализу трафика он не отменяет.
+
+- Списки — публичные [traffic-guard-lists](https://github.com/shadow-netlab/traffic-guard-lists):
+  сканеры, СКИПА, сети госорганов (любой можно выключить). Каждая запись проверяется:
+  частные и служебные сети и подсети шире /12 отбрасываются, оборванный ответ не
+  заменяет прежний список.
+- `ipset` и одно правило первым в `INPUT`: DROP только **новых** соединений — открытые
+  (текущий SSH) не рвутся, VPN-трафик клиентов (FORWARD) не трогается. IPv6 — тоже.
+- Твой SSH-адрес, если он в списке, и адреса сервера в исключения попадают сами;
+  свои исключения — адрес или подсеть.
+- Служба ставит правило при загрузке раньше UFW; таймер раз в час возвращает его
+  на место, раз в сутки обновляет списки. `iptables-persistent` не нужен.
+- Клиенты VPN из этих сетей тоже не подключатся — для них есть исключения.
 
 ---
 
@@ -490,6 +511,6 @@ python3 tests/test_admins.py && python3 tests/test_net.py
 
 *Сообщество [AWG-Toolza](https://t.me/awgToolza)*
 
-**AWG Toolza v1.2.18** · MIT License
+**AWG Toolza v1.2.19** · MIT License
 
 </div>

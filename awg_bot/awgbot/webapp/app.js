@@ -2308,6 +2308,7 @@ route(/^\/server$/, async (ctx) => {
     h("div", { class: "card list" },
       d.exists ? menuItem("🎛 Параметры AWG", "Jc, S1-S4, H1-H4 вручную", () => go("/server/params")) : null,
       menuItem("🧩 Модуль ядра", "версии, обновление, откат", () => go("/server/module")),
+      menuItem("🛡 Антисканер", "сети сканеров РКН и госорганов — не до портов сервера", () => go("/server/antiscan")),
       menuItem(d.installed ? "📦 Компоненты" : "📦 Установить компоненты", "пакеты, модуль, amneziawg-tools",
         () => jobAsk(ctx, "Пакеты, заголовки ядра, сборка модуля AmneziaWG и amneziawg-tools из исходников. Обычно 5-15 минут. "
           + "Если ядру нет заголовков, поставится свежее ядро — тогда понадобится перезагрузка.", "Установка компонентов", ["server", "install"])),
@@ -2318,6 +2319,59 @@ route(/^\/server$/, async (ctx) => {
     d.exists ? h("button", { class: "btn-danger btn-block", onclick: (ev) => quickAsk(ev.currentTarget,
       "Сброс сервера: awg0 и все клиенты будут удалены, туннели выключены. Перед сбросом делается авто-бэкап, "
       + "компоненты остаются. Сбросить?", "Сервер сброшен", ["server", "reset"]) }, "⚠️ Сбросить сервер") : null);
+});
+
+// Антисканер: новые подключения из сетей сканеров РКН, СКИПА и госорганов
+// отбрасываются до служб сервера. Списки качает и проверяет awg2
+const num = (n) => String(Math.round(+n || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+route(/^\/server\/antiscan$/, async (ctx) => {
+  const d = (await call("antiscan", "status")) || {};
+  const on = !!d.enabled, lists = d.lists || [], allow = d.allow || [], top = d.top || [];
+  const ip = h("input", { placeholder: "1.2.3.4 или 1.2.3.0/24", autocapitalize: "off", autocomplete: "off",
+    "aria-label": "Адрес или подсеть", style: "flex:1;min-width:0" });
+  function setList(b, id) {
+    const want = lists.filter((x) => !!x.on !== (x.id === id)).map((x) => x.id);
+    if (!want.length) return fail(new Error("Нужен хотя бы один список"));
+    return quick(b, "Списки применены", ["antiscan", "lists", want.join(",")]);
+  }
+  const add = btn("➕ Добавить", (b) => {
+    const v = ip.value.trim();
+    if (!/^[0-9A-Fa-f.:]+(\/\d{1,3})?$/.test(v)) return fail(new Error("Нужен IPv4 или IPv6 адрес, можно с маской"));
+    return quick(b, "Исключение добавлено", ["antiscan", "allow", "add", v]);
+  });
+  add.style.flex = "none"; add.style.whiteSpace = "nowrap";
+  ctx.put(title("🛡 Антисканер"),
+    hint("Новые подключения из сетей сканеров РКН и госорганов отбрасываются до SSH, Xray и панелей. "
+      + "VPN-трафик клиентов не трогается."),
+    h("div", { class: "card" },
+      kv("Статус", !on ? h("span", { class: "muted" }, "○ выключен") : d.active ? h("span", { class: "ok" }, "● включён")
+        : h("span", { class: "warn" }, "▲ правило не на месте")),
+      on ? kv("Подсетей", num((d.v4 || 0) + (d.v6 || 0))) : null,
+      on ? kv("Отбито", num(d.dropped) + " подключений") : null,
+      d.updated ? kv("Списки", fmtTime(d.updated)) : null,
+      d.error ? h("div", { class: "small warn" }, "▲ " + d.error) : null),
+    h("div", { class: "actions", style: "margin-top:8px" },
+      on ? btn("⏹ Выключить", (b) => quickAsk(b, "Выключить антисканер? Правило и наборы снимаются, сканеры снова "
+        + "увидят порты сервера.", "Антисканер выключен", ["antiscan", "off"]))
+        : btn("✅ Включить", (b) => quick(b, "Антисканер включён", ["antiscan", "on"]), "btn-primary"),
+      on ? btn("🔄 Обновить списки", (b) => quick(b, "Списки обновлены", ["antiscan", "update"])) : null,
+      btn("📜 Журнал", () => go("/log/antiscan"))),
+    top.length ? [h("h2", {}, "Чаще всего стучались"), h("div", { class: "card" }, top.map((t) =>
+      h("div", { style: "padding:5px 0" }, h("div", {}, h("b", {}, num(t.packets)), " · ", t.net),
+        t.org ? h("div", { class: "muted small" }, t.org) : null)))] : null,
+    h("h2", {}, "Списки"),
+    h("div", { class: "card list" }, lists.map((x) => h("div", { class: "item", onclick: (ev) => setList(ev.currentTarget, x.id) },
+      h("div", { class: "check" + (x.on ? " on" : "") }, x.on ? icon("check") : null),
+      h("div", { class: "main" }, h("div", { class: "title" }, x.name),
+        h("div", { class: "sub" }, x.entries ? num(x.entries) + " подсетей" : "скачается при включении"))))),
+    h("h2", {}, "Исключения"),
+    hint("Адрес или подсеть из исключений не блокируется. Адреса сервера и открытых SSH-сессий — в исключениях всегда."
+      + (d.ssh && d.ssh.length ? " Твой SSH: " + d.ssh.join(", ") + "." : "")),
+    allow.length ? h("div", { class: "card list" }, allow.map((a) => h("div", { class: "item", onclick: (ev) =>
+      quickAsk(ev.currentTarget, `Убрать исключение ${a}?`, "Исключение убрано", ["antiscan", "allow", "del", a]) },
+    h("div", { class: "main" }, h("div", { class: "title mono" }, a)), h("div", { class: "side bad" }, icon("x"))))) : null,
+    h("div", { class: "row", style: "gap:8px;margin-top:8px" }, ip, enterTo(add, ip)),
+    hint("Клиенты VPN, которые подключаются из этих сетей, тоже не подключатся — для них есть исключения."));
 });
 
 // Создание сервера — те же вопросы, что задают меню awg2 и бот, одной формой
@@ -3760,7 +3814,7 @@ route(/^\/bot\/app$/, async (ctx) => {
 const LOGS = { manager: "awg2 — действия", install: "Компоненты", module: "Сборка модуля", awg: "awg0 (awg-quick)",
   expire: "Сроки клиентов", warp: "WARP", "warp-health": "WARP health-check", usque: "usque (WARP MASQUE)", xray: "Xray",
   "xray-routing": "Маршруты Xray", tun2socks: "tun2socks", exits: "Exit-ноды", cascade: "Каскад", dns: "dnscrypt-proxy",
-  "dns-health": "DNS health-check", wgobf: "WG + обфускатор", bot: "Telegram-бот" };
+  "dns-health": "DNS health-check", wgobf: "WG + обфускатор", bot: "Telegram-бот", antiscan: "Антисканер" };
 
 route(/^\/log\/([a-z0-9-]+)$/, async (ctx, name) => {
   const r = await callR(["log", name, "150"]);

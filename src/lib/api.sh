@@ -816,6 +816,42 @@ _api_web() {
   esac
 }
 
+# ── Антисканер ────────────────────────────────────────────
+_api_antiscan_lists() {  # id<TAB>подпись<TAB>включён<TAB>записей
+  local id file label min n on f
+  while IFS=$'\t' read -r id file label min; do
+    f="$ANTISCAN_DIR/lists/$id.list" n=0 on=0
+    [[ -f "$f" ]] && n=$(( $(_antiscan_parse 4 < "$f" | wc -l) + $(_antiscan_parse 6 < "$f" | wc -l) ))
+    [[ " $(_antiscan_enabled_lists) " == *" $id "* ]] && on=1
+    printf '%s\t%s\t%s\t%s\n' "$id" "$label" "$on" "$n"
+  done < <(_antiscan_lists)
+}
+
+_api_antiscan() {
+  local a="${1:-status}" e on=0
+  shift || true
+  case "$a" in
+    status)
+      read -r -a e <<< "$(_antiscan_get ENTRIES)"
+      antiscan_on && on=1
+      { _kv enabled:b "$on"; _kv active:b "$( (( on )) && _b antiscan_rules_ok || echo 0)"
+        _kv v4:n "${e[0]:-0}"; _kv v6:n "${e[1]:-0}"
+        _kv updated:n "$(_antiscan_get UPDATED)"; _kv error "$(_antiscan_get ERROR)"
+        _kv dropped:n "$( (( on )) && antiscan_dropped || echo 0)"
+        _kv lists:j "$(_api_antiscan_lists | py json-rows id name on:b entries:n)"
+        _kv top:j "$( (( on )) && antiscan_top 5 | py json-rows packets:n net org || echo '[]')"
+        _kv allow:j "$(_antiscan_allow_rows | py json-list)"
+        _kv ssh:j "$(_antiscan_ssh_peers | py json-list)"
+      } | api_obj ;;
+    on) antiscan_enable ;;
+    off) antiscan_disable ;;
+    update) antiscan_update ;;
+    lists) antiscan_lists_set "$@" ;;
+    allow) antiscan_allow "$@" ;;
+    *) _api_usage "antiscan status|on|off|update|lists scan,skipa,gov|allow add|del АДРЕС" ;;
+  esac
+}
+
 _api_uninstall() {
   local o
   for o in "$@"; do [[ "$o" =~ ^(bot|wgobf|web|self)$ ]] || { _api_usage "uninstall [bot] [wgobf] [web] [self]"; return; }; done
@@ -836,7 +872,8 @@ _api_log() {
     tun2socks) unit="$T2S_UNIT" ;;       exits) unit="$EXITS_UNIT" ;;
     dns) unit="$DNS_UNIT" ;;             wgobf) unit="$WGOBF_UNIT" ;;
     bot) unit="$BOT_UNIT" ;;             web) file="$WEB_LOG" ;;
-    *) _api_usage "log manager|install|module|expire|cascade|warp-health|dns-health|usque|awg|warp|xray|xray-routing|tun2socks|exits|dns|wgobf|bot|web [строк]"; return ;;
+    antiscan) file="$ANTISCAN_LOG" ;;
+    *) _api_usage "log manager|install|module|expire|cascade|warp-health|dns-health|usque|awg|warp|xray|xray-routing|tun2socks|exits|dns|wgobf|bot|web|antiscan [строк]"; return ;;
   esac
   if [[ -n "$file" ]]; then
     [[ -f "$file" ]] || { info "Журнала $file нет"; return 0; }
@@ -967,12 +1004,13 @@ api_dispatch() {
     bot) _api_bot "$@" ;;
     cert) _api_cert "$@" ;;
     web) _api_web "$@" ;;
+    antiscan) _api_antiscan "$@" ;;
     uninstall) _api_uninstall "$@" ;;
     log) _api_log "$@" ;;
     job) _api_job "$@" ;;
     help)
       echo "Разделы: status server module clients client mimicry traffic diag backup tunnels warp xray t2s"
-      echo "         exits cascade dns wgobf update bot cert web uninstall log job version"
+      echo "         exits cascade dns wgobf update bot cert web antiscan uninstall log job version"
       echo "Подсказка по разделу: awg2 api РАЗДЕЛ" ;;
     *) err "Неизвестная команда: $cmd — awg2 api help"; return 2 ;;
   esac
@@ -1015,6 +1053,7 @@ api_main() {
   else
     helpers_refresh || true
     expire_watchdog || true
+    antiscan_watchdog || true
     if _api_readonly "${API_ARGS[@]}"; then
       api_dispatch "${API_ARGS[@]}" || rc=$?
     else

@@ -186,6 +186,16 @@ CERT_SERVICE="awg2-cert.service"
 CERT_TIMER="awg2-cert.timer"
 CERT_TAG="awg2-cert"
 
+# ── Антисканер (сети сканеров РКН и госорганов — DROP новых входящих) ──
+ANTISCAN_DIR="$STATE_DIR/antiscan"          # списки, исключения, состояние
+ANTISCAN_CONF="$ANTISCAN_DIR/antiscan.conf" # ON, LISTS, UPDATED, ERROR, ENTRIES
+ANTISCAN_ALLOW="$ANTISCAN_DIR/allow"        # исключения: адрес или подсеть в строке
+ANTISCAN_SCRIPT="/usr/local/bin/awg2-antiscan"
+ANTISCAN_LOG="/var/log/awg2-antiscan.log"
+ANTISCAN_SET="awg2-antiscan" ANTISCAN_SET6="awg2-antiscan6" ANTISCAN_TAG="awg2-antiscan"
+ANTISCAN_UNIT="awg2-antiscan.service" ANTISCAN_TIMER="awg2-antiscan-update.timer"
+ANTISCAN_SRC="https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/refs/heads/main/public"
+
 # Интерфейсы, которые поднимает сам awg2: их адрес не может быть Endpoint
 # клиента, и маршрут через них — не аплинк сервера.
 OWN_IFACES=" awg0 warp0 xray0 tun0 wgcf wgobf0 "

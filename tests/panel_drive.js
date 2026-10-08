@@ -437,6 +437,15 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await shot("23-module");
   });
   await step("журнал", async () => { await nav("/log/manager", "pre"); });
+  await step("антисканер: выключен, три списка, исключения, «Включить»", async () => {
+    await nav("/server/antiscan", "text=Сети госорганов");
+    const n = await page.locator(".card.list .item .check").count();
+    if (n !== 3) throw new Error("ждали 3 списка, есть " + n);
+    await page.waitForSelector("text=○ выключен");
+    await page.waitForSelector("button:has-text('Включить')");
+    await page.waitForSelector("input[aria-label='Адрес или подсеть']");
+    await shot("23b-antiscan");
+  });
 
   // ── Туннели и DNS ──
   await step("туннели", async () => {

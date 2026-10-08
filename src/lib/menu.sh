@@ -39,8 +39,9 @@ do_server_menu() {
     echo -e "  ${C}6)${N} Проверить и починить"
     echo -e "  ${C}7)${N} Endpoint ${D}— ${ep:-IP сервера}${N}"
     echo -e "  ${Y}8)${N} Сбросить сервер"
+    echo -e "  ${C}9)${N} Антисканер ${D}— $(antiscan_on && echo "включён" || echo "сети сканеров РКН")${N}"
     echo -e "  ${W}0)${N} ← Назад"
-    read_choice c "${C}  Выбор [0-8]: ${N}" 0 8 0
+    read_choice c "${C}  Выбор [0-9]: ${N}" 0 9 0
     case "$c" in
       1) do_install || true ;;
       2) do_create_server || true ;;
@@ -50,6 +51,7 @@ do_server_menu() {
       6) do_repair || true ;;
       7) do_endpoint_menu || true ;;
       8) do_reset_server || true ;;
+      9) do_antiscan_menu || true; continue ;;
       0) return 0 ;;
     esac
     pause

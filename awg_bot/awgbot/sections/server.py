@@ -65,6 +65,7 @@ async def screen(target: ui.Target) -> None:
         ("🎛 Параметры AWG", act.data("par")) if exists else None,
         ("🌍 Endpoint", act.data("ep")) if exists else None,
         ("🛠 Починить", act.data("repair")),
+        ("🛡 Антисканер", "as"),
         ("♻️ Перезагрузка", act.data("reboot")),
         ("⚠️ Сбросить", act.data("reset")) if exists else None,
         ui.back()))

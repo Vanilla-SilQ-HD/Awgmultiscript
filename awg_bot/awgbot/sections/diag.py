@@ -20,7 +20,7 @@ LOGS = [
     ("warp-health", "WARP health-check"), ("xray", "Xray"), ("xray-routing", "Маршруты Xray"),
     ("tun2socks", "tun2socks"), ("exits", "Exit-ноды"), ("cascade", "Каскад"),
     ("dns", "dnscrypt-proxy"), ("dns-health", "DNS health-check"), ("wgobf", "WG + обфускатор"),
-    ("bot", "Telegram-бот"), ("web", "Веб-панель"),
+    ("bot", "Telegram-бот"), ("web", "Веб-панель"), ("antiscan", "Антисканер"),
 ]
 # Журнал входов веб-панели (адреса, введённые логины) — как и сам раздел «Веб-панель»
 OWNER_LOGS = {"web"}

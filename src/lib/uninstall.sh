@@ -155,6 +155,10 @@ uninstall_all() {
   elif wgobf_installed; then info "WG + обфускатор оставлен и продолжит работать сам"; fi
   if [[ "$del_web" == y ]] && web_installed; then web_remove quiet
   elif web_installed; then info "Веб-панель оставлена — сервера AWG в ней больше нет"; fi
+  # Антисканер работает через свой скрипт и без awg2, но управлять им без
+  # awg2 нечем — уходит вместе со скриптом, иначе остаётся защищать сервер
+  if [[ "$del_self" == y ]]; then antiscan_remove
+  elif antiscan_on; then info "Антисканер оставлен и продолжит работать"; fi
   if [[ "$del_bot" == y ]]; then
     bot_uninstall quiet
     # Сертификат — для Mini App бота и веб-панели

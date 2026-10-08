@@ -113,7 +113,7 @@ CLIENT_DIR="{ROOT}/root"; STATE_DIR="{ROOT}/var/lib/awg2"; LOG_FILE="{ROOT}/awg.
 INSTALL_LOG="{ROOT}/install.log"; EXITS_DIR="$AWG_DIR"
 EXITS_PEERS="$EXITS_DIR/exits_peers.list"; EXITS_STATE="$EXITS_DIR/exits_state"
 for v in DNS_PERSIST_SCRIPT DNS_HEALTH_SCRIPT CASCADE_SCRIPT T2S_ROUTING_SCRIPT XRAY_ROUTING_SCRIPT \\
-         EXITS_SCRIPT EXPIRE_BIN WARP_AUTOSTART_SCRIPT WARP_HEALTH_SCRIPT WGOBF_FW USQUE_UP_HOOK; do
+         EXITS_SCRIPT EXPIRE_BIN WARP_AUTOSTART_SCRIPT WARP_HEALTH_SCRIPT WGOBF_FW USQUE_UP_HOOK ANTISCAN_SCRIPT; do
   printf -v "$v" '%s' "{ROOT}/scripts/$v"
 done
 CASCADE_DIR="{ROOT}/etc/awg-cascade"; CASCADE_RULES="$CASCADE_DIR/rules.conf"; CASCADE_LOG="{ROOT}/cascade.log"
@@ -136,6 +136,8 @@ DNS_PROXY_BACKUP_CONF="$DNS_PROXY_CONF.awg-backup"
 WARP_DIR="{ROOT}/etc/wgcf"; WARP_ACCOUNT="$WARP_DIR/wgcf-account.toml"; WARP_PROFILE="$WARP_DIR/wgcf-profile.conf"
 WARP_STATE="$WARP_DIR/state"; WARP_CONF="{ROOT}/etc/wireguard/warp0.conf"; WARP_BACKEND_FILE="{ROOT}/etc/awg-warp-backend"
 USQUE_DIR="{ROOT}/etc/usque"; USQUE_CONF="$USQUE_DIR/config.json"
+ANTISCAN_DIR="$STATE_DIR/antiscan"; ANTISCAN_CONF="$ANTISCAN_DIR/antiscan.conf"; ANTISCAN_ALLOW="$ANTISCAN_DIR/allow"
+ANTISCAN_LOG="{ROOT}/antiscan.log"
 write_unit() {{ mkdir -p "{ROOT}/units"; cat > "{ROOT}/units/$1"; }}
 remove_unit() {{ :; }}
 mkdir -p "$AWG_DIR" "$CLIENT_DIR" "$STATE_DIR" "{ROOT}/scripts"
