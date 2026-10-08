@@ -219,6 +219,10 @@ rc, out, err = bash('for d in "1.1.1.1, 1.0.0.1" "8.8.8.8" "1.1.1.1 8.8.8.8" "99
                     'valid_dns_list "$d" && echo y || echo n; done')
 chk("DNS клиентов: каждый адрес — настоящий IPv4 (999.999.999.999 — отказ)",
     out.split() == ["y", "y", "y", "n", "n", "n", "n"] and not err, out + err)
+rc, out, err = bash('valid_dns_list $\'1.1.1.1\\nPostUp = id\' && echo y || echo n; '
+                    'valid_dns_list $\'1.1.1.1\\t8.8.8.8\' && echo y || echo n')
+chk("DNS клиентов: одна строка — перевод строки (и табуляция) не проходят", out.split() == ["n", "n"] and not err,
+    out + err)
 rc, out, _ = bash('for d in 010.0.0.1 1.2.3.04 1.2.3.4 example.com; do valid_domain "$d" && echo "$d"; done')
 chk("valid_domain: цифры с точками (и с нулями) — не домен", out.split() == ["example.com"], out)
 
@@ -610,6 +614,10 @@ d = r.get("data") or {}
 chk("api client add", r.get("ok") and d.get("name") == "carol" and "[Interface]" in d.get("text", ""), r)
 r = api("client", "add", "carol", "mimicry=none")
 chk("занятое имя — ошибка с текстом", r.get("ok") is False and r["rc"] == 1 and "carol" in r["error"], r)
+r = api("client", "add", "dnsbad", "mimicry=none", "dns=1.1.1.1\nPostUp = id")
+chk("api client add: DNS с переводом строки — отказ, конфиг не создан",
+    r.get("ok") is False and "dns" in r.get("error", "")
+    and not os.path.exists(os.path.join(ROOT, "root", "dnsbad_awg2.conf")), r)
 rows = api("clients", "list").get("data") or []
 carol = next((c for c in rows if c["name"] == "carol"), {})
 chk("срок клиента", carol.get("expires", 0) > 1e9 and carol.get("mimicry") == "none", carol)

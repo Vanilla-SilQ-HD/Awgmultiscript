@@ -807,6 +807,9 @@ valid_ip() {
 valid_dns_list() {  # «1.1.1.1, 1.0.0.1»
   local -a a
   local d
+  # Одна строка из цифр, точек, запятых и пробелов: перевод строки дописал бы в конфиг
+  # клиента свои строки, а read ниже проверяет только первую
+  [[ "$1" =~ ^[0-9.,\ ]+$ ]] || return 1
   IFS=', ' read -ra a <<< "$1"
   (( ${#a[@]} )) || return 1
   for d in "${a[@]}"; do valid_ip "$d" || return 1; done
@@ -15003,5 +15006,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=7d220bcb0e00338b
+_BUILD_SUM=22fe417f9241600c
 main "$@"
