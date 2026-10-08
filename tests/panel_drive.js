@@ -433,6 +433,12 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
       return [st.getPropertyValue("--acc").trim(), st.zoom, st.getPropertyValue("--rb").trim()]; });
     const a = await look();
     if (!/^hsl\(198/.test(a[0]) || a[1] !== "0.9" || a[2] !== "4px") throw new Error("акцент/масштаб/скругление не применились: " + a);
+    // Знак Тулзы — в цвет акцента, как слово «toolza»: перекрашен в шапке и во вкладке
+    const tz = () => page.evaluate(() => [document.querySelector(".top img.tz").src, document.getElementById("favicon").href]);
+    const [logo, fav] = await tz();
+    const dec = decodeURIComponent(logo.slice(logo.indexOf(",") + 1));
+    if (!logo.startsWith("data:image/svg+xml;charset=utf-8,") || fav !== logo || /#2fe3ad|#27e57f/i.test(dec) || !/<svg/.test(dec))
+      throw new Error("знак не перекрашен под акцент: " + logo.slice(0, 80));
     await page.reload({ waitUntil: "domcontentloaded" }); await page.waitForSelector("h1");
     const kept = await look();
     if (kept.join() !== a.join()) throw new Error("не запомнилось: " + kept);
@@ -442,6 +448,8 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.click(".drawer.on button:has-text('Готово')");
     const reset = await look();
     if (reset[0] !== "" || reset[1] !== "" || reset[2] !== "16px" || await grid()) throw new Error("сброс не сработал: " + reset);
+    const [logo0, fav0] = await tz();
+    if (logo0 !== await page.evaluate(() => TZ_ICON) || fav0 !== logo0) throw new Error("после сброса знак не исходный");
   });
 
   await step("«Ещё»: остальные разделы снизу", async () => {

@@ -70,7 +70,8 @@
   .rail a.on { color: var(--acc-ink); background: var(--acc); }
   .rail a.logo { width: 50px; height: 50px; margin-bottom: 10px; }
   .rail a.logo:hover { background: none; }
-  .rail a.logo img { width: 50px; height: 50px; filter: drop-shadow(0 0 10px rgba(47, 232, 160, .22)); }
+  .rail a.logo img { width: 50px; height: 50px; filter: drop-shadow(0 0 10px rgba(47, 232, 160, .22));
+    filter: drop-shadow(0 0 10px color-mix(in srgb, var(--acc) 22%, transparent)); }
   .rail .tip { position: fixed; left: calc(var(--rail) - 6px); white-space: nowrap; background: var(--text); color: var(--bg);
                padding: 4px 9px; border-radius: 7px; font-size: 12px; font-weight: 600; opacity: 0; pointer-events: none;
                transform: translateX(-4px); transition: opacity .12s, transform .12s; z-index: 30; }
@@ -595,7 +596,8 @@
 
   /* Вход в веб-панель, «открой в Telegram» */
   .login, .open-tg { max-width: 380px; margin: 12vh auto 0; text-align: center; padding: 26px 22px 20px; }
-  .login .logo, .open-tg .logo { width: 84px; height: 84px; margin: -6px auto 6px; display: block; filter: drop-shadow(0 0 18px rgba(47, 232, 160, .25)); }
+  .login .logo, .open-tg .logo { width: 84px; height: 84px; margin: -6px auto 6px; display: block; filter: drop-shadow(0 0 18px rgba(47, 232, 160, .25));
+    filter: drop-shadow(0 0 18px color-mix(in srgb, var(--acc) 25%, transparent)); }
   .login h3, .open-tg h3 { margin: 0 0 2px; font: 800 20px var(--sans); letter-spacing: -.02em; }
   .login input { width: 100%; margin: 6px 0; }
   .open-tg .btn { margin-top: 16px; }

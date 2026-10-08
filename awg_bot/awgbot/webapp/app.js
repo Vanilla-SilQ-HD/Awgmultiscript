@@ -289,6 +289,45 @@ const autoTheme = () => (WEB ? (window.matchMedia && matchMedia("(prefers-color-
 const themeNow = () => (LOOK.mode === "dark" || LOOK.mode === "light" ? LOOK.mode : autoTheme());
 const BG_VARS = ["--bg", "--bg2", "--panel", "--panel2", "--hover", "--line", "--line2"];
 const rgbHex = (rgb) => "#" + (rgb.match(/\d+/g) || [0, 0, 0]).slice(0, 3).map((x) => (+x).toString(16).padStart(2, "0")).join("");
+
+// Знак Тулзы — в цвет акцента, как слово «toolza»: у каждого цвета SVG оттенок
+// сдвигается от зелёного Toolza (156°) к выбранному, насыщенность — по ползунку,
+// яркость остаётся (блики и тени знака на месте). Акцент по умолчанию — исходный файл.
+const TZ_HUE = 156, TZ_SAT = 80;
+function tzHex(hex, dh, ks) {
+  const n = parseInt(hex, 16), r = (n >> 16) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, d = mx - mn;
+  let hh = 0, ss = 0;
+  if (d) {
+    ss = d / (1 - Math.abs(2 * l - 1));
+    hh = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    hh *= 60;
+  }
+  hh = (hh + dh + 720) % 360; ss = Math.min(1, ss * ks);
+  const c = (1 - Math.abs(2 * l - 1)) * ss, x = c * (1 - Math.abs((hh / 60) % 2 - 1)), m = l - c / 2;
+  const [r1, g1, b1] = hh < 60 ? [c, x, 0] : hh < 120 ? [x, c, 0] : hh < 180 ? [0, c, x] : hh < 240 ? [0, x, c] : hh < 300 ? [x, 0, c] : [c, 0, x];
+  return [r1, g1, b1].map((v) => Math.round((v + m) * 255).toString(16).padStart(2, "0")).join("");
+}
+function tzIcon(big = false) {
+  const src = big ? TZ_ICON_BIG : TZ_ICON;
+  if (LOOK.hue == null || (LOOK.hue === TZ_HUE && LOOK.sat === TZ_SAT)) return src;
+  const key = `${big ? "b" : "s"}${LOOK.hue}/${LOOK.sat}`, memo = tzIcon.memo || (tzIcon.memo = new Map());
+  if (!memo.has(key)) {
+    if (memo.size > 8) memo.clear();          // ползунок оттенка: не копить знак на каждый градус
+    const dh = LOOK.hue - TZ_HUE, ks = LOOK.sat / TZ_SAT;
+    const text = atob(src.slice(src.indexOf(",") + 1)).replace(/#([0-9a-f]{6})\b/gi, (_, hex) => "#" + tzHex(hex, dh, ks));
+    memo.set(key, "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text));
+  }
+  return memo.get(key);
+}
+// Акцент сменился: знаки на экране, на схеме и во вкладке браузера — в новый цвет
+function tzRefresh() {
+  document.querySelectorAll("img.tz").forEach((i) => { i.src = tzIcon(i.classList.contains("big")); });
+  document.querySelectorAll("image.tz").forEach((i) => i.setAttribute("href", tzIcon()));
+  const fav = document.getElementById("favicon");
+  if (fav) fav.href = tzIcon();
+}
+
 function applyLook(save = false) {
   const el = document.documentElement, st = el.style, mode = themeNow(), dark = mode === "dark";
   el.dataset.theme = mode;
@@ -308,6 +347,7 @@ function applyLook(save = false) {
   // Масштаб — всей панели: кнопки и карточки сохраняют пропорции, подписи не переносятся
   st.zoom = LOOK.zoom === 100 ? "" : String(LOOK.zoom / 100);
   document.body.classList.toggle("grid-bg", !!LOOK.grid);
+  tzRefresh();
   if (save) setPref("look", JSON.stringify(LOOK));
   try {
     const bg = rgbHex(getComputedStyle(document.body).backgroundColor);
@@ -425,7 +465,7 @@ const srvHidden = () => pref("hide-srv", "") === "1";
 const railWide = () => pref("rail", "wide") !== "narrow";
 function toggleSrvHidden() { setPref("hide-srv", srvHidden() ? "" : "1"); drawTop(); window.dispatchEvent(new Event("resize")); }
 function toggleRail() { setPref("rail", railWide() ? "narrow" : "wide"); drawTop(); window.dispatchEvent(new Event("resize")); }
-const logoImg = (cls) => h("img", { class: cls || null, src: TZ_ICON, alt: "" });
+const logoImg = (cls) => h("img", { class: "tz" + (cls ? " " + cls : ""), src: tzIcon(), alt: "" });
 
 // Знак-название: крупное AWG на всю высоту, справа «toolza» и строка версии.
 // Буквы меряются в браузере (canvas, тот же шрифт): верх AWG — по верху «toolza»,
@@ -1114,7 +1154,7 @@ function topology(el, rows, mdl, srvLabel) {
     s += `<g class="cl"></g><text class="lbl2" x="${cx - 16}" y="${Hh - 6}" text-anchor="end">↕ ${shown.length} ${plural(shown.length, "клиент", "клиента", "клиентов")}</text>`;
   }
   s += `<g class="node" data-srv="1"><rect x="${sx - sw / 2}" y="${sy - sh / 2}" width="${sw}" height="${sh}" rx="16" fill="var(--panel2)" stroke="var(--acc)" stroke-width="1.5"/>
-    <image x="${sx - 18}" y="${sy - sh / 2 + 8}" width="36" height="36" href="${TZ_ICON}"/>
+    <image class="tz" x="${sx - 18}" y="${sy - sh / 2 + 8}" width="36" height="36" href="${tzIcon()}"/>
     <text class="lbl" x="${sx}" y="${sy + (narrow ? 26 : 18)}" text-anchor="middle">awg0</text>
     ${narrow ? "" : `<text class="lbl2" x="${sx}" y="${sy + 34}" text-anchor="middle">${esc(srvLabel)}</text>`}</g>`;
   exits.forEach((e, j) => {
@@ -3460,7 +3500,7 @@ function showLogin(err = "") {
       pass.select();
     } finally { enter.disabled = false; }
   } },
-  h("img", { class: "logo", src: TZ_ICON_BIG, alt: "" }),
+  h("img", { class: "logo tz big", src: tzIcon(true), alt: "" }),
   h("h3", {}, "AWG Toolza"),
   h("div", { class: "muted small", style: "margin-bottom:14px" }, "Веб-панель сервера"),
   user, pass, msg, enter);
@@ -3539,7 +3579,7 @@ if (window.matchMedia) {
   const mq = matchMedia("(prefers-color-scheme: light)");
   if (mq.addEventListener) mq.addEventListener("change", () => { if (WEB && LOOK.mode === "auto") { applyLook(); drawTop(); } });
 }
-document.getElementById("favicon").href = TZ_ICON;
+document.getElementById("favicon").href = tzIcon();
 window.addEventListener("hashchange", render);
 // Окно стало шире или уже: лента ↔ нижняя панель, таблица ↔ карточки
 if (WEB && DESK_MQ && DESK_MQ.addEventListener) {
@@ -3556,7 +3596,7 @@ if (WEB) {
   // Адрес открыли в браузере: панель живёт в Telegram — кнопка открыть его.
   // Имени бота здесь нет: без подписи страница о сервере не говорит ничего
   root.replaceChildren(h("div", { class: "card open-tg" },
-    h("img", { class: "logo", src: TZ_ICON_BIG, alt: "" }),
+    h("img", { class: "logo tz big", src: tzIcon(true), alt: "" }),
     h("h3", {}, "Панель открывается в Telegram"),
     h("div", { class: "muted" }, "В чате с ботом — кнопка «Меню» слева от поля ввода."),
     h("a", { class: "btn btn-primary btn-block", href: "tg://" }, icon("send"), "Открыть Telegram"),
