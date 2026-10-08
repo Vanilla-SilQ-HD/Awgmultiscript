@@ -1493,6 +1493,30 @@ chk("новее нет — раздел текущей версии", d.get("new
     and [x["version"] for x in d.get("sections", [])] == ["v1.2.0"], d)
 r = api("update", "changelog")
 chk("нет связи с GitHub — понятная ошибка", not r.get("ok") and "недоступен" in (r.get("error") or ""), r)
+# Кэш проверки отстал (живёт до часа), а в CHANGELOG канала уже новее — «Доступна»
+# и кнопка в панели показали бы прошлую версию: awg2 спрашивает канал сразу
+CLBIN = os.path.join(TMP, "clbin")
+os.makedirs(CLBIN, exist_ok=True)
+with open(os.path.join(CLBIN, "curl"), "w") as f:
+    f.write('#!/usr/bin/env bash\nurl="${@: -1}"; echo "curl $url" >> "$CALLS"\ncase "$url" in\n'
+            '  *CHANGELOG.md*) printf "# Изменения\\n\\n## v9.1.0 — 2026-11-01\\n\\n- новое\\n\\n## v9.0.0 — 2026-10-01\\n\\n- старое\\n" ;;\n'
+            '  *awg2.sh*) printf "#!/bin/bash\\nVERSION=\\"v9.1.0\\"\\n" ;;\n  *) exit 22 ;;\nesac\n')
+os.chmod(os.path.join(CLBIN, "curl"), 0o755)
+for name in ("update_check", "update_check.beta"):
+    with open(os.path.join(ROOT, "var/lib/awg2", name), "w") as f:
+        f.write(f"v9.0.0 {int(time.time())}\n")
+reset_calls()
+r = api("update", "changelog", env={"PATH": CLBIN + ":" + ENV["PATH"]})
+d = r.get("data") or {}
+chk("кэш проверки отстал от CHANGELOG — канал спрошен сразу, «Доступна» — новейшая",
+    r.get("ok") and d.get("available") == "v9.1.0" and d["sections"][0]["version"] == "v9.1.0"
+    and "awg2.sh" in calls(), [r, calls()])
+reset_calls()
+r = api("update", "changelog", env={"PATH": CLBIN + ":" + ENV["PATH"]})
+chk("кэш свежий — второй раз канал не спрашивается", r.get("ok") and (r.get("data") or {}).get("available") == "v9.1.0"
+    and "awg2.sh" not in calls() and "CHANGELOG.md" in calls(), [r, calls()])
+for name in ("update_check", "update_check.beta"):
+    os.remove(os.path.join(ROOT, "var/lib/awg2", name))
 
 print("Мимикрия как у сервера")
 with open(conf, "w") as f:

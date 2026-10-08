@@ -2156,10 +2156,11 @@ def cmd_mod_compat_patch(src):
     print("patched")
 
 
-def cmd_changelog_json(current):
+def cmd_changelog_json(current, available=None):
     """CHANGELOG.md из stdin → разделы для экрана «Обновление»: новее
     установленной версии (сверху самая новая, не больше десяти), а если
-    новее нет — раздел текущей. Заголовок раздела: «## v1.1.1 — дата (бот 3.1.0)»."""
+    новее нет — раздел текущей. Заголовок раздела: «## v1.1.1 — дата (бот 3.1.0)».
+    available — версия к обновлению по свежему кэшу проверки (пусто — новее нет)."""
     sections, cur = [], None
     for line in sys.stdin.read().replace("\r", "").split("\n"):
         m = CL_HEAD.match(line)
@@ -2177,7 +2178,10 @@ def cmd_changelog_json(current):
     newer = sorted((s for s in sections if _ver_tuple(s["version"]) > now),
                    key=lambda s: _ver_tuple(s["version"]), reverse=True)[:10]
     shown = newer or [s for s in sections if _ver_tuple(s["version"]) == now][:1]
-    print(json.dumps({"current": current, "newer": bool(newer), "sections": shown}, ensure_ascii=False))
+    out = {"current": current, "newer": bool(newer), "sections": shown}
+    if available is not None:
+        out["available"] = available
+    print(json.dumps(out, ensure_ascii=False))
 
 
 def cmd_safe_untar(archive, dest):

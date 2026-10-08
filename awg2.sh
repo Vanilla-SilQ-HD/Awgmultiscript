@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.2.19"
+VERSION="v1.2.20"
 # Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
 # в сравнении версий не участвует. У выпущенной сборки пусто.
 BUILD=""
@@ -11031,7 +11031,7 @@ _api_wgobf() {
 
 # ── Обновление, бот, удаление ─────────────────────────────
 _api_update() {
-  local a="${1:-}" v
+  local a="${1:-}" v c
   shift || true
   case "$a" in
     status)
@@ -11055,7 +11055,14 @@ _api_update() {
       ok "Канал: $(update_channel_label)" ;;
     changelog)
       update_changelog_fetch || { err "Список изменений недоступен ($UPDATE_REPO)"; return 1; }
-      py changelog-json "$VERSION" <<< "$UPDATE_CHANGELOG" > "$API_DATA" ;;
+      # В CHANGELOG канала версия новее, чем помнит кэш проверки (он живёт до
+      # часа), — спросить канал сейчас: иначе «Доступна» и кнопка показали бы
+      # прошлую версию, а обновление поставило бы новую
+      v=$(grep -m1 -oE '^## v[0-9]+\.[0-9]+\.[0-9]+' <<< "$UPDATE_CHANGELOG" | cut -c4-)
+      c=$(awk '{print $1; exit}' "$UPDATE_CACHE" 2>/dev/null)
+      [[ "$c" =~ ^v?[0-9]+\.[0-9]+ ]] || c="v0.0.0"
+      if [[ -n "$v" ]] && (( 10#$(ver_num "$v") > 10#$(ver_num "$c") )); then update_peek >/dev/null || true; fi
+      py changelog-json "$VERSION" "$(update_available || true)" <<< "$UPDATE_CHANGELOG" > "$API_DATA" ;;
     *) _api_usage "update status|check|install [force]|channel stable|beta|changelog" ;;
   esac
 }
@@ -13335,7 +13342,7 @@ if __name__ == "__main__":
 '
 # CPS_GENERATOR_END v2
 
-_PY_HELPER_SUM=62e45320bbc3fe67
+_PY_HELPER_SUM=da9cb7ba6b473839
 IFS= read -r -d '' _PY_HELPER <<'__AWG2_PY_HELPER__' || true
 """Встроенный помощник awg2: разбор и атомарная правка конфигов, JSON Xray,
 расчёты подсетей, разбор pcap. Вызывается как `py <команда> [аргументы]`.
@@ -15495,10 +15502,11 @@ def cmd_mod_compat_patch(src):
     print("patched")
 
 
-def cmd_changelog_json(current):
+def cmd_changelog_json(current, available=None):
     """CHANGELOG.md из stdin → разделы для экрана «Обновление»: новее
     установленной версии (сверху самая новая, не больше десяти), а если
-    новее нет — раздел текущей. Заголовок раздела: «## v1.1.1 — дата (бот 3.1.0)»."""
+    новее нет — раздел текущей. Заголовок раздела: «## v1.1.1 — дата (бот 3.1.0)».
+    available — версия к обновлению по свежему кэшу проверки (пусто — новее нет)."""
     sections, cur = [], None
     for line in sys.stdin.read().replace("\r", "").split("\n"):
         m = CL_HEAD.match(line)
@@ -15516,7 +15524,10 @@ def cmd_changelog_json(current):
     newer = sorted((s for s in sections if _ver_tuple(s["version"]) > now),
                    key=lambda s: _ver_tuple(s["version"]), reverse=True)[:10]
     shown = newer or [s for s in sections if _ver_tuple(s["version"]) == now][:1]
-    print(json.dumps({"current": current, "newer": bool(newer), "sections": shown}, ensure_ascii=False))
+    out = {"current": current, "newer": bool(newer), "sections": shown}
+    if available is not None:
+        out["available"] = available
+    print(json.dumps(out, ensure_ascii=False))
 
 
 def cmd_safe_untar(archive, dest):
@@ -15608,5 +15619,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=3b99eabfeacd93a7
+_BUILD_SUM=c97ad6bbf256cc46
 main "$@"

@@ -3332,8 +3332,14 @@ route(/^\/update$/, async (ctx) => {
   const loadNotes = () => call("update", "changelog").then((c) => {
     if (!ctx.live()) return;
     notes.replaceChildren(...changelogView(c || {}));
-    // В канале новее, а кэш проверки ещё не знает — проверить сейчас, чтобы появилась кнопка «Обновить»
-    if (c && c.newer && !S.update) call("update", "check").then((r) => { if (ctx.live() && r) applyLatest(r.newer ? r.latest : ""); }).catch(() => {});
+    // awg2 сверил CHANGELOG с кэшем проверки и, если тот отстал, спросил канал
+    // заново: «Доступна» и кнопка — та же версия, что в списке и что поставится
+    if (c && typeof c.available === "string") {
+      if (c.available !== (S.update || "")) applyLatest(c.available);
+    } else if (c && c.newer && !S.update) {
+      // awg2 старее: в канале новее, а кэш не знает — проверить сейчас
+      call("update", "check").then((r) => { if (ctx.live() && r) applyLatest(r.newer ? r.latest : ""); }).catch(() => {});
+    }
   })
     .catch(() => { if (ctx.live()) notes.replaceChildren(h("div", { class: "muted small" }, "Список изменений недоступен — нет связи с GitHub")); });
   loadNotes();

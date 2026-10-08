@@ -696,7 +696,7 @@ _api_wgobf() {
 
 # ── Обновление, бот, удаление ─────────────────────────────
 _api_update() {
-  local a="${1:-}" v
+  local a="${1:-}" v c
   shift || true
   case "$a" in
     status)
@@ -720,7 +720,14 @@ _api_update() {
       ok "Канал: $(update_channel_label)" ;;
     changelog)
       update_changelog_fetch || { err "Список изменений недоступен ($UPDATE_REPO)"; return 1; }
-      py changelog-json "$VERSION" <<< "$UPDATE_CHANGELOG" > "$API_DATA" ;;
+      # В CHANGELOG канала версия новее, чем помнит кэш проверки (он живёт до
+      # часа), — спросить канал сейчас: иначе «Доступна» и кнопка показали бы
+      # прошлую версию, а обновление поставило бы новую
+      v=$(grep -m1 -oE '^## v[0-9]+\.[0-9]+\.[0-9]+' <<< "$UPDATE_CHANGELOG" | cut -c4-)
+      c=$(awk '{print $1; exit}' "$UPDATE_CACHE" 2>/dev/null)
+      [[ "$c" =~ ^v?[0-9]+\.[0-9]+ ]] || c="v0.0.0"
+      if [[ -n "$v" ]] && (( 10#$(ver_num "$v") > 10#$(ver_num "$c") )); then update_peek >/dev/null || true; fi
+      py changelog-json "$VERSION" "$(update_available || true)" <<< "$UPDATE_CHANGELOG" > "$API_DATA" ;;
     *) _api_usage "update status|check|install [force]|channel stable|beta|changelog" ;;
   esac
 }
