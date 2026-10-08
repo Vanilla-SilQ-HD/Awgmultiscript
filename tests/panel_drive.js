@@ -66,6 +66,44 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await shot("01-home");
   });
 
+  await step("уже открытый экран — сразу прежний вид, без «Загрузка…», свежий — следом", async () => {
+    await nav("/", ".head h1");
+    await nav("/clients", "#app .search input");
+    const r = await page.evaluate(() => { location.hash = "/"; return new Promise((ok) => setTimeout(() =>
+      ok({ spin: !!document.querySelector("#app > .spin"), h1: !!document.querySelector("#app .head h1") }), 30)); });
+    if (r.spin || !r.h1) throw new Error("снимок не показан: " + JSON.stringify(r));
+    await page.waitForSelector("#app:not(.reloading) .head h1");
+  });
+
+  await step("старый движок (Edge 18 в Telegram Desktop): без новых API панель работает", async () => {
+    const p3 = await ctx.newPage();
+    const errs = [];
+    p3.on("pageerror", (e) => errs.push(String(e)));
+    await p3.addInitScript(() => {
+      delete Array.prototype.flat; delete Object.fromEntries; delete String.prototype.trimStart; delete Blob.prototype.text;
+      [Element, Document, DocumentFragment].forEach((C) => { delete C.prototype.replaceChildren; });
+      const M = CanvasRenderingContext2D.prototype.measureText;
+      CanvasRenderingContext2D.prototype.measureText = function (t) { return { width: M.call(this, t).width }; };
+      const R = RegExp;
+      window.RegExp = function (src, fl) {
+        if (/\\p\{/.test(String(src)) && /u/.test(fl || "")) throw new SyntaxError("Invalid regular expression: invalid escape in unicode pattern");
+        return new R(src, fl);
+      };
+      window.RegExp.prototype = R.prototype;
+    });
+    await p3.goto(base + "#/", { waitUntil: "domcontentloaded" });
+    await p3.waitForSelector(".head h1");
+    await p3.waitForSelector(".top .lockup text");
+    if (await p3.locator(".boot-fail").count()) throw new Error(await p3.textContent(".boot-fail"));
+    if (!await p3.locator("#tabbar a svg").count()) throw new Error("иконки нижней панели не нарисованы");
+    for (const [hash, sel] of [["#/clients", "#app .search input"], ["#/server", "#app h1"], ["#/tunnels", "#app h1"]]) {
+      await p3.evaluate((x) => { location.hash = x; }, hash);
+      await p3.waitForSelector(sel);
+    }
+    if (errs.length) throw new Error(errs.join(" | "));
+    await p3.close();
+  });
+
   await step("не запустилась — причина на экране, а не вечная «Загрузка…»", async () => {
     const p2 = await ctx.newPage();
     await p2.route(/\/app\.js$/, (r) => r.abort());

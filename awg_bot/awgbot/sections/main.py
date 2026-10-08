@@ -97,7 +97,7 @@ def menu_kb(d: dict) -> ui.InlineKeyboardMarkup:
         ("🌐 Туннели и DNS", "tun"),
         ("🤖 Telegram-бот", "botm"),
         ("🗑 Удаление", "del"),
-        (f"⬆️ Есть {d['update']}" if d.get("update") else "⬆️ Обновление", "upd", "primary"),
+        (f"⬆️ Есть {d['update']}" if d.get("update") else "⬆️ Обновление", "upd"),
         ("🛡 Обфускатор", "wo"),
         ("💻 Веб-панель", "web"),
         ui.Row(("🔄 Обновить", "main")),

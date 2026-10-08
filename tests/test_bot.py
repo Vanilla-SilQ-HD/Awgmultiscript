@@ -16,6 +16,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import socket
 import sys
 import time
@@ -1076,6 +1077,16 @@ async def run():
             chk("скрипт панели отдаётся", r.status == 200 and "runJob" in await r.text(), r.status)
         async with http.get(base + "/icons.js") as r:
             chk("иконки панели отдаются", r.status == 200 and "const ICONS" in await r.text(), r.status)
+        # Встроенный браузер Telegram Desktop для Windows без WebView2 — Edge 18:
+        # ES2017 и ни шагу дальше, иначе панель не запускается вовсе
+        legacy = []
+        for fn in ("app.js", "icons.js"):
+            src = open(os.path.join(HERE, "..", "awg_bot", "awgbot", "webapp", fn), encoding="utf-8").read()
+            code = re.sub(r'"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`|//[^\n]*|/\*.*?\*/', '""', src, flags=re.S)
+            for what, pat in (("catch без переменной", r"catch\s*\{"), ("??", r"\?\?"), ("?.", r"\?\.[A-Za-z_$(\[]"),
+                              ("разворот объекта", r"\{\s*\.\.\.|,\s*\.\.\.[\w.]+\s*\}"), ("\\p{} в регулярке", r"/[^/\n]*\\p\{")):
+                legacy += [f"{fn}: {what}" for _ in re.findall(pat, code)]
+        chk("панель — без синтаксиса новее ES2017 (Edge 18 в Telegram Desktop)", not legacy, legacy)
         async with http.get(base + "/panel.py") as r:
             chk("кроме страницы, скрипта и иконок — ничего", r.status == 404, r.status)
         st, body = await api_("/api/call", {"args": ["status"]})
@@ -1217,19 +1228,17 @@ async def run():
     print("Цвета кнопок")
     await say("/start")
     styles = {b.text: b.style for row in keyboard(SESSION.sent) for b in row}
-    chk("главное меню: обновление синее, удаление красное, «Поддержать» зелёная, остальные обычные",
-        styles.get("⬆️ Обновление") == "primary" and styles.get("🗑 Удаление") == "danger"
-        and styles.get("Поддержать 💚") == "success" and styles.get("👥 Клиенты") is None
-        and styles.get("🖥 Сервер") is None, styles)
+    chk("главное меню: зелёная только «Поддержать», остальные — обычные",
+        styles.get("Поддержать 💚") == "success" and all(v is None for k, v in styles.items() if k != "Поддержать 💚")
+        and "🗑 Удаление" in styles and "⬆️ Обновление" in styles, styles)
     await press("cl")
     styles = {b.text: b.style for row in keyboard(SESSION.sent) for b in row}
-    chk("клиенты: добавить — зелёная, удалить — красная, назад — обычная",
-        styles.get("➕ Добавить") == "success" and styles.get("🗑 Удалить…") == "danger"
-        and styles.get("◀️ Назад") is None, styles)
+    chk("клиенты: добавить и удалить — обычные", styles.get("➕ Добавить", "x") is None
+        and styles.get("🗑 Удалить…", "x") is None and not any(styles.values()), styles)
     await press("cl:del:alice")
     styles = {b.text: b.style for row in keyboard(SESSION.sent) for b in row}
-    chk("подтверждение удаления: «Да» красная, «Отмена» обычная, в одной строке",
-        styles == {"🗑 Да, удалить": "danger", "✖️ Отмена": None}
+    chk("подтверждение удаления: обе кнопки обычные, в одной строке",
+        styles == {"🗑 Да, удалить": None, "✖️ Отмена": None}
         and [len(r) for r in keyboard(SESSION.sent)] == [2], styles)
 
     print("Иконки")

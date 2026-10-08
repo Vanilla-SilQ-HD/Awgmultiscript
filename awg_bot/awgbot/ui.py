@@ -69,21 +69,11 @@ def _page(text: str) -> bool:
     return text.startswith("◀️ Стр") or text.endswith("▶️")
 
 
-# Цвет кнопки (Bot API: style) — по эмодзи в начале подписи, чтобы разделы
-# не расставляли его вручную: удаление и сброс — красные, создание и
-# включение — зелёные, выбранный вариант и главное действие — синие.
+# Цвет кнопки (Bot API: style): зелёная — только «Поддержать 💚», остальные
+# обычные — красные, синие и зелёные разделы и действия рябили в глазах.
 # Третий элемент кнопки задаёт цвет явно ("" — обычная).
-DANGER = ("🗑", "💣", "⚠️", "🚨", "🧹", "🧯", "🚫", "❌")
-SUCCESS = ("➕", "✅", "✨", "▶️", "💚")
-PRIMARY = ("🔘", "📄")
-
-
 def style_of(text: str) -> str:
-    if text.startswith(DANGER):
-        return "danger"
-    if text.startswith(SUCCESS) or text.endswith("💚"):
-        return "success"
-    return "primary" if text.startswith(PRIMARY) else ""
+    return "success" if text.endswith("💚") else ""
 
 
 def _button(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:

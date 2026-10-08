@@ -1783,4 +1783,12 @@ chk("api web install (бот): логин admin, пароль сгенериро
     and conf.get("WEB_PASS", "").startswith("scrypt$") and r["data"]["url"].endswith(f":{conf['WEB_PORT']}/{conf['WEB_PATH']}/"),
     r)
 
+print("\n── Проверка новой версии: бета — раз в 20 минут, стабильный — раз в час ──")
+PEEK = 'update_peek() { touch "$STATE_DIR/peeked"; }; rm -f "$STATE_DIR/peeked"; '
+for chan, age, want in (("beta", 1300, True), ("beta", 600, False), ("stable", 1300, False), ("stable", 3700, True)):
+    rc, out, _ = bash(PEEK + f'update_channel_apply {chan}; echo "v1.0.0 $(( $(date +%s) - {age} ))" > "$UPDATE_CACHE"; '
+                      'unset AWG_NO_UPDATE_CHECK; update_check_async; sleep 0.3; [[ -e "$STATE_DIR/peeked" ]] && echo PEEK || echo SKIP')
+    chk(f"{chan}: прошлой проверке {age // 60} мин — {'проверяет' if want else 'ещё рано'}",
+        out.strip().endswith("PEEK" if want else "SKIP"), out)
+
 summary()

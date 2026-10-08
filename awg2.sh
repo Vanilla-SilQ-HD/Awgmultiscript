@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.2.11"
+VERSION="v1.2.12"
 # Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
 # в сравнении версий не участвует. У выпущенной сборки пусто.
 BUILD=""
@@ -390,7 +390,9 @@ UPSTREAM_TTL=21600
 UPDATE_REPO_STABLE="pumbaX/awg-multi-script"
 UPDATE_REPO_BETA="genaRijoff/awg-multi-script"
 UPDATE_CHANNEL_FILE="$STATE_DIR/channel"
-UPDATE_CHECK_TTL=21600
+# Проверка версии в канале (4 КБ файла): бета выходит по нескольку раз в день —
+# раз в 6 часов уведомление бота о новой версии запаздывало на полдня
+UPDATE_CHECK_TTL=3600 UPDATE_CHECK_TTL_BETA=1200
 # Подпись сборок: awg2.sh.sig рядом с awg2.sh (ssh-keygen -Y sign, ставит
 # GitHub Actions). Ключ релизов вшит сюда — подменить сборку на зеркале
 # или по пути без закрытого ключа нельзя. Сборки старше UPDATE_SIG_SINCE
@@ -2527,7 +2529,10 @@ proto31_cached() {
   local f="$STATE_DIR/proto31" bin key k v rc=0
   bin=$(command -v awg) || return 1
   key="$(mod_tag)|$(stat -c %s:%Y "$bin" 2>/dev/null)|$(cat "/sys/module/$MOD_NAME/srcversion" 2>/dev/null)"
-  if [[ -f "$f" ]] && IFS=$'\t' read -r k v < "$f" && [[ "$k" == "$key" && "$v" =~ ^[01]$ ]]; then return "$v"; fi
+  if [[ -f "$f" ]] && IFS=$'\t' read -r k v < "$f" && [[ "$k" == "$key" && "$v" =~ ^[01]$ ]]; then
+    _PROTO_PROBE[31]=$v           # proto_upgrade_hint в том же вызове не пробует заново
+    return "$v"
+  fi
   proto_supported 3.1 || rc=$?
   (( rc == 2 )) || { mkdir -p "$STATE_DIR" && printf '%s\t%s\n' "$key" "$rc" > "$f"; } 2>/dev/null
   return "$rc"
@@ -8256,14 +8261,16 @@ update_channel_label() { [[ "$UPDATE_CHANNEL" == beta ]] && echo "бета" || e
 
 update_channel_init() { update_channel_apply "${AWG2_UPDATE_CHANNEL:-$(update_channel_read)}"; }
 
-# Фоновая проверка раз в 6 часов: шапка меню читает только кэш и сеть не ждёт.
+# Фоновая проверка раз в час (бета — раз в 20 минут): шапка меню и сводка
+# для бота читают только кэш и сеть не ждут.
 # Качаем первые 4 КБ — VERSION= стоит в начале файла.
 update_check_async() {
-  local ts now
+  local ts now ttl="$UPDATE_CHECK_TTL"
   [[ -n "${AWG_NO_UPDATE_CHECK:-}" ]] && return 0
+  [[ "$UPDATE_CHANNEL" == beta ]] && ttl="$UPDATE_CHECK_TTL_BETA"
   now=$(date +%s)
   ts=$(awk '{print $2 + 0; exit}' "$UPDATE_CACHE" 2>/dev/null || echo 0)
-  (( now - ${ts:-0} < UPDATE_CHECK_TTL )) && return 0
+  (( now - ${ts:-0} < ttl )) && return 0
   mkdir -p "$STATE_DIR"
   update_peek </dev/null &>/dev/null 3>&- 4>&- 8>&- &
   disown 2>/dev/null || true
@@ -9872,9 +9879,11 @@ _api_server() {
   shift || true
   case "$a" in
     info)
-      # Сервера ещё нет — мастеру в боте и панели нужен тот же честный ответ,
-      # что и меню (раньше здесь был жёсткий «нет», и создать 3.1 было нельзя)
-      if server_exists; then proto_supported 3.1 || rc=$?; else proto31_cached || rc=$?; fi
+      # Поддержка 3.1 — из кэша (модуль, tools и сборка в памяти не менялись):
+      # server info зовут почти все экраны бота и панели, а проба на сервере
+      # 2.0 — это пробный интерфейс на каждый вызов. Сервера ещё нет — мастеру
+      # нужен тот же честный ответ, что и меню.
+      proto31_cached || rc=$?
       {
         _kv installed:b "$(_b command -v awg)"; _kv exists:b "$(_b server_exists)"
         _kv proto31:b "$([[ $rc == 0 ]] && echo 1 || echo 0)"
@@ -14984,5 +14993,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=fea132118040bc2c
+_BUILD_SUM=30b9320fd358151c
 main "$@"

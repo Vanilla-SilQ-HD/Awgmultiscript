@@ -34,7 +34,9 @@ UPSTREAM_TTL=21600
 UPDATE_REPO_STABLE="pumbaX/awg-multi-script"
 UPDATE_REPO_BETA="genaRijoff/awg-multi-script"
 UPDATE_CHANNEL_FILE="$STATE_DIR/channel"
-UPDATE_CHECK_TTL=21600
+# Проверка версии в канале (4 КБ файла): бета выходит по нескольку раз в день —
+# раз в 6 часов уведомление бота о новой версии запаздывало на полдня
+UPDATE_CHECK_TTL=3600 UPDATE_CHECK_TTL_BETA=1200
 # Подпись сборок: awg2.sh.sig рядом с awg2.sh (ssh-keygen -Y sign, ставит
 # GitHub Actions). Ключ релизов вшит сюда — подменить сборку на зеркале
 # или по пути без закрытого ключа нельзя. Сборки старше UPDATE_SIG_SINCE

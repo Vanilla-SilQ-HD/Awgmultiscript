@@ -243,7 +243,10 @@ proto31_cached() {
   local f="$STATE_DIR/proto31" bin key k v rc=0
   bin=$(command -v awg) || return 1
   key="$(mod_tag)|$(stat -c %s:%Y "$bin" 2>/dev/null)|$(cat "/sys/module/$MOD_NAME/srcversion" 2>/dev/null)"
-  if [[ -f "$f" ]] && IFS=$'\t' read -r k v < "$f" && [[ "$k" == "$key" && "$v" =~ ^[01]$ ]]; then return "$v"; fi
+  if [[ -f "$f" ]] && IFS=$'\t' read -r k v < "$f" && [[ "$k" == "$key" && "$v" =~ ^[01]$ ]]; then
+    _PROTO_PROBE[31]=$v           # proto_upgrade_hint в том же вызове не пробует заново
+    return "$v"
+  fi
   proto_supported 3.1 || rc=$?
   (( rc == 2 )) || { mkdir -p "$STATE_DIR" && printf '%s\t%s\n' "$key" "$rc" > "$f"; } 2>/dev/null
   return "$rc"

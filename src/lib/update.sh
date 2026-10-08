@@ -22,14 +22,16 @@ update_channel_label() { [[ "$UPDATE_CHANNEL" == beta ]] && echo "бета" || e
 
 update_channel_init() { update_channel_apply "${AWG2_UPDATE_CHANNEL:-$(update_channel_read)}"; }
 
-# Фоновая проверка раз в 6 часов: шапка меню читает только кэш и сеть не ждёт.
+# Фоновая проверка раз в час (бета — раз в 20 минут): шапка меню и сводка
+# для бота читают только кэш и сеть не ждут.
 # Качаем первые 4 КБ — VERSION= стоит в начале файла.
 update_check_async() {
-  local ts now
+  local ts now ttl="$UPDATE_CHECK_TTL"
   [[ -n "${AWG_NO_UPDATE_CHECK:-}" ]] && return 0
+  [[ "$UPDATE_CHANNEL" == beta ]] && ttl="$UPDATE_CHECK_TTL_BETA"
   now=$(date +%s)
   ts=$(awk '{print $2 + 0; exit}' "$UPDATE_CACHE" 2>/dev/null || echo 0)
-  (( now - ${ts:-0} < UPDATE_CHECK_TTL )) && return 0
+  (( now - ${ts:-0} < ttl )) && return 0
   mkdir -p "$STATE_DIR"
   update_peek </dev/null &>/dev/null 3>&- 4>&- 8>&- &
   disown 2>/dev/null || true

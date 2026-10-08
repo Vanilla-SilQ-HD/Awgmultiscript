@@ -102,7 +102,7 @@ async def _render_update(target: ui.Target, d: dict, latest: str, checked: bool 
         text += "\nОбновлений нет."
     text += "\n\n<i>♻️ Переустановить — заново из текущего канала, даже без новой версии</i>"
     await ui.render(target, text, ui.kb(
-        ("⬆️ Обновить", upd.data("go"), "success") if latest else None,
+        ("⬆️ Обновить", upd.data("go")) if latest else None,
         ("🔎 Проверить", upd.data("check")),
         ("♻️ Переустановить", upd.data("force")),
         ("🔀 На стабильный" if beta else "🧪 Бета-канал", upd.data("ch", "stable" if beta else "beta")),

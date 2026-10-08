@@ -5,6 +5,25 @@
 // Та же страница — веб-панель (служба awg-web): вход по логину и паролю,
 // сессия в cookie, адрес с секретным путём; сервер кладёт window.AWG_WEB.
 
+// Старый движок встроенного браузера — Edge 18 (EdgeHTML) в Telegram Desktop
+// для Windows без WebView2: того, чего в нём нет, а панели нужно, — здесь.
+// Синтаксис панели — тоже по его силам: без новинок ES2019+ (оператор
+// нулевого слияния, catch без переменной, разворот объекта в литерале).
+if (!Array.prototype.flat) {
+  Object.defineProperty(Array.prototype, "flat", { configurable: true, writable: true, value: function flat(depth = 1) {
+    return depth > 0 ? this.reduce((a, x) => a.concat(Array.isArray(x) ? x.flat(depth - 1) : x), []) : this.slice();
+  } });
+}
+[Element, Document, DocumentFragment].forEach((C) => {
+  if (!C.prototype.replaceChildren) C.prototype.replaceChildren = function replaceChildren(...nodes) {
+    while (this.lastChild) this.removeChild(this.lastChild);
+    this.append(...nodes);
+  };
+});
+if (!Object.fromEntries) Object.fromEntries = (pairs) => { const o = {}; for (const [k, v] of pairs) o[k] = v; return o; };
+if (!String.prototype.trimStart) String.prototype.trimStart = function trimStart() { return this.replace(/^\s+/, ""); };
+if (window.Blob && !Blob.prototype.text) Blob.prototype.text = function text() { return new Response(this).text(); };
+
 const WEB = window.AWG_WEB || null;
 const tg = !WEB && window.Telegram && window.Telegram.WebApp;
 const BASE = WEB ? WEB.base : "/";
@@ -232,7 +251,13 @@ const EMOJI_ICON = {
   "◀": "arrow-left", "✅": "circle-check", "❌": "circle-x", "✖": "x", "🔃": "arrow-down-up", "📂": "folder",
   "👮": "user", "🎨": "palette", "📶": "gauge", "📊": "chart-column", "📈": "chart-column", "🕒": "clock", "🎛": "sliders-horizontal", "↩": "undo-2", "💬": "message-square-text", "📱": "smartphone", "🔗": "share-2", "🙋": "user-plus", "🧯": "eraser",
 };
-const EMOJI_RE = /^(\p{Extended_Pictographic})\uFE0F?\s*/u;
+// \p{…} старый движок не знает (вся панель падала на этой строке) — там
+// эмодзи узнаётся по суррогатной паре или блоку символов
+const EMOJI_RE = (() => {
+  try { return new RegExp("^(\\p{Extended_Pictographic})\\uFE0F?\\s*", "u"); } catch (_) {
+    return /^([\uD83C-\uDBFF][\uDC00-\uDFFF]|[\u00A9\u00AE\u203C\u2049\u2122\u2139\u2190-\u2BFF\u3030\u303D\u3297\u3299])\uFE0F?\s*/;
+  }
+})();
 function withIcon(label) {
   const m = EMOJI_RE.exec(label);
   const name = m && EMOJI_ICON[m[1]];
@@ -250,7 +275,7 @@ const statGrid = (cells) => h("div", { class: "sgrid" }, cells.filter(Boolean).m
     sub ? h("div", { class: "sb" }, sub) : null)));
 // Карточка объекта: рамка и точка по состоянию (on | bad | warn), чипы, строки, действия
 function ecard({ state = "", cls = "", name, right, meta, lines, note, acts, onopen, attrs = {} }) {
-  return h("div", { class: `ecard ${state} ${cls}`, ...attrs },
+  return h("div", Object.assign({ class: `ecard ${state} ${cls}` }, attrs),
     h("div", { class: "head", onclick: onopen }, h("div", { class: "dot " + state }), h("div", { class: "name" }, name), right),
     meta && meta.length ? h("div", { class: "meta", onclick: onopen }, meta) : null,
     (lines || []).filter(Boolean).map((l) => h("div", { class: "line", onclick: onopen }, l)),
@@ -266,8 +291,8 @@ const segText = (items, cur, pick) => h("div", { class: "seg" }, items.map(([k, 
 const segBar = (items, cur, pick) => h("div", { class: "seg" }, items.map(([k, ic, label]) =>
   h("button", { class: k === cur ? "on" : null, "aria-label": label, title: label, onclick: () => pick(k) }, icon(ic))));
 // Мелкие настройки вида — только в этом браузере
-const pref = (k, def) => { try { return localStorage.getItem("awg-" + k) || def; } catch { return def; } };
-const setPref = (k, v) => { try { localStorage.setItem("awg-" + k, v); } catch { /* приватный режим */ } };
+const pref = (k, def) => { try { return localStorage.getItem("awg-" + k) || def; } catch (_) { return def; } };
+const setPref = (k, v) => { try { localStorage.setItem("awg-" + k, v); } catch (_) { /* приватный режим */ } };
 
 // ── Вид: тема, акцент, фон, скругление, масштаб — панель «Тема» ──
 // Хранится в этом браузере; «Авто» — как тема Telegram (в Mini App) или системы
@@ -275,10 +300,10 @@ const LOOK_DEF = { mode: "auto", hue: null, sat: 80, bgHue: null, tint: 22, rb: 
 const ZOOM_MIN = 75, ZOOM_MAX = 130;
 function loadLook() {
   let v = null;
-  try { v = JSON.parse(pref("look", "") || "null"); } catch { v = null; }
+  try { v = JSON.parse(pref("look", "") || "null"); } catch (_) { v = null; }
   // Прежний «Вид панели»: тема и размер переезжают сюда
   if (!v || typeof v !== "object") v = { mode: pref("theme", "") || "auto", zoom: Number(pref("scale", "100")) || 100 };
-  const L = { ...LOOK_DEF, ...v };
+  const L = Object.assign({}, LOOK_DEF, v);
   L.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(L.zoom) || 100));
   if (!["auto", "dark", "light"].includes(L.mode)) L.mode = "auto";
   return L;
@@ -318,7 +343,7 @@ function tzIcon(big = false) {
     try {
       const text = atob(src.slice(src.indexOf(",") + 1)).replace(/#([0-9a-f]{6})\b/gi, (_, hex) => "#" + tzHex(hex, dh, ks));
       memo.set(key, "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text));
-    } catch { memo.set(key, src); }       // не вышло — знак исходного цвета, панель работает
+    } catch (_) { memo.set(key, src); }       // не вышло — знак исходного цвета, панель работает
   }
   return memo.get(key);
 }
@@ -349,13 +374,13 @@ function applyLook(save = false) {
   // Масштаб — всей панели: кнопки и карточки сохраняют пропорции, подписи не переносятся
   st.zoom = LOOK.zoom === 100 ? "" : String(LOOK.zoom / 100);
   document.body.classList.toggle("grid-bg", !!LOOK.grid);
-  try { tzRefresh(); } catch { /* знак остаётся прежнего цвета */ }
+  try { tzRefresh(); } catch (_) { /* знак остаётся прежнего цвета */ }
   if (save) setPref("look", JSON.stringify(LOOK));
   try {
     const bg = rgbHex(getComputedStyle(document.body).backgroundColor);
     if (tg && tg.setHeaderColor) tg.setHeaderColor(bg);
     if (tg && tg.setBackgroundColor) tg.setBackgroundColor(bg);
-  } catch { /* старый Telegram: цвета шапки не меняются */ }
+  } catch (_) { /* старый Telegram: цвета шапки не меняются */ }
 }
 applyLook();
 
@@ -402,10 +427,10 @@ function lookPanel() {
           [["dark", "Тёмная"], ["light", "Светлая"], ["auto", WEB ? "Системная" : "Как Telegram"]].map(([k, t]) =>
             h("button", { class: "chip" + (LOOK.mode === k ? " on" : ""), onclick: () => { LOOK.mode = k; applyLook(true); drawTop(); draw(); } }, t)))),
         h("div", {}, h("div", { class: "eyebrow" }, "акцент · кнопки, меню, переключатели"), sw),
-        slider("hue", "Оттенок акцента", 0, 360, LOOK.hue ?? 156, "°", "hue"),
+        slider("hue", "Оттенок акцента", 0, 360, LOOK.hue != null ? LOOK.hue : 156, "°", "hue"),
         slider("sat", "Насыщенность", 20, 100, LOOK.sat, "%"),
         h("div", { class: "eyebrow tsep" }, "фон"),
-        slider("bgHue", "Оттенок фона", 0, 360, LOOK.bgHue ?? 220, "°", "hue"),
+        slider("bgHue", "Оттенок фона", 0, 360, LOOK.bgHue != null ? LOOK.bgHue : 220, "°", "hue"),
         slider("tint", "Тонировка", 0, 40, LOOK.tint, "%"),
         h("div", { class: "eyebrow tsep" }, "форма и размер"),
         slider("rb", "Скругление углов", 0, 24, LOOK.rb, " px"),
@@ -418,7 +443,7 @@ function lookPanel() {
           h("div", { class: "prow" }, h("span", { class: "chip on" }, "В сети ", h("span", { class: "n" }, "4")), pill("онлайн", "ok"),
             pill("92%", "warn"), h("i", { class: "switch on" }), ringSvg(64, 26, 4))),
         h("div", { class: "even2" },
-          h("button", { onclick: () => { LOOK = { ...LOOK_DEF, mode: LOOK.mode }; applyLook(true); drawTop(); draw(); toast("Вид по умолчанию"); } },
+          h("button", { onclick: () => { LOOK = Object.assign({}, LOOK_DEF, { mode: LOOK.mode }); applyLook(true); drawTop(); draw(); toast("Вид по умолчанию"); } },
             icon("rotate-ccw"), "Сбросить"),
           h("button", { class: "btn-primary", onclick: closeLook }, "Готово")))));
   }
@@ -451,7 +476,7 @@ const curPath = () => location.hash.slice(1) || "/";
 // с будущим сроком: блок держит лимит, срок остаётся в силе
 const expLive = (c) => !!c.expires && (!c.blocked || (c.blocked_by === "traffic" && c.expires > Date.now() / 1000));
 // Битый %-код в адресе (#/client/%E0%A4) — decodeURIComponent бросает; такой путь считается ненайденным
-const badPath = (p) => { try { decodeURIComponent(p); return false; } catch { return true; } };
+const badPath = (p) => { try { decodeURIComponent(p); return false; } catch (_) { return true; } };
 const isOn = (p) => {
   const c = curPath();
   return p === "/" ? c === "/" : c === p || c.startsWith(p + "/") || (p === "/clients" && /^\/(client\/|add$|bulk$)/.test(c))
@@ -479,6 +504,9 @@ function lockupEl() {
   const MONO = (css.getPropertyValue("--mono") || "monospace").trim().replace(/"/g, "'");
   // Меряем в 10 раз крупнее и делим: без округления метрик мелкого кегля
   const m = (txt, font) => { cv.font = font.replace(/([\d.]+)px/, (_, n) => n * 10 + "px"); const r = cv.measureText(txt);
+    // Без точных границ букв (старый движок) — по ширине и кеглю
+    if (r.actualBoundingBoxAscent == null) { const px = +(/([\d.]+)px/.exec(cv.font) || [0, 100])[1];
+      return { l: 0, r: r.width / 10, a: px * 0.72 / 10, d: px * 0.02 / 10 }; }
     return { l: r.actualBoundingBoxLeft / 10, r: r.actualBoundingBoxRight / 10, a: r.actualBoundingBoxAscent / 10, d: r.actualBoundingBoxDescent / 10 }; };
   // На телефоне чуть ниже: рядом поиск и тема
   const small = !!window.matchMedia && matchMedia("(max-width: 720px)").matches;
@@ -712,7 +740,7 @@ async function busy(btn, fn) {
   try { return await fn(); } catch (e) { fail(e); } finally { if (btn) btn.disabled = false; }
 }
 async function copy(text) {
-  try { await navigator.clipboard.writeText(text); } catch {
+  try { await navigator.clipboard.writeText(text); } catch (_) {
     const ta = h("textarea", {}, text);
     document.body.append(ta); ta.select(); document.execCommand("copy"); ta.remove();
   }
@@ -766,6 +794,17 @@ function egrid(nodes) {
   return out;
 }
 
+// Снимки экранов: вернулся на экран — прежний вид сразу (без «Загрузка…»;
+// данные подтянулись быстро — даже без приглушения), свежие его заменяют,
+// как только придут. Каждый экран — вызов awg2 на сервере, это секунда-две.
+const SNAP = new Map(), SNAP_MAX = 12;
+function snapSave(path, target) {
+  if (!path || target !== root || !target.childElementCount || [...target.children].some((c) => c.classList.contains("spin"))) return;
+  SNAP.delete(path);
+  SNAP.set(path, [...target.childNodes]);
+  if (SNAP.size > SNAP_MAX) SNAP.delete(SNAP.keys().next().value);
+}
+
 async function show(path, target, my) {
   const live = () => my === token, inDrawer = target !== root;
   // Экран отрисовывает то, что успел загрузить; ушли с него — молчит.
@@ -777,16 +816,19 @@ async function show(path, target, my) {
   }, live, drawer: inDrawer };
   // Тот же экран обновляется после действия — прежнее остаётся на месте (без
   // «Загрузка…» и прыжка наверх), пока не придёт новое; нажать в нём нельзя
-  const same = target.dataset.path === path && target.childElementCount > 0 && !target.querySelector(":scope > .spin");
+  const same = target.dataset.path === path && target.childElementCount > 0 && ![...target.children].some((c) => c.classList.contains("spin"));
+  if (!same) snapSave(target.dataset.path, target);
   target.dataset.path = path;
   for (const [re, fn] of routes) {
     const m = path.match(re);
     if (!m) continue;
+    const snap = !same && !inDrawer && SNAP.get(path);
     if (same) target.classList.add("reloading");
     else {
       if (inDrawer) target.scrollTop = 0;
       else { window.scrollTo(0, 0); S.listShown = false; S.listRedraw = null; }
-      ctx.put(h("div", { class: "spin" }, "Загрузка…"));
+      if (snap) { target.replaceChildren(...snap); target.classList.add("reloading"); }
+      else ctx.put(h("div", { class: "spin" }, "Загрузка…"));
     }
     try {
       await fn(ctx, ...m.slice(1).map(decodeURIComponent));
@@ -1252,7 +1294,7 @@ async function liveLoop(ctx, onTick) {
           L.prev = d; L.at = Date.now(); L.since = L.since || L.at;
           if (ctx.live()) onTick(L);
         }
-      } catch { /* сервер не ответил — следующий замер */ }
+      } catch (_) { /* сервер не ответил — следующий замер */ }
     }
     await new Promise((ok) => setTimeout(ok, 3000));
   }
@@ -2204,7 +2246,7 @@ const PARAM_SWITCHES = [["RandomTrailers", "RandomTrailers", "хвосты сл�
 
 route(/^\/server\/params$/, async (ctx) => {
   const d = await call("server", "params");
-  const orig = d.values || {}, cur = { ...orig }, inputs = {};
+  const orig = d.values || {}, cur = Object.assign({}, orig), inputs = {};
   const msgs = h("div"), applyBtn = h("button", { class: "btn-primary", disabled: true }, "✅ Применить");
   const edits = () => Object.keys(orig).filter((k) => cur[k] !== orig[k]).map((k) => `${k}=${cur[k]}`);
   let seq = 0, timer = null, last = null;
@@ -3168,7 +3210,7 @@ async function botRestarting(started, what, running = true) {
     await new Promise((ok) => setTimeout(ok, WEB ? 3000 : 2000));
     try {
       back = WEB ? !!((await call("bot", "status")) || {}).active : (await post("/api/me")).started !== started;
-    } catch { /* ещё не поднялся */ }
+    } catch (_) { /* ещё не поднялся */ }
   }
   toast(back ? "✅ Бот снова на связи" : "Бот не ответил за 2 минуты — открой панель заново", 4000);
   if (back) render();
@@ -3511,7 +3553,7 @@ function showLogin(err = "") {
 }
 
 async function logout() {
-  try { await post("/api/logout"); } catch { /* уже вышли */ }
+  try { await post("/api/logout"); } catch (_) { /* уже вышли */ }
   showLogin();
 }
 
@@ -3521,7 +3563,7 @@ function refreshStatus() {
 }
 
 async function webStart() {
-  try { S.me = await post("/api/me"); } catch { return; }      // 401 — экран входа уже на месте
+  try { S.me = await post("/api/me"); } catch (_) { return; }      // 401 — экран входа уже на месте
   drawTop();                                                     // лента и шапка — после входа
   render();
   if (curPath() !== "/") refreshStatus();                       // обзор грузит сводку сам
