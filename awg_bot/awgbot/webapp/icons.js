@@ -1,4 +1,29 @@
 "use strict";
+// Панель не запустилась (ошибка в скрипте, файл не загрузился, старый webview
+// Telegram) — причина на экране вместо вечной «Загрузки…»: её видно и можно
+// прислать. app.js после старта ставит AWG_STARTED, дальше этот обработчик молчит.
+(function () {
+  const fail = (why) => {
+    const app = document.getElementById("app");
+    if (window.AWG_STARTED || !app || app.dataset.failed) return;
+    app.dataset.failed = "1";
+    const box = document.createElement("div"), again = document.createElement("button");
+    box.className = "spin boot-fail";
+    box.style.whiteSpace = "pre-wrap";
+    box.textContent = "Панель не запустилась: " + why + "\n\n" + navigator.userAgent + "\n";
+    again.textContent = "Повторить";
+    again.onclick = () => location.reload();
+    box.append(again);
+    app.replaceChildren ? app.replaceChildren(box) : (app.innerHTML = "", app.appendChild(box));
+  };
+  window.addEventListener("error", (e) => {
+    const t = e.target;
+    if (t && t !== window && t.tagName === "SCRIPT") fail("не загрузился " + String(t.src || "скрипт").split("/").pop());
+    else fail((e.message || "ошибка") + (e.filename ? " (" + e.filename.split("/").pop() + ":" + e.lineno + ":" + e.colno + ")" : ""));
+  }, true);
+  window.addEventListener("unhandledrejection", (e) => fail(String((e.reason && e.reason.message) || e.reason)));
+  setTimeout(() => fail("скрипт панели не стартовал за 20 с"), 20000);
+})();
 // Линейные иконки Lucide (lucide.dev) — содержимое <svg viewBox="0 0 24 24">,
 // рамку добавляет icon() в app.js. Лицензия Lucide целиком:
 /*

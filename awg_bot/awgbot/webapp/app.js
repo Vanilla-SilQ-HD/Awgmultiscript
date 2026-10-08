@@ -315,8 +315,10 @@ function tzIcon(big = false) {
   if (!memo.has(key)) {
     if (memo.size > 8) memo.clear();          // ползунок оттенка: не копить знак на каждый градус
     const dh = LOOK.hue - TZ_HUE, ks = LOOK.sat / TZ_SAT;
-    const text = atob(src.slice(src.indexOf(",") + 1)).replace(/#([0-9a-f]{6})\b/gi, (_, hex) => "#" + tzHex(hex, dh, ks));
-    memo.set(key, "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text));
+    try {
+      const text = atob(src.slice(src.indexOf(",") + 1)).replace(/#([0-9a-f]{6})\b/gi, (_, hex) => "#" + tzHex(hex, dh, ks));
+      memo.set(key, "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text));
+    } catch { memo.set(key, src); }       // не вышло — знак исходного цвета, панель работает
   }
   return memo.get(key);
 }
@@ -347,7 +349,7 @@ function applyLook(save = false) {
   // Масштаб — всей панели: кнопки и карточки сохраняют пропорции, подписи не переносятся
   st.zoom = LOOK.zoom === 100 ? "" : String(LOOK.zoom / 100);
   document.body.classList.toggle("grid-bg", !!LOOK.grid);
-  tzRefresh();
+  try { tzRefresh(); } catch { /* знак остаётся прежнего цвета */ }
   if (save) setPref("look", JSON.stringify(LOOK));
   try {
     const bg = rgbHex(getComputedStyle(document.body).backgroundColor);
@@ -3590,6 +3592,7 @@ if (WEB && DESK_MQ && DESK_MQ.addEventListener) {
   });
 }
 drawTop();
+window.AWG_STARTED = true;      // icons.js: старт прошёл — его отчёт об ошибке запуска больше не нужен
 if (WEB) {
   webStart();
 } else if (!tg || !tg.initData) {

@@ -62,7 +62,21 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.waitForSelector(".top .lock img");                    // знак в шапке — на телефоне и в Mini App
     if (/beta/.test(await page.getAttribute(".top .lockup", "aria-label"))) throw new Error("пометка «бета» на стабильном канале");
     if (await page.locator("#tabbar a").count() !== 5) throw new Error("ждали нижнюю панель: 4 раздела и «Ещё»");
+    if (!await page.evaluate(() => window.AWG_STARTED) || await page.locator(".boot-fail").count()) throw new Error("старт не отмечен");
     await shot("01-home");
+  });
+
+  await step("не запустилась — причина на экране, а не вечная «Загрузка…»", async () => {
+    const p2 = await ctx.newPage();
+    await p2.route(/\/app\.js$/, (r) => r.abort());
+    await p2.goto(base, { waitUntil: "domcontentloaded" });
+    await p2.waitForSelector(".boot-fail >> text=не загрузился app.js", { timeout: 5000 });
+    if (!await p2.locator(".boot-fail button:has-text('Повторить')").count()) throw new Error("нет кнопки «Повторить»");
+    await p2.unroute(/\/app\.js$/);
+    await p2.route(/\/app\.js$/, async (r) => { const res = await r.fetch(); r.fulfill({ response: res, body: "window.x = ;" }); });
+    await p2.reload({ waitUntil: "domcontentloaded" });
+    await p2.waitForSelector(".boot-fail >> text=/SyntaxError|Unexpected/", { timeout: 5000 });
+    await p2.close();
   });
 
   if (profile === "none") {
