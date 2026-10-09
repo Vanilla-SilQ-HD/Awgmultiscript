@@ -45,7 +45,9 @@ async def send_bundle(bot: Bot, chat_id: int, name: str) -> None:
     head = f"🛡 <b>{esc(name)}</b> — WG + обфускатор\n"
     parts = []
     if link:
-        parts.append(f"\n<b>Ссылка</b> — Keenetic, AWG Manager → «Phobos», одной вставкой:\n<code>{esc(link)}</code>\n")
+        parts.append(f"\n<b>Ссылка</b> — Keenetic, AWG Manager → Новый туннель → «Phobos» → <b>нижнее</b> поле "
+                     "«Или конфиг .conf … / ссылка phobos://». Верхнее «Ссылка установки Phobos» — пустым: оно "
+                     f"только для http(s)-ссылок панели Phobos.\n<code>{esc(link)}</code>\n")
     if conf:
         parts.append(f"\n<b>Конфиг</b> — WireGuard и [instance] обфускатора, как в файле ниже:\n<pre>{esc(conf)}</pre>")
     text = head + "".join(parts)

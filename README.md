@@ -287,8 +287,10 @@ XOR-обфусцируется. Снаружи виден только порт 
   `obfuscator.conf`, `install-linux.sh` (Debian/Ubuntu одной командой) и
   памятка для Windows / macOS / OpenWrt / Android.
 - Keenetic с [AWG Manager](https://github.com/hoaxisr/awg-manager): вкладка
-  «Phobos» — ссылка `phobos://` одной вставкой (`phobos-link.txt`), или вкладка
-  «ClusterM» — поля руками. Всё расписано в `keenetic.txt` комплекта.
+  «Phobos» — ссылка `phobos://` (`phobos-link.txt`) в **нижнее** поле «Или конфиг
+  .conf … / ссылка phobos://»; верхнее «Ссылка установки Phobos» — пустым, оно
+  только для http(s)-ссылок панели Phobos. Или вкладка «ClusterM» — поля руками.
+  Всё расписано в `keenetic.txt` комплекта.
 - Клиенты Phobos совместимы, пока у них выключены `obfuscate-bytes` и
   маскировка `MEDIA` (проверено).
 - Клиенту нужен обфускатор на устройстве: роутер, Linux, Windows, macOS.

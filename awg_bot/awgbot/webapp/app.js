@@ -3541,7 +3541,9 @@ route(/^\/wgobf\/client\/([^/]+)$/, async (ctx, name) => {
     d.link ? [h("h2", {}, "Ссылка для Keenetic"),
       h("div", { class: "card" }, h("div", { class: "mono small", style: "overflow-wrap:anywhere" },
         d.link.length > 90 ? d.link.slice(0, 90) + "…" : d.link),
-      h("div", { class: "muted small", style: "margin-top:4px" }, `AWG Manager → «Phobos» — одной вставкой · ${d.link.length} символов`)),
+      h("div", { class: "muted small", style: "margin-top:4px" }, `AWG Manager → Новый туннель → «Phobos» → нижнее поле `
+        + `«Или конфиг .conf … / ссылка phobos://». Верхнее «Ссылка установки Phobos» — пустым: оно только для http(s)-ссылок `
+        + `панели Phobos · ${d.link.length} символов`)),
       copyBtn("Скопировать ссылку", d.link, "btn-primary btn-block")] : null,
     d.conf ? [h("h2", {}, "Конфиг"), hint("WireGuard и секция [instance] обфускатора — тот же файл .conf, что " + TO("приходит в чат.", "скачивается кнопкой.")),
       h("pre", {}, d.conf), copyBtn("Скопировать конфиг", d.conf)] : null,

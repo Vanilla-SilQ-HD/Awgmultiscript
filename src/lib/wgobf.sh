@@ -207,7 +207,7 @@ _wgobf_write_keenetic() {
   {
     echo "Keenetic + AWG Manager — клиент $name"
     echo ""
-    echo "Способ 1 — вкладка «Phobos», одной вставкой."
+    echo "Способ 1 — вкладка «Phobos», одной вставкой в НИЖНЕЕ поле."
     echo "AWG Manager → Новый туннель → «Phobos» → поле «Или конфиг .conf с секцией"
     echo "[instance] / ссылка phobos://» → ссылка из phobos-link.txt (или phobos.conf)."
     echo "Поле «Ссылка установки Phobos» — пустым. Во вкладке «Обфускатор» НЕ включать"
