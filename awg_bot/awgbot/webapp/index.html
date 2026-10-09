@@ -78,13 +78,13 @@
   .rail a:hover .tip { opacity: 1; transform: none; }
   .rail .sp { flex: 1; min-height: 12px; }
   /* Лента с подписями (по умолчанию); «бутерброд» внизу сворачивает её до иконок */
-  body.rail-on.rail-wide { --rail: 208px; }
+  body.rail-on.rail-wide { --rail: 220px; }
   body.rail-wide .rail { align-items: stretch; padding: 12px 10px 14px; gap: 4px; }
   body.rail-wide .rail a { width: auto; height: 40px; display: flex; align-items: center; justify-content: flex-start; gap: 12px;
     padding: 0 12px; font-size: 13.5px; font-weight: 600; }
   body.rail-wide .rail a.logo { height: 50px; padding: 0 6px; margin-bottom: 10px; }
-  body.rail-wide .rail a.logo { gap: 10px; color: var(--text); }
-  body.rail-wide .rail a.logo img { width: 40px; height: 40px; }
+  body.rail-wide .rail a.logo { gap: 8px; color: var(--text); overflow: hidden; }
+  body.rail-wide .rail a.logo img { width: 34px; height: 34px; }
   body.rail-on.rail-wide .top .lock { display: none; }
   body.rail-wide .rail .badge { top: 50%; right: 12px; margin-top: -4px; }
   .rail .lbl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -654,6 +654,10 @@
     .me { display: none; }
     /* На телефоне «О сервере» — по флагу: места под ещё одну кнопку нет */
     .top .sib { display: none; }
+    /* Флаг без рамки — уже: название с версией и BETA не перекрывается */
+    .cflag { min-width: 0; height: 32px; padding: 0 3px; border-color: transparent; background: none; }
+    .cflag .pulse { right: -1px; bottom: 4px; box-shadow: 0 0 0 2px var(--bg); }
+    .lock { flex-shrink: 0; }
     #app { padding: 18px 14px calc(104px + 0px); padding: 18px 14px calc(104px + env(safe-area-inset-bottom)); }
     h1 { font-size: 25px; margin-bottom: 14px; }
     .hacts { width: 100%; margin-left: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 10px; }

@@ -81,12 +81,13 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     // Лист снизу — снимок экрана, а не всей страницы
     await page.waitForTimeout(300);
     await page.screenshot({ path: `${out}/01b-server-info.png` });
-    // Скрыть имя и адрес — отсюда же, и вернуть
+    // Скрыть имя и адрес — тут же, окно остаётся открытым; и вернуть
     await page.click(`${box} button:has-text('Скрыть адрес')`);
-    await page.waitForSelector(box, { state: "detached" });
-    await page.click(".top .cflag");
     await page.waitForSelector(`${box} b.hid >> text=скрыто`);
     await page.click(`${box} button:has-text('Показать адрес')`);
+    await page.waitForSelector(`${box} button:has-text('Скрыть адрес')`);
+    if (await page.locator(`${box} b.hid`).count()) throw new Error("адрес не вернулся");
+    await page.keyboard.press("Escape");
     await page.waitForSelector(box, { state: "detached" });
     // Широкий экран: «i» в шапке, окно выпадает из кнопки
     const vp = page.viewportSize();
@@ -838,6 +839,22 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.waitForSelector(".top .lockup text >> text=BETA");
     await shot("48c-beta");
     if (/null|undefined/.test(await page.textContent(".top"))) throw new Error("в шапке «null»");
+    // Самая длинная надпись — версия, ↑ и BETA: флаг её не перекрывает, шапка не шире экрана
+    const vp = page.viewportSize();
+    for (const width of [360, 375, 390, 412]) {
+      await page.setViewportSize({ width, height: vp.height });
+      const r = await page.evaluate(() => {
+        drawTop();
+        const box = (sel) => document.querySelector(sel).getBoundingClientRect();
+        const l = box(".top .lockup"), f = box(".top .cflag"), k = box(".top .kbar");
+        return { lockR: Math.round(l.right), flagL: Math.round(f.left), flagR: Math.round(f.right), kbarL: Math.round(k.left),
+          over: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+      });
+      if (r.lockR > r.flagL || r.flagR > r.kbarL || r.over > 0) throw new Error(`шапка на ${width}px: ` + JSON.stringify(r));
+      if (width === 360) await page.screenshot({ path: `${out}/48d-beta-360.png` });
+    }
+    await page.setViewportSize(vp);
+    await page.evaluate(() => drawTop());
   });
   // ── WG + обфускатор ──
   await step("обфускатор: клиент ob1 в сети, трафик в карточке", async () => {

@@ -570,16 +570,18 @@ function lockupEl(rail) {
       return { l: 0, r: r.width / 10, a: px * 0.72 / 10, d: px * 0.02 / 10 }; }
     return { l: r.actualBoundingBoxLeft / 10, r: r.actualBoundingBoxRight / 10, a: r.actualBoundingBoxAscent / 10, d: r.actualBoundingBoxDescent / 10 }; };
   // На телефоне чуть ниже: рядом поиск и тема
-  // В ленте с подписями — ещё ниже: рядом знак, ширина ленты 208px
-  const small = rail || (!!window.matchMedia && matchMedia("(max-width: 720px)").matches);
-  const H = rail ? 24 : small ? 27 : 32, GAP = rail ? 5 : small ? 6 : 8, f2 = `700 ${rail ? 8.5 : small ? 9 : 10}px ${MONO}`;
+  // В ленте с подписями и на самых узких телефонах — ещё ниже: рядом знак и флаг
+  const mq = (q) => !!window.matchMedia && matchMedia(q).matches;
+  const tiny = rail || mq("(max-width: 380px)"), small = tiny || mq("(max-width: 720px)");
+  const H = tiny ? 24 : small ? 27 : 32, GAP = tiny ? 5 : small ? 6 : 8, f2 = `700 ${tiny ? 8.5 : small ? 9 : 10}px ${MONO}`;
   const ver = S.version || "", up = hasUpd() ? "↑" : "", beta = S.channel === "beta" ? "BETA" : "";
   const mv = m(ver || " ", f2), mu = m(up || " ", f2), mb = m(beta || " ", f2);
-  const need = ver ? mv.l + mv.r + (up ? 4 + mu.l + mu.r : 0) + (beta ? 10 + mb.l + mb.r : 0) : 0;
+  const gU = rail ? 3 : 4, gB = rail ? 6 : 10;
+  const need = ver ? mv.l + mv.r + (up ? gU + mu.l + mu.r : 0) + (beta ? gB + mb.l + mb.r : 0) : 0;
   // «toolza» растёт до ширины строки версии, но не выше, чем позволяет зазор над ней:
   // иначе версия прилипает к буквам. Не дотянулась — строка версии чуть шире слова
   const d2 = Math.max(0, mv.d, mb.d), GAPV = small ? 4 : 5, maxA = H - d2 - Math.max(mv.a, mb.a) - GAPV;
-  let F1 = rail ? 14 : small ? 16 : 19, m1 = m("toolza", `800 ${F1}px ${SANS}`);
+  let F1 = tiny ? 14 : small ? 16 : 19, m1 = m("toolza", `800 ${F1}px ${SANS}`);
   while (ver && m1.l + m1.r < need && F1 < 32) {
     const nx = m("toolza", `800 ${F1 + 0.5}px ${SANS}`);
     if (nx.a > maxA) break;
@@ -589,8 +591,11 @@ function lockupEl(rail) {
   const y1 = m1.a, y2 = H - d2;
   const a100 = m("AWG", `800 100px ${SANS}`), FA = H * 100 / (a100.a + a100.d), ma = m("AWG", `800 ${FA}px ${SANS}`);
   const xA = ma.l, L2 = xA + ma.r + GAP, x1 = L2 + m1.l, R1 = Math.max(x1 + m1.r, L2 + need);
-  const xv = L2 + mv.l, xu = L2 + mv.l + mv.r + 4 + mu.l, xb = R1 - mb.r, W = Math.ceil(R1) + 1;
-  const el = svg("svg", { class: "lockup", viewBox: `0 -1 ${W} ${H + 2}`, width: W, height: H + 2, role: "img",
+  const xv = L2 + mv.l, xu = L2 + mv.l + mv.r + gU + mu.l, xb = R1 - mb.r, W = Math.ceil(R1) + 1;
+  // В ленте место рядом со знаком — 144px (лента 220px): длинная строка «версия ↑ BETA»
+  // и шрифты пошире (Windows) — знак-название целиком ужимается, а не обрезается краем ленты
+  const k = rail && W > 144 ? 144 / W : 1;
+  const el = svg("svg", { class: "lockup", viewBox: `0 -1 ${W} ${H + 2}`, width: (W * k).toFixed(1), height: ((H + 2) * k).toFixed(1), role: "img",
     "aria-label": ["AWG toolza", ver, beta.toLowerCase()].filter(Boolean).join(" ") });
   const t = (x, y, font, fill, txt) => { const e = svg("text", { x: x.toFixed(2), y: y.toFixed(2), style: `font:${font};fill:${fill}` });
     e.textContent = txt; el.append(e); };
@@ -677,27 +682,35 @@ const srvState = (st) => { const s = st.server || {}; return !s.exists ? "сер
 const srvPulse = (st) => { const s = st.server || {}; return !s.exists ? "off" : s.up ? "" : "bad"; };
 
 // О сервере: страна, имя, адрес, awg0, протокол, аптайм, версия. На ПК — окно
-// под кнопкой, на телефоне — лист снизу. Имя и адрес можно скрыть отсюда же
+// под кнопкой, на телефоне — лист снизу. «Скрыть адрес» — тут же, окно не закрывается
 function serverInfo(anchor) {
   closeMore(); closePal();
-  const st = S.status || {}, s = st.server || {}, cc = st.country || "", hide = srvHidden(), up = uptimeParts(st.uptime);
   const row = (k, v, cls) => h("div", { class: "sir" }, h("span", {}, k), h("b", { class: cls || null, title: v }, v));
   let close = null;
-  const box = h("div", { class: "sheet sinfo", "aria-label": "О сервере", "data-name": "server-info" },
-    h("div", { class: "sih" }, flagEl(cc, 42) || h("span", { class: "cc big" }, cc || icon("globe")),
-      h("div", {}, h("h3", {}, cc ? countryName(cc) : "Страна не определена"),
-        h("div", { class: "muted small" }, h("i", { class: "pulse " + srvPulse(st) }), srvState(st)))),
-    h("div", { class: "sil" },
-      row("имя", hide ? "скрыто" : st.host || "—", hide ? "hid" : null),
-      row("адрес", !s.exists ? "—" : hide ? "скрыт" : s.endpoint || st.ip || "—", "mono" + (hide ? " hid" : "")),
-      s.exists ? row("протокол", `AWG ${s.proto || "?"} · ${s.port || "?"}/udp`) : null,
-      s.exists ? row("клиенты", `${s.online || 0} в сети из ${s.clients || 0}`) : null,
-      row("аптайм", up[0] + " " + up[1] + (up[2] != null ? ` ${up[2]} ${up[3]}` : "")),
-      row("система", st.os || "—"),
-      row("AWG Toolza", (S.version || "?") + (S.channel === "beta" ? " · бета" : "") + (hasUpd() ? ` · есть ${S.update}` : ""))),
-    h("div", { class: "even2" },
-      h("button", { onclick: () => { close(); toggleSrvHidden(); } }, icon(hide ? "eye" : "eye-off"), hide ? "Показать адрес" : "Скрыть адрес"),
-      h("button", { class: "btn-primary", onclick: () => { close(); go("/server"); } }, icon("server"), "Сервер")));
+  const box = h("div", { class: "sheet sinfo", "aria-label": "О сервере", "data-name": "server-info" });
+  const fill = () => {
+    const st = S.status || {}, s = st.server || {}, cc = st.country || "", hide = srvHidden(), up = uptimeParts(st.uptime);
+    box.replaceChildren(
+      h("div", { class: "sih" }, flagEl(cc, 42) || h("span", { class: "cc big" }, cc || icon("globe")),
+        h("div", {}, h("h3", {}, cc ? countryName(cc) : "Страна не определена"),
+          h("div", { class: "muted small" }, h("i", { class: "pulse " + srvPulse(st) }), srvState(st)))),
+      h("div", { class: "sil" },
+        row("имя", hide ? "скрыто" : st.host || "—", hide ? "hid" : null),
+        row("адрес", !s.exists ? "—" : hide ? "скрыт" : s.endpoint || st.ip || "—", "mono" + (hide ? " hid" : "")),
+        s.exists ? row("протокол", `AWG ${s.proto || "?"} · ${s.port || "?"}/udp`) : null,
+        s.exists ? row("клиенты", `${s.online || 0} в сети из ${s.clients || 0}`) : null,
+        row("аптайм", up[0] + " " + up[1] + (up[2] != null ? ` ${up[2]} ${up[3]}` : "")),
+        row("система", st.os || "—"),
+        row("AWG Toolza", (S.version || "?") + (S.channel === "beta" ? " · бета" : "") + (hasUpd() ? ` · есть ${S.update}` : ""))),
+      h("div", { class: "even2" },
+        h("button", { class: "seye", "aria-pressed": String(hide), onclick: () => {
+          toggleSrvHidden(); fill();
+          const b = box.querySelector(".seye");
+          if (b) b.focus();
+        } }, icon(hide ? "eye" : "eye-off"), hide ? "Показать адрес" : "Скрыть адрес"),
+        h("button", { class: "btn-primary", onclick: () => { close(); go("/server"); } }, icon("server"), "Сервер")));
+  };
+  fill();
   close = sheetOpen(box);
   // На широком экране — выпадает из кнопки, а не окном посреди экрана или снизу
   const vw = document.documentElement.clientWidth;

@@ -57,6 +57,20 @@ const say = (ok, label) => console.log(`${ok ? "OK" : "FAIL"} ${label}`);
         await page.waitForSelector("#rail a .lbl >> text=Клиенты");
         await page.waitForSelector("#rail a.logo .lockup");
         if (await page.locator(".top .lock").isVisible()) throw new Error("при ленте с подписями название и в шапке");
+        // Самая длинная надпись — бета-канал и стрелка обновления: целиком в ленте, не обрезана её краем
+        // Меряется в том же вызове: свежий статус с сервера вернул бы прежний канал
+        const fit = await page.evaluate(() => {
+          const w = [S.version, S.channel, S.update];
+          S.version = "v1.2.99"; S.channel = "beta"; S.update = "v9.9.99"; drawTop();
+          const l = document.querySelector("#rail a.logo .lockup").getBoundingClientRect(), r = document.querySelector("#rail a.logo").getBoundingClientRect();
+          const res = { lockR: Math.round(l.right), linkR: Math.round(r.right), h: Math.round(l.height),
+            beta: /beta/.test(document.querySelector("#rail .lockup").getAttribute("aria-label")) };
+          window.__railWas = w;
+          return res;
+        });
+        await page.screenshot({ path: `${out}/${name}-лента-бета.png`, clip: { x: 0, y: 0, width: 520, height: 160 } });
+        await page.evaluate(() => { [S.version, S.channel, S.update] = window.__railWas; drawTop(); });
+        if (!fit.beta || fit.lockR > fit.linkR || fit.h < 18) throw new Error("название в ленте: " + JSON.stringify(fit));
       });
       await step("шапка: флаг и «i» — окно «О сервере» под кнопкой; там же скрыть имя и адрес (и порт на схеме)", async () => {
         await page.waitForSelector(".topo svg [data-srv]");
@@ -71,17 +85,22 @@ const say = (ok, label) => console.log(`${ok ? "OK" : "FAIL"} ${label}`);
         });
         if (pos.gap < 0 || pos.gap > 20 || pos.right > 2) throw new Error("окно не под «i»: " + JSON.stringify(pos));
         await page.screenshot({ path: `${out}/${name}-о-сервере.png` });
+        // Скрыть — тут же, окно остаётся открытым; порт на схеме тоже скрыт
         await page.click(`${box} button:has-text('Скрыть адрес')`);
-        await page.waitForSelector(box, { state: "detached" });
+        await page.waitForSelector(`${box} button:has-text('Показать адрес')`);
+        const th = await page.locator(box).innerText();
+        if (st.some((v) => th.includes(v))) throw new Error("в открытом окне адрес не скрылся: " + th);
         await page.waitForFunction(() => { const n = document.querySelector(".topo svg [data-srv]"); return n && !/:\d/.test(n.textContent); });
+        await page.keyboard.press("Escape");
+        await page.waitForSelector(box, { state: "detached" });
         // По флагу — то же окно; адрес скрыт и после перезагрузки
         await page.reload({ waitUntil: "domcontentloaded" });
         await page.waitForSelector(".top .cflag");
         const t = await open(".top .cflag");
         if (st.some((v) => t.includes(v)) || !t.includes("скрыт")) throw new Error("не скрыто: " + t);
         await page.click(`${box} button:has-text('Показать адрес')`);
-        await page.waitForSelector(box, { state: "detached" });
-        const back = await open(".top .sib");
+        await page.waitForSelector(`${box} button:has-text('Скрыть адрес')`);
+        const back = await page.locator(box).innerText();
         if (!st.every((v) => back.includes(v))) throw new Error("не вернулось: " + back);
         await page.keyboard.press("Escape");
         await page.waitForSelector(box, { state: "detached" });
