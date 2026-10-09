@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.2.26"
+VERSION="v1.2.27"
 # Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
 # в сравнении версий не участвует. У выпущенной сборки пусто.
 BUILD=""
@@ -545,13 +545,17 @@ CERT_TAG="awg2-cert"
 
 # ── Антисканер (сети сканеров РКН и госорганов — DROP новых входящих) ──
 ANTISCAN_DIR="$STATE_DIR/antiscan"          # списки, исключения, состояние
-ANTISCAN_CONF="$ANTISCAN_DIR/antiscan.conf" # ON, LISTS, UPDATED, ERROR, ENTRIES
+ANTISCAN_CONF="$ANTISCAN_DIR/antiscan.conf" # ON, LISTS, UPDATED, ERROR, ENTRIES, ADDRS
 ANTISCAN_ALLOW="$ANTISCAN_DIR/allow"        # исключения: адрес или подсеть в строке
 ANTISCAN_SCRIPT="/usr/local/bin/awg2-antiscan"
 ANTISCAN_LOG="/var/log/awg2-antiscan.log"
 ANTISCAN_SET="awg2-antiscan" ANTISCAN_SET6="awg2-antiscan6" ANTISCAN_TAG="awg2-antiscan"
 ANTISCAN_UNIT="awg2-antiscan.service" ANTISCAN_TIMER="awg2-antiscan-update.timer"
 ANTISCAN_SRC="https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/refs/heads/main/public"
+# Предел охвата одного списка. Настоящие: ~310 тыс. адресов IPv4 (самая широкая
+# запись /19) и ~20 сетей /32 IPv6. Подменённый источник с тысячами /12 прошёл бы
+# проверку записей, но закрыл бы почти весь IPv4 — такой список не принимается
+ANTISCAN_MAX4=16777216 ANTISCAN_MAX6=4096   # 2^24 адресов IPv4; 2^12 сетей /32 IPv6 (записи /32 и шире)
 
 # Интерфейсы, которые поднимает сам awg2: их адрес не может быть Endpoint
 # клиента, и маршрут через них — не аплинк сервера.
@@ -897,11 +901,17 @@ public_ip_cached() {
 server_country() { awk 'NR == 1 && $1 ~ /^[A-Z][A-Z]$/ {print $1}' "$COUNTRY_CACHE" 2>/dev/null || true; }
 
 country_refresh() {
-  local loc=""
+  local loc="" ts
   command -v curl &>/dev/null || return 0
   loc=$(curl -s --max-time 6 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^loc=//p' | head -1 || true)
-  [[ "$loc" =~ ^[A-Z]{2}$ && "$loc" != XX ]] || loc="-"
-  printf '%s %s\n' "$loc" "$(date +%s)" | write_file "$COUNTRY_CACHE" 644
+  ts=$(date +%s)
+  if ! [[ "$loc" =~ ^[A-Z]{2}$ && "$loc" != XX ]]; then
+    # Не ответили: прежняя страна остаётся (флаг не пропадает на час из-за одного сбоя),
+    # метка сдвинута так, чтобы повтор был через час, а не через сутки
+    loc=$(server_country); ts=$(( ts - 86400 + 3600 ))
+    [[ -n "$loc" ]] || { loc="-"; ts=$(date +%s); }
+  fi
+  printf '%s %s\n' "$loc" "$ts" | write_file "$COUNTRY_CACHE" 644
 }
 
 country_refresh_async() {
@@ -9394,7 +9404,7 @@ _antiscan_parse() {  # 4|6 [allow]
       if (p[2] != "" && p[2] !~ /^[0-9]+$/) next
       if (ip !~ /^[0-9a-f:]+$/ || ip ~ /:::/ || len > 128 || (!allow && len < 24) || len < 16) next
       t = ip; dbl = gsub(/::/, "", t)
-      if (dbl > 1) next
+      if (dbl > 1 || ip ~ /^:[^:]/ || ip ~ /[^:]:$/) next   # одинокое «:» с краю — не адрес, ipset restore упал бы целиком
       n = split(ip, g, ":"); cnt = 0
       for (i = 1; i <= n; i++) { if (length(g[i]) > 4) next; if (g[i] != "") cnt++ }
       if ((dbl == 0 && (n != 8 || cnt != 8)) || (dbl == 1 && cnt > 7)) next
@@ -9417,9 +9427,15 @@ _antiscan_names() {
 
 # Адреса, которые не блокируются никогда: адреса сервера и SSH-сессии
 # (текущая — из SSH_CONNECTION, остальные — установленные соединения sshd).
+_antiscan_server_addrs() { ip -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}'; }
+
+# Отпечаток адресов сервера: на загрузке (служба раньше сети) их ещё нет, а при
+# смене адреса исключения устаревают — таймер пересобирает набор, если он другой
+_antiscan_addr_sig() { _antiscan_server_addrs | sort -u | cksum | cut -d' ' -f1; }
+
 _antiscan_auto_allow() {
   {
-    ip -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}'
+    _antiscan_server_addrs
     [[ -n "${SSH_CONNECTION:-}" ]] && echo "${SSH_CONNECTION%% *}"
     ss -tnpH state established 2>/dev/null | awk '/"sshd/ {print $4}' | sed -E 's/^\[?([^]]*)\]?:[0-9]+$/\1/'
   } | sed 's/^::ffff://' | grep -E '^[0-9a-fA-F.:]+$' | sort -u
@@ -9432,10 +9448,26 @@ _antiscan_ssh_peers() {
   } | sed 's/^::ffff://' | grep -E '^[0-9a-fA-F.:]+$' | sort -u
 }
 
+# Адрес, с которого включают из панели или Mini App: бот передаёт в
+# AWG_CLIENT_IP адрес самого соединения (не X-Forwarded-For). Не адрес — пропуск.
+_antiscan_client_ip() {
+  local a="${AWG_CLIENT_IP:-}"
+  a="${a#::ffff:}"
+  [[ "$a" =~ ^[0-9A-Fa-f.:]{2,39}$ ]] || return 0
+  if valid_ip "$a" || [[ -n "$(printf '%s\n' "$a" | _antiscan_parse 6 1)" ]]; then echo "${a,,}"; fi
+}
+
+# Записей, охват IPv4 (адресов) и IPv6 (сетей /32 — по записям /32 и шире)
+# в разобранном списке. %.0f, а не %d: mawk обрезал бы большие числа до 2^31
+_antiscan_span() {
+  awk -F/ '{ n++; if ($1 ~ /:/) { if ($2 <= 32) s6 += 2 ^ (32 - $2) } else s4 += 2 ^ (32 - $2) }
+    END { printf "%d %.0f %.0f\n", n, s4, s6 }'
+}
+
 # Скачать включённые списки. Оборванный или пустой ответ прежний список не
 # заменяет. Ошибки — в ERROR, время удачного обновления — в UPDATED.
 _antiscan_fetch_all() {
-  local id file label min tmp n errs=() ok=0
+  local id file label min tmp n s4 s6 errs=() ok=0
   mkdir -p "$ANTISCAN_DIR/lists"
   while IFS=$'\t' read -r id file label min; do
     [[ " $(_antiscan_enabled_lists) " == *" $id "* ]] || continue
@@ -9443,9 +9475,12 @@ _antiscan_fetch_all() {
     if ! curl -fsS --proto '=https' --max-time 40 --max-filesize 8000000 -o "$tmp" "$ANTISCAN_SRC/$file" 2>/dev/null; then
       errs+=("$label: не скачался"); rm -f "$tmp"; continue
     fi
-    n=$(( $(_antiscan_parse 4 < "$tmp" | wc -l) + $(_antiscan_parse 6 < "$tmp" | wc -l) ))
-    if (( n < min )); then
+    read -r n s4 s6 < <({ _antiscan_parse 4 < "$tmp"; _antiscan_parse 6 < "$tmp"; } | _antiscan_span)
+    if (( n < min || n > 200000 )); then   # 200000 — предел _antiscan_apply_in: раздутый список прежний не вытесняет
       errs+=("$label: в ответе $n записей — оставлен прежний"); rm -f "$tmp"; continue
+    fi
+    if (( s4 > ANTISCAN_MAX4 || s6 > ANTISCAN_MAX6 )); then
+      errs+=("$label: слишком широкий охват (IPv4 $s4 адресов, IPv6 $s6 сетей /32) — оставлен прежний"); rm -f "$tmp"; continue
     fi
     chmod 600 "$tmp" && mv -f "$tmp" "$ANTISCAN_DIR/lists/$id.list"
     ok=$((ok + 1))
@@ -9523,18 +9558,61 @@ _antiscan_load() {  # набор inet|inet6 файл_записей файл_и�
   echo "$n"
 }
 
-# IPv4-адрес внутри какой-нибудь подсети из файла (по строке «сеть/длина»)?
+# Подсети со входа (нормализованные _antiscan_parse), которые лежат целиком
+# внутри (in) или не внутри (out) какой-нибудь подсети из файла. Сравнение по
+# префиксу группами по 16 бит (IPv4 — две, IPv6 — восемь): без чисел больше
+# 2^16 — mawk считает в double. Каждая длина префикса из файла — один поиск.
+_antiscan_inside() {  # in|out файл
+  awk -v mode="$1" -v f="$2" '
+    function hex(h,  i, v) { v = 0; for (i = 1; i <= length(h); i++) v = v * 16 + index("0123456789abcdef", substr(h, i, 1)) - 1; return v }
+    function net(s,  p, a, b, i, n, hn, tn) {   # → F (4|6), L, G[1..8]
+      split(s, p, "/")
+      if (p[1] ~ /:/) {
+        F = 6; L = (p[2] == "" ? 128 : p[2] + 0); s = tolower(p[1]); i = index(s, "::")
+        if (i) { hn = (i > 1 ? split(substr(s, 1, i - 1), a, ":") : 0); tn = (substr(s, i + 2) != "" ? split(substr(s, i + 2), b, ":") : 0) }
+        else { hn = split(s, a, ":"); tn = 0 }
+        for (n = 1; n <= hn; n++) G[n] = hex(a[n])
+        for (; n <= 8 - tn; n++) G[n] = 0
+        for (i = 1; i <= tn; i++) G[n++] = hex(b[i])
+      } else {
+        F = 4; L = (p[2] == "" ? 32 : p[2] + 0); split(p[1], a, ".")
+        G[1] = a[1] * 256 + a[2]; G[2] = a[3] * 256 + a[4]
+      }
+    }
+    function key(len,  k, i) {
+      k = F
+      for (i = 1; i <= int(len / 16); i++) k = k ":" G[i]
+      if (len % 16) k = k ":" int(G[i] / 2 ^ (16 - len % 16))
+      return k
+    }
+    BEGIN {
+      while ((getline l < f) > 0) {
+        if (l == "") continue
+        net(l); nets[key(L)] = 1
+        if (!((F, L) in seen)) { seen[F, L] = 1; nl[F]++; ll[F, nl[F]] = L }
+      }
+    }
+    NF {
+      net($1); hit = 0
+      for (j = 1; j <= nl[F] && !hit; j++) if (ll[F, j] <= L && (key(ll[F, j]) in nets)) hit = 1
+      if (hit == (mode == "in")) print
+    }'
+}
+
+# Адрес (IPv4 или IPv6) внутри какой-нибудь подсети из файла?
 _antiscan_covers() {  # файл адрес
-  awk -v ip="$2" '
-    function ip2n(s,  a) { split(s, a, "."); return ((a[1] * 256 + a[2]) * 256 + a[3]) * 256 + a[4] }
-    BEGIN { if (ip !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) exit; x = ip2n(ip) }
-    { split($0, p, "/"); s = ip2n(p[1]); if (x >= s && x < s + 2 ^ (32 - p[2])) { found = 1; exit } }
-    END { exit !found }' "$1"
+  local n
+  [[ "$2" != */* ]] || return 1
+  n=$(printf '%s\n' "$2" | _antiscan_parse 4 1; printf '%s\n' "$2" | _antiscan_parse 6 1)
+  [[ -n "$n" && -n "$(printf '%s\n' "$n" | _antiscan_inside in "$1")" ]]
 }
 
 # Собрать наборы из сохранённых списков и поставить правила.
 _antiscan_apply() {
   local d rc=0
+  # Выключили, пока качались списки (выключение ждёт замок не дольше 20 с), —
+  # правило обратно не ставить
+  [[ "$(_antiscan_get ON)" == 1 ]] || { antiscan_down; return 0; }
   d=$(mktemp -d "$ANTISCAN_DIR/.apply.XXXXXX") || return 1
   _antiscan_apply_in "$d" || rc=$?
   rm -rf "$d"
@@ -9542,7 +9620,7 @@ _antiscan_apply() {
 }
 
 _antiscan_apply_in() {  # временный каталог
-  local d="$1" id ip n4 n6=0
+  local d="$1" id ip who n4 n6=0
   : > "$d/v4"; : > "$d/v6"
   for id in $(_antiscan_enabled_lists); do
     [[ -f "$ANTISCAN_DIR/lists/$id.list" ]] || continue
@@ -9559,18 +9637,26 @@ _antiscan_apply_in() {  # временный каталог
     return 4
   fi
   [[ -f "$ANTISCAN_DIR/lists/gov.list" ]] && _antiscan_names < "$ANTISCAN_DIR/lists/gov.list" > "$ANTISCAN_DIR/names"
-  # SSH-адрес внутри списка — в исключения насовсем: иначе после следующего
-  # обновления с него не открылась бы новая сессия
-  for ip in $(_antiscan_ssh_peers); do
-    _antiscan_covers "$d/v4" "$ip" || continue
-    _antiscan_allow_rows | grep -qxF -e "$ip" -e "$ip/32" && continue
-    printf '%s # SSH — добавлен сам %s\n' "$ip" "$(date '+%F')" >> "$ANTISCAN_ALLOW"
+  # Адрес админа внутри списка — SSH-сессии и того, кто включает из панели, —
+  # в исключения насовсем: иначе после следующего обновления он бы не вошёл
+  _antiscan_allow_rows > "$d/allow"
+  { _antiscan_parse 4 1 < "$d/allow"; _antiscan_parse 6 1 < "$d/allow"; } > "$d/al"
+  while read -r ip who; do
+    _antiscan_covers "$d/v4" "$ip" || _antiscan_covers "$d/v6" "$ip" || continue
+    _antiscan_covers "$d/al" "$ip" && continue
+    printf '%s # %s — добавлен сам %s\n' "$ip" "$who" "$(date '+%F')" >> "$ANTISCAN_ALLOW"
     chmod 600 "$ANTISCAN_ALLOW"
-    _antiscan_log "SSH-адрес $ip есть в списке — добавлен в исключения"
-  done
+    printf '%s\n' "$ip" | _antiscan_parse 4 1 >> "$d/al"; printf '%s\n' "$ip" | _antiscan_parse 6 1 >> "$d/al"
+    _antiscan_log "$who: адрес $ip есть в списке — добавлен в исключения"
+  done < <(_antiscan_ssh_peers | sed 's/$/ SSH/'; _antiscan_client_ip | sed 's/$/ панель/')
   { _antiscan_allow_rows; _antiscan_auto_allow; } > "$d/allow"
   _antiscan_parse 4 1 < "$d/allow" | sort -u > "$d/a4"
   _antiscan_parse 6 1 < "$d/allow" | sort -u > "$d/a6"
+  # Запись списка целиком внутри исключения в набор не идёт: в hash:net
+  # побеждает самый узкий префикс, и «1.2.3.77/32» из списка перекрыла бы
+  # исключение «1.2.3.0/24 nomatch». Записи шире исключения остаются.
+  _antiscan_inside out "$d/a4" < "$d/v4" > "$d/v4.f" && mv -f "$d/v4.f" "$d/v4"
+  _antiscan_inside out "$d/a6" < "$d/v6" > "$d/v6.f" && mv -f "$d/v6.f" "$d/v6"
   n4=$(_antiscan_load "$ANTISCAN_SET" inet "$d/v4" "$d/a4") || { _antiscan_log "ipset: набор IPv4 не загрузился"; return 5; }
   _antiscan_rule_up iptables "$ANTISCAN_SET" || { _antiscan_log "iptables: правило не поставилось"; return 5; }
   if [[ -s "$d/v6" ]] && command -v ip6tables &>/dev/null \
@@ -9583,6 +9669,7 @@ _antiscan_apply_in() {  # временный каталог
     ipset destroy "$ANTISCAN_SET6" 2>/dev/null || true
   fi
   _antiscan_set ENTRIES "$n4 $n6"
+  _antiscan_set ADDRS "$(_antiscan_addr_sig)"
   _antiscan_log "применено: IPv4 $n4, IPv6 $n6"
   return 0
 }
@@ -9595,6 +9682,9 @@ antiscan_down() {
   command -v ipset &>/dev/null || return 0
   ipset destroy "$ANTISCAN_SET" 2>/dev/null || true
   ipset destroy "$ANTISCAN_SET6" 2>/dev/null || true
+  # временные наборы замены — остаются, если загрузку прервали
+  ipset destroy "$ANTISCAN_SET-new" 2>/dev/null || true
+  ipset destroy "$ANTISCAN_SET6-new" 2>/dev/null || true
   return 0
 }
 
@@ -9617,8 +9707,8 @@ antiscan_run() {
       if (( $(date +%s) - ${upd:-0} > 86400 )); then
         _antiscan_fetch_all || true
         _antiscan_apply || rc=$?
-      elif ! antiscan_rules_ok; then
-        _antiscan_log "правило пропало или сдвинуто — возвращаю"
+      elif ! antiscan_rules_ok || [[ "$(_antiscan_addr_sig)" != "$(_antiscan_get ADDRS)" ]]; then
+        _antiscan_log "правило пропало или сдвинуто, либо адреса сервера сменились — применяю заново"
         _antiscan_apply || rc=$?
       fi ;;
     *) echo "использование: ${0##*/} apply|update|heal|off" >&2; return 2 ;;
@@ -9631,9 +9721,11 @@ _antiscan_emit() {
   emit_script "$ANTISCAN_SCRIPT" 'antiscan_run "$@"' \
     ANTISCAN_DIR ANTISCAN_CONF ANTISCAN_ALLOW ANTISCAN_LOG ANTISCAN_SET ANTISCAN_SET6 ANTISCAN_TAG ANTISCAN_SRC \
     OWN_IFACES \
-    write_file _antiscan_lists _antiscan_get _antiscan_set _antiscan_log _antiscan_enabled_lists _antiscan_parse \
-    _antiscan_names _antiscan_auto_allow _antiscan_ssh_peers _antiscan_fetch_all _antiscan_rule _antiscan_rule_up \
-    _antiscan_rule_down _antiscan_rule_first antiscan_rules_ok _antiscan_load _antiscan_covers _antiscan_allow_rows \
+    ANTISCAN_MAX4 ANTISCAN_MAX6 \
+    write_file valid_ip _antiscan_lists _antiscan_get _antiscan_set _antiscan_log _antiscan_enabled_lists _antiscan_parse \
+    _antiscan_names _antiscan_server_addrs _antiscan_addr_sig _antiscan_auto_allow _antiscan_ssh_peers _antiscan_client_ip \
+    _antiscan_span _antiscan_fetch_all _antiscan_rule _antiscan_rule_up \
+    _antiscan_rule_down _antiscan_rule_first antiscan_rules_ok _antiscan_load _antiscan_inside _antiscan_covers _antiscan_allow_rows \
     _antiscan_apply _antiscan_apply_in antiscan_down \
     antiscan_run || return 1
   # Раньше UFW и netfilter-persistent, как сам ufw.service: их правила
@@ -9707,9 +9799,17 @@ antiscan_enable() {
 }
 
 antiscan_disable() {
+  local held=0
   _antiscan_set ON 0
   remove_unit "$ANTISCAN_TIMER" "${ANTISCAN_TIMER%.timer}.service" "$ANTISCAN_UNIT"
+  # Замок прохода таймера: проход, уже увидевший ON=1, иначе поставил бы правило
+  # обратно после нас. Не дольше 20 с — качающий проход сам увидит ON=0 перед применением
+  mkdir -p "$ANTISCAN_DIR" && chmod 700 "$ANTISCAN_DIR"
+  exec 9>"$ANTISCAN_DIR/.lock"
+  flock -w 20 9 && held=1
   antiscan_down
+  (( held )) || _antiscan_log "выключение: замок занят дольше 20 с — снято без него"
+  exec 9>&-
   log_info "антисканер выключен"
   ok "Антисканер выключен — правила и наборы сняты"
 }
@@ -9735,9 +9835,16 @@ antiscan_lists_set() {
 
 # Исключение — адрес или подсеть IPv4/IPv6
 antiscan_allow() {  # add|del АДРЕС
-  local op="$1" v="${2:-}" norm short
+  local op="${1:-}" v="${2:-}" norm short m
   norm=$(printf '%s\n' "$v" | _antiscan_parse 4 1)
   [[ -n "$norm" ]] || norm=$(printf '%s\n' "$v" | _antiscan_parse 6 1)
+  # Верный адрес со слишком широкой маской — своим текстом, а не «нужен адрес»
+  if [[ -z "$norm" && "$v" =~ ^[0-9A-Fa-f.:]+/([0-9]{1,3})$ ]]; then
+    m=$((10#${BASH_REMATCH[1]}))
+    if { (( m < 8 )) && valid_ip "${v%/*}"; } || { (( m < 16 )) && [[ -n "$(printf '%s\n' "${v%/*}" | _antiscan_parse 6 1)" ]]; }; then
+      err "Слишком широкая подсеть $(shown "$v"): исключение — не шире /8 для IPv4 и /16 для IPv6"; return 1
+    fi
+  fi
   [[ -n "$norm" && "$v" != *[[:space:]]* && "$norm" != *$'\n'* ]] \
     || { err "Нужен IPv4 или IPv6 адрес (можно с /маской): $(shown "$v")"; return 1; }
   short="${norm%/32}"; short="${short%/128}"
@@ -9756,7 +9863,8 @@ antiscan_allow() {  # add|del АДРЕС
   ok "Исключения: $([[ "$op" == add ]] && echo "добавлен" || echo "убран") $norm"
 }
 
-# Отбито новых подключений с последнего применения правил (пакетов)
+# Отбито пакетов новых подключений с установки правила: обновление списков счётчик не
+# сбрасывает, перезагрузка и переустановка правила — сбрасывают
 antiscan_dropped() {
   { iptables-save -c -t filter 2>/dev/null; ip6tables-save -c -t filter 2>/dev/null; } \
     | awk -v tag="$ANTISCAN_TAG" 'index($0, "--comment " tag) && /^\[/ {
@@ -9789,7 +9897,7 @@ _antiscan_show() {
   if antiscan_on; then
     if antiscan_rules_ok; then echo -e "  Состояние : ${G}● включён${N} — $(antiscan_summary)"
     else echo -e "  Состояние : ${Y}▲ включён, правило не на месте${N} — вернёт таймер или «Обновить списки»"; fi
-    echo -e "  Отбито    : ${W}$(antiscan_dropped)${N} ${D}новых подключений с последнего применения${N}"
+    echo -e "  Отбито    : ${W}$(antiscan_dropped)${N} ${D}новых подключений с установки правила (сбрасывается при перезагрузке)${N}"
   else
     echo -e "  Состояние : ${D}○ выключен${N}"
   fi
@@ -9822,7 +9930,14 @@ do_antiscan_menu() {
     echo -e "  ${W}0)${N} ← Назад"
     read_choice c "${C}  Выбор [0-5]: ${N}" 0 5 0
     case "$c" in
-      1) if antiscan_on; then antiscan_disable; else antiscan_enable || true; fi ;;
+      1) if antiscan_on; then antiscan_disable
+         else
+           # Включение отрезает целые сети — сначала сказать, кого это заденет
+           echo -e "  ${Y}Новые подключения из сетей списков не пройдут — и клиентов VPN, и, может быть, тебя"
+           echo -e "  самого с другого адреса. Адрес этой SSH-сессии попадёт в исключения сам.${N}"
+           echo -e "  ${D}Выключить можно здесь или в боте: «Сервер → Антисканер».${N}"
+           ask_yes "  Включить антисканер? [y/N]: " n && { antiscan_enable || true; }
+         fi ;;
       2) antiscan_update || true ;;
       3) echo ""
          while IFS=$'\t' read -r id file label min; do echo -e "  ${C}$id${N} — $label"; done < <(_antiscan_lists)
@@ -11323,18 +11438,23 @@ _api_job() {
 # Команды только для чтения идут мимо очереди: сводка не должна ждать,
 # пока задача собирает модуль.
 _api_readonly() {
-  case "$*" in
-    # Пишущие подкоманды «читающих» разделов — в очередь: bot webapp port и
-    # bot proxy set правят один /etc/awg-bot.conf, параллельно потеряли бы ключ.
-    "bot proxy set"*|"bot proxy clear"*|"bot webapp port"*|"server params set"*) return 1 ;;
-    "server params"|"server params check"*) return 0 ;;
+  local a="${1:-}" b="${2:-}" c="${3:-}"
+  # Разделы, где всё — чтение (задача job start сама идёт через замок, когда запустится)
+  case "$a" in status|version|help|mimicry|log|job|diag) return 0 ;; esac
+  # Дальше — точные команды по словам, а не маски по строке: лишнее слово в
+  # конце или слово с пробелом внутри («allow add X info») чтением не станут.
+  # Пишущие подкоманды «читающих» разделов (bot proxy set, bot webapp port,
+  # server params set — правят общие файлы) сюда не попадают — в очередь.
+  [[ "$a $b" != *[[:space:]]*[[:space:]]* ]] || return 1
+  case "$a $b $c" in
+    "server params "|"server params check"|"bot proxy get"|"bot proxy check"|"bot proxy candidates"|"bot webapp get") return 0 ;;
   esac
-  case "$1 ${2:-}" in
-    "status "|"version "|"help "|"mimicry "|"log "*|"job "*|"diag "*) return 0 ;;
-    *" status"|*" info"|*" report"|*" tags"|*" backups"|*" list"|*" conf"|*" inspect") return 0 ;;
-    "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|\
-    "bot proxy"|"bot webapp"|"update check"|"update changelog"|"module check"|"cert "|"cert find"|\
-    "traffic daily"|"traffic now") return 0 ;;
+  case "$a $b" in
+    "server info"|"module report"|"module tags"|"module check"|"module backups"|"clients "|"clients list"|\
+    "client conf"|"traffic daily"|"traffic now"|"backup list"|"backup inspect"|"tunnels "|"tunnels status"|\
+    "tunnels clients"|"warp status"|"xray status"|"xray diag"|"t2s status"|"exits status"|"cascade list"|\
+    "cascade diag"|"dns status"|"wgobf status"|"wgobf clients"|"update status"|"update check"|"update changelog"|\
+    "bot status"|"cert "|"cert status"|"cert find"|"web status"|"antiscan status") return 0 ;;
   esac
   return 1
 }
@@ -15672,5 +15792,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=97b66a64a0c079da
+_BUILD_SUM=e7391de971028c5c
 main "$@"

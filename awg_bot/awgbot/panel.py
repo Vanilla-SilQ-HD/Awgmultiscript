@@ -149,7 +149,14 @@ def setup(app: web.Application, user_of: UserOf) -> None:
             timeout = 120.0
         timeout = min(timeout, TIMEOUT_MAX)
         stdin = body.get("stdin")
-        return _result(await api.call(*args, stdin=stdin if isinstance(stdin, str) else None, timeout=timeout))
+        # Адрес того, кто включает антисканер: если он внутри списков, awg2
+        # сохранит его в исключения. Только адрес соединения — заголовок
+        # X-Forwarded-For подделает кто угодно. Только включение и обновление
+        # списков: при «allow del» свой адрес иначе тут же вернулся бы обратно.
+        env = ({"AWG_CLIENT_IP": request.remote}
+               if tuple(args[:2]) in (("antiscan", "on"), ("antiscan", "update"), ("antiscan", "lists")) and request.remote
+               else None)
+        return _result(await api.call(*args, stdin=stdin if isinstance(stdin, str) else None, timeout=timeout, env=env))
 
     @route("/api/job")
     async def _job(request: web.Request, user: dict, body: dict) -> web.Response:

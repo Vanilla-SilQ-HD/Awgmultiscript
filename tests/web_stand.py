@@ -53,8 +53,7 @@ async def main():
     await runner.setup()
     await web.web.TCPSite(runner, "127.0.0.1", WPORT, ssl_context=srv.tls()).start()
     print("READY", WPORT, srv.base, USER, PASSWORD, ROOT, flush=True)
-    while True:
-        await asyncio.sleep(3600)
+    await keep_handshakes()
 
 
 asyncio.run(main())

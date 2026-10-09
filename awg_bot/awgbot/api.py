@@ -100,14 +100,15 @@ def _inflight_done(key: tuple[str, ...], task: "asyncio.Task[Result]") -> None:
 
 
 async def call(*args: Any, stdin: str | bytes | None = None,
-               timeout: float = DEFAULT_TIMEOUT) -> Result:
+               timeout: float = DEFAULT_TIMEOUT, env: dict[str, str] | None = None) -> Result:
     """awg2 api АРГУМЕНТЫ... → Result. Не бросает исключений. Чтения из
-    CACHED отдаются из кэша CACHE_TTL секунд, записи его сбрасывают."""
+    CACHED отдаются из кэша CACHE_TTL секунд, записи его сбрасывают.
+    env — добавочные переменные окружения awg2 (вызов тогда мимо кэша)."""
     key = tuple(str(a) for a in args)
-    if stdin is not None or not _cacheable(key) or CACHE_TTL <= 0:
+    if stdin is not None or env or not _cacheable(key) or CACHE_TTL <= 0:
         if _writes(key):
             invalidate()
-        r = await _run(*args, stdin=stdin, timeout=timeout)
+        r = await _run(*args, stdin=stdin, timeout=timeout, env=env)
         if _writes(key):
             invalidate()                # и после: пока шла запись, кто-то мог прочитать старое
         return r
@@ -127,14 +128,15 @@ async def call(*args: Any, stdin: str | bytes | None = None,
 
 
 async def _run(*args: Any, stdin: str | bytes | None = None,
-               timeout: float = DEFAULT_TIMEOUT) -> Result:
+               timeout: float = DEFAULT_TIMEOUT, env: dict[str, str] | None = None) -> Result:
     argv = [AWG2, "api", *(str(a) for a in args)]
     data = stdin.encode() if isinstance(stdin, str) else stdin
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE if data is not None else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, **env} if env else None)
     except FileNotFoundError:
         return Result(False, 127, error=f"awg2 не найден ({AWG2}) — установи AWG Toolza")
     except OSError as e:

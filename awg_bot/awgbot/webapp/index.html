@@ -86,6 +86,9 @@
   body.rail-wide .rail a.logo { gap: 8px; color: var(--text); overflow: hidden; }
   body.rail-wide .rail a.logo img { width: 34px; height: 34px; }
   body.rail-on.rail-wide .top .lock { display: none; }
+  /* Версия с BETA шире ленты: название сжимается по ширине ленты, а не уходит за её край */
+  body.rail-wide .rail a.logo { min-width: 0; }
+  body.rail-wide .rail a.logo .lockup { flex: 0 1 auto; min-width: 0; height: auto; }
   body.rail-wide .rail .badge { top: 50%; right: 12px; margin-top: -4px; }
   .rail .lbl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .rail a.burger { margin-top: 6px; }
@@ -129,6 +132,7 @@
   .sir b { margin-left: auto; font-weight: 600; min-width: 0; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sir b.mono { font: 500 12px var(--mono); }
   .sir b.hid { font-style: italic; color: var(--muted); }
+  .sinfo .even2 { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }      /* «Показать адрес» длиннее «Сервер» */
   .sinfo .even2 button { width: auto; margin: 0; justify-content: center; }
   .kbar { display: flex; align-items: center; gap: 10px; width: 30vw; max-width: 340px; width: min(340px, 30vw); padding: 8px 12px; border-radius: var(--rc);
           border: 1px solid var(--line2); background: var(--panel); color: var(--muted); cursor: pointer; }
@@ -222,6 +226,7 @@
   .item .main { flex: 1; min-width: 0; }
   .item .title { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .item .title.wrap, .item .sub.wrap { white-space: normal; }
+  .item .title.mono.wrap { overflow-wrap: anywhere; }
   .item .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .item .side { color: var(--muted); font: 11.5px var(--mono); text-align: right; flex: none; }
   .item .side svg.i { width: 17px; height: 17px; }
@@ -410,7 +415,7 @@
   .ptabs button { font-size: 12.5px; }
   .ptabs small { margin-left: 4px; font: 500 11px var(--mono); color: var(--muted); }
   /* Поля в 3px — рамка фокуса у кнопок с краю не обрезается */
-  .pager { overflow: hidden; touch-action: pan-y; padding: 3px; margin: -3px; }
+  .pager { overflow: hidden; touch-action: pan-y pinch-zoom; padding: 3px; margin: -3px; }
   .ptrack { display: flex; align-items: flex-start; transition: transform .3s ease; }
   .ptrack > * { flex: 0 0 100%; min-width: 0; }
   .ptrack > .peek { overflow: hidden; }
@@ -653,7 +658,7 @@
     .top { padding: 0 14px; gap: 8px; height: 56px; }
     .me { display: none; }
     /* Флаг без рамки — уже: название с версией и BETA не перекрывается */
-    .cflag { min-width: 0; height: 32px; padding: 0 3px; border-color: transparent; background: none; }
+    .cflag { min-width: 32px; height: 32px; padding: 0 3px; border-color: transparent; background: none; }
     .cflag .pulse { right: -1px; bottom: 4px; box-shadow: 0 0 0 2px var(--bg); }
     .lock { flex-shrink: 0; }
     #app { padding: 18px 14px calc(104px + 0px); padding: 18px 14px calc(104px + env(safe-area-inset-bottom)); }
@@ -673,6 +678,13 @@
     .drawer.wide { width: 100vw; max-width: none; }
     .bar { bottom: calc(80px + 0px); bottom: calc(80px + env(safe-area-inset-bottom)); left: 10px; right: 10px; border-radius: 16px; border: 1px solid var(--line2);
            padding: 8px; }
+  }
+  /* Самый узкий телефон (320): название с версией, ↑ и BETA, флаг, поиск и «Тема» вместе
+     шире экрана — знак убираем, название остаётся ссылкой на главную; кнопки действий
+     («Переустановить», «Обновить бота») — в одну колонку, вдвоём они шире экрана */
+  @media (max-width: 355px) {
+    .lock img { display: none; }
+    .actions { grid-template-columns: 1fr; }
   }
   @media (min-width: 1000px) {
     body.rail-on #app > .egrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 14px; align-items: stretch;

@@ -94,6 +94,8 @@ const say = (ok, label) => console.log(`${ok ? "OK" : "FAIL"} ${label}`);
         await page.waitForFunction(() => { const n = document.querySelector(".topo svg [data-srv]"); return n && !/:\d/.test(n.textContent); });
         await page.keyboard.press("Escape");
         await page.waitForSelector(box, { state: "detached" });
+        // Шапка перерисована переключением — фокус всё равно вернулся на флаг
+        if (!await page.evaluate(() => document.activeElement === document.querySelector(".top .cflag"))) throw new Error("после Esc фокус не на флаге");
         // По флагу — то же окно; адрес скрыт и после перезагрузки
         await page.reload({ waitUntil: "domcontentloaded" });
         await page.waitForSelector(".top .cflag");

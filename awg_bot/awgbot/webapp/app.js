@@ -697,14 +697,15 @@ function serverInfo(anchor) {
       h("div", { class: "sil" },
         row("имя", hide ? "скрыто" : st.host || "—", hide ? "hid" : null),
         row("адрес", !s.exists ? "—" : hide ? "скрыт" : s.endpoint || st.ip || "—", "mono" + (hide ? " hid" : "")),
-        s.exists ? row("протокол", `AWG ${s.proto || "?"} · ${s.port || "?"}/udp`) : null,
+        // Скрыт адрес — и порт: по нему сервер находится так же, как по адресу
+        s.exists ? row("протокол", `AWG ${s.proto || "?"}` + (hide ? "" : ` · ${s.port || "?"}/udp`)) : null,
         s.exists ? row("клиенты", `${s.online || 0} в сети из ${s.clients || 0}`) : null,
         row("аптайм", up[0] + " " + up[1] + (up[2] != null ? ` ${up[2]} ${up[3]}` : "")),
         row("система", st.os || "—"),
         row("AWG Toolza", (S.version || "?") + (S.channel === "beta" ? " · бета" : "") + (hasUpd() ? ` · есть ${S.update}` : ""))),
       h("div", { class: "even2" },
         h("button", { class: "seye", "aria-pressed": String(hide), onclick: () => {
-          toggleSrvHidden(); fill();
+          toggleSrvHidden(); fill();           // drawTop() сам переводит возврат фокуса на новый флаг
           const b = box.querySelector(".seye");
           if (b) b.focus();
         } }, icon(hide ? "eye" : "eye-off"), hide ? "Показать адрес" : "Скрыть адрес"),
@@ -732,8 +733,9 @@ function drawTop() {
   // Сервер в шапке — флаг страны VPS и точка состояния; имя, адрес и остальное —
   // во всплывающем окне по нажатию на флаг
   const st = S.status || {}, s = st.server || {}, cc = st.country || "";
-  const flag = app && S.status ? h("button", { class: "cflag", "aria-label": "О сервере", onclick: (ev) => serverInfo(ev.currentTarget),
-    title: ["О сервере", cc ? countryName(cc) : null, srvState(st)].filter(Boolean).join(" · ") },
+  // Страна и состояние awg0 — и в подписи для чтения с экрана: точка состояния цветом ничего не говорит
+  const tip = ["О сервере", cc ? countryName(cc) : null, srvState(st)].filter(Boolean).join(" · ");
+  const flag = app && S.status ? h("button", { class: "cflag", "aria-label": tip, title: tip, onclick: (ev) => serverInfo(ev.currentTarget) },
   flagEl(cc, 24) || h("span", { class: "cc" }, cc || icon("globe")), h("i", { class: "pulse " + srvPulse(st) })) : null;
   const upd = hasUpd();
   topEl.replaceChildren(...[
@@ -748,6 +750,9 @@ function drawTop() {
       String(S.me.name || "A").slice(0, 1).toUpperCase()) : null,
     app ? null : supportButton()].filter(Boolean));
   drawNav();
+  // Флаг в шапке — новый: окно, открытое по флагу, вернёт фокус ему, а не в пустоту
+  const nf = topEl.querySelector(".cflag");
+  traps.forEach((t) => { if (nf && t.back && t.back.classList && t.back.classList.contains("cflag") && !document.body.contains(t.back)) t.back = nf; });
 }
 
 // Лента (ПК) и нижняя панель с «Ещё» (телефон, Mini App) — по текущему адресу
@@ -1791,20 +1796,26 @@ function uptimeParts(sec) {
   const d = Math.floor(sec / 86400), hh = Math.floor(sec % 86400 / 3600), mm = Math.floor(sec % 3600 / 60);
   return d ? [d, "д", hh, "ч"] : hh ? [hh, "ч", mm, "м"] : [mm, "м", null, null];
 }
-function setStatus(d) {
+// Канал переключили, пока шёл запрос сводки: её канал — прежний, не затирать им
+// только что выбранный (шапка показывала бы «стабильный» до следующей сводки)
+let chanGen = 0;
+function setStatus(d, gen) {
   S.status = d;
   S.version = d.version || S.version;
-  S.channel = d.channel || S.channel;
-  S.update = d.update || "";
+  if (gen === undefined || gen === chanGen) {
+    S.channel = d.channel || S.channel;
+    S.update = d.update || "";           // «↑» прежнего канала — тоже не затирать
+  }
 }
 
 route(/^\/$/, async (ctx) => {
   let clErr = null;
+  const gen = chanGen;
   const [me, d, cl, traffic, evlog, wob] = await Promise.all([post("/api/me"), post("/api/status"), post("/api/clients").catch((e) => { clErr = e; return null; }),
     call("traffic", "daily", "all", 14).catch(() => null), callR(["log", "expire", "80"]).catch(() => null),
     call("wgobf", "clients").catch(() => null)]);
   S.me = me;
-  setStatus(d);
+  setStatus(d, gen);
   if (cl) { S.clients = cl; if (!S.sort) S.sort = cl.sort || "activity"; }
   drawTop();
   const s = d.server || {}, comp = d.components || {}, rows = (cl && cl.rows) || [], r = (cl && cl.route) || {};
@@ -2606,7 +2617,9 @@ route(/^\/server\/antiscan$/, async (ctx) => {
     h("div", { class: "actions", style: "margin-top:8px" },
       on ? btn("⏹ Выключить", (b) => quickAsk(b, "Выключить антисканер? Правило и наборы снимаются, сканеры снова "
         + "увидят порты сервера.", "Антисканер выключен", ["antiscan", "off"]))
-        : btn("✅ Включить", (b) => quick(b, "Антисканер включён", ["antiscan", "on"]), "btn-primary"),
+        : btn("✅ Включить", (b) => quickAsk(b, "Включить антисканер? Новые подключения из сетей списков не пройдут — "
+          + "в том числе клиенты VPN и, возможно, ты сам с другого адреса. Твой текущий адрес и SSH — в исключения сами. "
+          + "Выключить можно здесь или в боте.", "Антисканер включён", ["antiscan", "on"]), "btn-primary"),
       on ? btn("🔄 Обновить списки", (b) => quick(b, "Списки обновлены", ["antiscan", "update"])) : null,
       btn("📜 Журнал", () => go("/log/antiscan"))),
     top.length ? [h("h2", {}, "Чаще всего стучались"), h("div", { class: "card" }, top.map((t) =>
@@ -2622,7 +2635,7 @@ route(/^\/server\/antiscan$/, async (ctx) => {
       + (d.ssh && d.ssh.length ? " Твой SSH: " + d.ssh.join(", ") + "." : "")),
     allow.length ? h("div", { class: "card list" }, allow.map((a) => h("div", { class: "item", onclick: (ev) =>
       quickAsk(ev.currentTarget, `Убрать исключение ${a}?`, "Исключение убрано", ["antiscan", "allow", "del", a]) },
-    h("div", { class: "main" }, h("div", { class: "title mono" }, a)), h("div", { class: "side bad" }, icon("x"))))) : null,
+    h("div", { class: "main" }, h("div", { class: "title mono wrap" }, a)), h("div", { class: "side bad" }, icon("x"))))) : null,
     h("div", { class: "row", style: "gap:8px;margin-top:8px" }, ip, enterTo(add, ip)),
     hint("Клиенты VPN, которые подключаются из этих сетей, тоже не подключатся — для них есть исключения."));
 });
@@ -3610,8 +3623,9 @@ route(/^\/update$/, async (ctx) => {
     if (to === "beta" && !await confirmTg("Бета — ранние сборки: правки приезжают раньше, но могут быть сырыми. Переключиться?")) return;
     await busy(b, async () => {
       await call("update", "channel", to);
-      await call("update", "check").catch(() => null);
+      chanGen++;
       S.channel = to;
+      await call("update", "check").catch(() => null);
       drawTop();
       haptic(); toast(to === "beta" ? "Канал: бета" : "Канал: стабильный"); render();
     });
@@ -4144,7 +4158,8 @@ async function logout() {
 
 // Сводка сервера для шапки: версия, канал, обновление, имя и адрес сервера
 function refreshStatus() {
-  return post("/api/status").then((d) => { setStatus(d); drawTop(); }).catch(() => {});
+  const gen = chanGen;
+  return post("/api/status").then((d) => { setStatus(d, gen); drawTop(); }).catch(() => {});
 }
 
 async function webStart() {
@@ -4216,6 +4231,24 @@ if (WEB && DESK_MQ && DESK_MQ.addEventListener) {
   DESK_MQ.addEventListener("change", () => {
     clearTimeout(mqT);
     mqT = setTimeout(() => { if (S.me && railOn() !== document.body.classList.contains("rail-on")) { drawTop(); render(); } }, 200);
+  });
+}
+// Ширина перешла 380/720px (поворот телефона, окно Telegram Desktop): название в шапке
+// выбирает размер при отрисовке — без этого после поворота оно остаётся крупным и теснит флаг
+if (window.matchMedia) {
+  let lkT = 0;
+  const lkRedraw = () => {
+    clearTimeout(lkT);
+    lkT = setTimeout(() => {
+      // Окно «О сервере» привязано к прежнему флагу и виду (лист/выпадающее) — закрыть до перерисовки
+      const o = document.querySelector(".sinfo");
+      if (o && o.parentNode && o.parentNode.close) o.parentNode.close();
+      drawTop();
+    }, 150);
+  };
+  ["(max-width: 380px)", "(max-width: 720px)"].forEach((q) => {
+    const m = matchMedia(q);
+    if (m.addEventListener) m.addEventListener("change", lkRedraw); else if (m.addListener) m.addListener(lkRedraw);
   });
 }
 drawTop();

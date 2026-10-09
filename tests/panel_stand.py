@@ -134,6 +134,26 @@ from aiogram.types import Chat, Message, MessageEntity, Sticker, StickerSet, Use
 from awgbot import access, admins, icons, store, webapp  # noqa: E402
 from awgbot.config import load_config  # noqa: E402
 
+async def keep_handshakes():
+    """Клиенты «в сети» — пока рукопожатие моложе 3 минут. Под нагрузкой тест доходит
+    до шагов про «в сети» позже — рукопожатия держатся свежими, как на живом сервере."""
+    ages = {"PUBALICE=": 20, "PUBBOB=": 7200, "OBPUB=": 30}
+    while True:
+        await asyncio.sleep(20)
+        now = int(time.time())
+        for path in (AWG_DUMP, WG_DUMP):
+            try:
+                with open(path) as f:
+                    rows = [ln.split("\t") for ln in f.read().split("\n")]
+            except OSError:
+                continue
+            for r in rows:
+                if len(r) > 4 and r[0] in ages:
+                    r[4] = str(now - ages[r[0]])
+            with open(path + ".new", "w") as f:
+                f.write("\n".join("\t".join(r) for r in rows))
+            os.replace(path + ".new", path)
+
 
 class Session(BaseSession):
     async def make_request(self, bot, method, timeout=None):
@@ -178,8 +198,7 @@ async def main():
         admins.add(333, 111, "helper")
     await webapp.SERVER.start(Bot(TOKEN, session=Session()))
     print("READY", PORT, init_data(111), webapp.SERVER.error or "-", ROOT, flush=True)
-    while True:
-        await asyncio.sleep(3600)
+    await keep_handshakes()
 
 
 asyncio.run(main())

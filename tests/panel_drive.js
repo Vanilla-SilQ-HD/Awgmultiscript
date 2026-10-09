@@ -73,6 +73,9 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
       if (await page.getAttribute(".top .cflag svg.flag", "aria-label") !== "Нидерланды") throw new Error("нет флага Нидерландов");
     } else await page.waitForSelector(".top .cflag .cc svg");          // страна не известна — глобус
     if (await page.locator(".top .sib").count()) throw new Error("кнопка «i» лишняя — окно по флагу");
+    // Подпись для чтения с экрана — как всплывающая: о сервере, страна и состояние
+    const nm = await page.getAttribute(".top .cflag", "aria-label");
+    if (!/^О сервере · .*(awg0|сервер не создан)/.test(nm) || nm !== await page.getAttribute(".top .cflag", "title")) throw new Error("подпись флага: " + nm);
     await page.click(".top .cflag");
     await page.waitForSelector(box);
     const t = await page.textContent(box);
@@ -84,14 +87,48 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     // Скрыть имя и адрес — тут же, окно остаётся открытым; и вернуть
     await page.click(`${box} button:has-text('Скрыть адрес')`);
     await page.waitForSelector(`${box} b.hid >> text=скрыто`);
+    // Скрыт и порт: он часть адреса (как и на схеме маршрутов)
+    if (nl && /\d+\/udp/.test(await page.textContent(box))) throw new Error("адрес скрыт, а порт в окне виден");
     await page.click(`${box} button:has-text('Показать адрес')`);
     await page.waitForSelector(`${box} button:has-text('Скрыть адрес')`);
     if (await page.locator(`${box} b.hid`).count()) throw new Error("адрес не вернулся");
     await page.keyboard.press("Escape");
     await page.waitForSelector(box, { state: "detached" });
-    // Широкий экран: окно выпадает из флага
+    // Шапка при переключении перерисована — фокус всё равно возвращается на флаг, а не на страницу
+    if (!await page.evaluate(() => document.activeElement === document.querySelector(".top .cflag"))) throw new Error("после Esc фокус не на флаге");
+    // Узкий телефон: название не уходит под флаг
     const vp = page.viewportSize();
+    await page.setViewportSize({ width: 360, height: vp.height });
+    await page.waitForTimeout(200);
+    const fit = await page.evaluate(() => {
+      const l = document.querySelector(".top .lockup").getBoundingClientRect(), f = document.querySelector(".top .cflag").getBoundingClientRect();
+      return { lockup: l.right, flag: f.left };
+    });
+    if (fit.lockup > fit.flag + 0.5) throw new Error("на 360 название заходит под флаг: " + JSON.stringify(fit));
+    // Страна не из списка флагов (код буквами) и неизвестная (глобус): цель касания не уже 32px
+    await page.setViewportSize(vp);
+    await page.evaluate(() => { window.__st0 = S.status; });
+    for (const cc of ["ZA", ""]) {
+      const wd = await page.evaluate((cc) => { S.status = Object.assign({}, S.status, { country: cc }); drawTop();
+        return document.querySelector(".top .cflag").getBoundingClientRect().width; }, cc);
+      if (wd < 32) throw new Error(`флаг «${cc || "глобус"}» ${wd}px — уже цели касания 32px`);
+    }
+    await page.evaluate(() => { S.status = window.__st0; drawTop(); });
+    // Узкое окно: «Показать адрес» не вылезает за кнопку
+    await page.setViewportSize({ width: 320, height: vp.height });
+    await page.waitForTimeout(300);          // шапка перерисовывается после смены ширины (и закрывает окно)
+    await page.click(".top .cflag");
+    await page.waitForSelector(box);
+    await page.click(`${box} .seye`);
+    const eye = await page.evaluate(() => { const b = document.querySelector(".sinfo .seye"); return { text: b.textContent, sw: b.scrollWidth, cw: b.clientWidth }; });
+    if (eye.sw > eye.cw) throw new Error("на 320 «Показать адрес» шире кнопки: " + JSON.stringify(eye));
+    await page.click(`${box} .seye`);
+    await page.keyboard.press("Escape");
+    await page.waitForSelector(box, { state: "detached" });
+    await page.setViewportSize(vp);
+    // Широкий экран: окно выпадает из флага
     await page.setViewportSize({ width: 1366, height: 900 });
+    await page.waitForTimeout(300);          // шапка перерисовывается после смены ширины
     await page.click(".top .cflag");
     await page.waitForSelector(`${box}.pop`);
     const pos = await page.evaluate(() => {
@@ -102,7 +139,13 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await shot("01c-server-info-pc");
     await page.keyboard.press("Escape");
     await page.waitForSelector(box, { state: "detached" });
+    // Окно открыто, а ширина перешла 720 (окно Telegram Desktop, поворот): шапка перерисовывается,
+    // окно прежнего флага и вида закрывается, а не висит в стороне поверх экрана
+    await page.click(".top .cflag");
+    await page.waitForSelector(`${box}.pop`);
     await page.setViewportSize(vp);
+    await page.waitForSelector(box, { state: "detached", timeout: 3000 })
+      .catch(() => { throw new Error("после смены ширины окно «О сервере» осталось открытым"); });
     await page.waitForTimeout(300);
   });
 
@@ -486,6 +529,38 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.waitForSelector("input[aria-label='Адрес или подсеть']");
     await shot("23b-antiscan");
   });
+  await step("антисканер: включение — с вопросом и предупреждением", async () => {
+    await page.route(/\/api\/call$/, (route) => {
+      const b = JSON.parse(route.request().postData() || "{}");
+      if (b.args && b.args[0] === "antiscan" && b.args[1] === "on")
+        return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, log: "", error: "", data: null }) });
+      return route.continue();
+    });
+    try {
+      await page.click("button:has-text('Включить')");
+      await page.waitForSelector(".toast >> text=Антисканер включён");
+      const asked = (await page.evaluate(() => window.__log)).filter((l) => l.startsWith("confirm:Включить антисканер"));
+      if (!asked.length || !/клиенты VPN/.test(asked[0])) throw new Error("включение без подтверждения: " + JSON.stringify(asked));
+    } finally { await page.unroute(/\/api\/call$/); }
+  });
+  await step("антисканер: длинный IPv6 в исключениях виден целиком (перенос, без обрезки)", async () => {
+    const six = "2001:db8:1234:5678:9abc:def0:1234:5678/128";
+    await page.route(/\/api\/call$/, (route) => {
+      const b = JSON.parse(route.request().postData() || "{}");
+      if (b.args && b.args[0] === "antiscan" && b.args[1] === "status")
+        return route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, log: "", error: "", data: {
+          enabled: true, active: true, v4: 1, v6: 1, dropped: 1, updated: 1790000000, error: "", lists: [], allow: [six], top: [] } }) });
+      return route.continue();
+    });
+    try {
+      await nav("/server/antiscan", "text=" + six.slice(0, 12));
+      const r = await page.evaluate((six) => {
+        const e = [...document.querySelectorAll(".item .title.mono")].find((x) => x.textContent === six);
+        return e ? [e.scrollWidth - e.clientWidth, document.documentElement.scrollWidth - document.documentElement.clientWidth] : null;
+      }, six);
+      if (!r || r[0] > 0 || r[1] > 0) throw new Error("адрес обрезан или страница шире экрана: " + JSON.stringify(r));
+    } finally { await page.unroute(/\/api\/call$/); }
+  });
 
   // ── Туннели и DNS ──
   await step("туннели", async () => {
@@ -833,26 +908,56 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.waitForSelector("text=Канал");
   });
   await step("бета-канал", async () => {
+    // Сводка, запрошенная до переключения, приходит после него — прежний канал
+    // не затирает выбранный (иначе шапка — «стабильный» до следующей сводки)
+    let late = null;
+    await page.route("**/api/status", async (r) => {
+      const first = !late;
+      if (first) late = new Promise((ok) => setTimeout(ok, 2500));
+      const resp = await r.fetch();          // ответ сервера — на момент запроса
+      if (first) await late;
+      return r.fulfill({ response: resp });
+    });
+    await page.evaluate(() => { refreshStatus(); });
     await page.click("button:has-text('Бета-канал')");
     await page.waitForSelector("text=бета — ранние сборки");
     await page.waitForFunction(() => /beta/.test(document.querySelector(".top .lockup").getAttribute("aria-label")));
+    await late;
+    await page.waitForTimeout(300);
+    await page.unroute("**/api/status");
+    if (!/beta/.test(await page.getAttribute(".top .lockup", "aria-label"))) throw new Error("запоздалая сводка вернула шапке стабильный канал");
     await page.waitForSelector(".top .lockup text >> text=BETA");
     await shot("48c-beta");
     if (/null|undefined/.test(await page.textContent(".top"))) throw new Error("в шапке «null»");
     // Самая длинная надпись — версия, ↑ и BETA: флаг её не перекрывает, шапка не шире экрана
     const vp = page.viewportSize();
-    for (const width of [360, 375, 390, 412]) {
+    for (const width of [320, 360, 375, 390, 412]) {
       await page.setViewportSize({ width, height: vp.height });
       const r = await page.evaluate(() => {
         drawTop();
         const box = (sel) => document.querySelector(sel).getBoundingClientRect();
         const l = box(".top .lockup"), f = box(".top .cflag"), k = box(".top .kbar");
-        return { lockR: Math.round(l.right), flagL: Math.round(f.left), flagR: Math.round(f.right), kbarL: Math.round(k.left),
+        // Правый край шапки (кнопка «Тема») — не за экраном; и экран «Обновление» не шире окна
+        const last = [...document.querySelector(".top").children].pop().getBoundingClientRect();
+        return { lockR: Math.round(l.right), flagL: Math.round(f.left), flagR: Math.round(f.right), kbarL: Math.round(k.left), topR: Math.round(last.right),
           over: document.documentElement.scrollWidth - document.documentElement.clientWidth };
       });
-      if (r.lockR > r.flagL || r.flagR > r.kbarL || r.over > 0) throw new Error(`шапка на ${width}px: ` + JSON.stringify(r));
+      if (r.lockR > r.flagL || r.flagR > r.kbarL || r.topR > width || r.over > 0) throw new Error(`шапка на ${width}px: ` + JSON.stringify(r));
       if (width === 360) await page.screenshot({ path: `${out}/48d-beta-360.png` });
     }
+    // Поворот телефона / окно Telegram Desktop: название выбирает размер при отрисовке,
+    // а шапку никто не вызывал — после широкого окна оно оставалось крупным и теснило флаг
+    await page.setViewportSize({ width: 844, height: 390 });
+    await page.evaluate(() => drawTop());
+    await page.setViewportSize({ width: 360, height: 844 });
+    await page.waitForTimeout(500);
+    const rot = await page.evaluate(() => {
+      const box = (sel) => document.querySelector(sel).getBoundingClientRect();
+      const l = box(".top .lockup"), f = box(".top .cflag"), k = box(".top .kbar");
+      return { lockR: Math.round(l.right), flagL: Math.round(f.left), flagR: Math.round(f.right), kbarL: Math.round(k.left),
+        over: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+    });
+    if (rot.lockR > rot.flagL || rot.flagR > rot.kbarL || rot.over > 0) throw new Error("шапка после поворота: " + JSON.stringify(rot));
     await page.setViewportSize(vp);
     await page.evaluate(() => drawTop());
   });
@@ -905,6 +1010,9 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     if (x.on !== 0 || x.off.join() !== "false,true" || x.link !== "туннели →") throw new Error("сначала окно AWG: " + JSON.stringify(x));
     if (!/^AWG \d+\/\d+$/.test(x.tabs[0]) || x.tabs[1] !== "Phobos 1/1") throw new Error("вкладки: " + JSON.stringify(x.tabs));
     if (!/обфускатор: 1 из 1 в сети/.test(await page.textContent(".head"))) throw new Error("нет обфускатора в подзаголовке");
+    // Окно листается только вбок; щипок-масштаб страницы на нём работает (веб-панель в браузере)
+    const ta = await page.evaluate(() => getComputedStyle(document.querySelector("[data-name=routes] .pager")).touchAction);
+    if (!/pinch-zoom/.test(ta) || !/pan-y/.test(ta)) throw new Error("touch-action окна маршрутов: " + ta);
     // Палец влево по окну — следующее окно: Phobos
     const swipe = (dx, dy) => page.evaluate(([dx, dy]) => {
       const el = document.querySelector("[data-name=routes] .pager"), r = el.getBoundingClientRect();

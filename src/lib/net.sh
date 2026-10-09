@@ -92,11 +92,17 @@ public_ip_cached() {
 server_country() { awk 'NR == 1 && $1 ~ /^[A-Z][A-Z]$/ {print $1}' "$COUNTRY_CACHE" 2>/dev/null || true; }
 
 country_refresh() {
-  local loc=""
+  local loc="" ts
   command -v curl &>/dev/null || return 0
   loc=$(curl -s --max-time 6 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^loc=//p' | head -1 || true)
-  [[ "$loc" =~ ^[A-Z]{2}$ && "$loc" != XX ]] || loc="-"
-  printf '%s %s\n' "$loc" "$(date +%s)" | write_file "$COUNTRY_CACHE" 644
+  ts=$(date +%s)
+  if ! [[ "$loc" =~ ^[A-Z]{2}$ && "$loc" != XX ]]; then
+    # Не ответили: прежняя страна остаётся (флаг не пропадает на час из-за одного сбоя),
+    # метка сдвинута так, чтобы повтор был через час, а не через сутки
+    loc=$(server_country); ts=$(( ts - 86400 + 3600 ))
+    [[ -n "$loc" ]] || { loc="-"; ts=$(date +%s); }
+  fi
+  printf '%s %s\n' "$loc" "$ts" | write_file "$COUNTRY_CACHE" 644
 }
 
 country_refresh_async() {

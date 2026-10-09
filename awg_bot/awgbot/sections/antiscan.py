@@ -46,7 +46,7 @@ async def screen(target: ui.Target, note: str = "") -> None:
     if on:
         lines.append(("🟢 Включён" if d.get("active") else "🟡 Включён, правило не на месте — вернёт таймер или "
                       "«Обновить списки»") + f" · подсетей {_n((d.get('v4') or 0) + (d.get('v6') or 0))}")
-        lines.append(f"🚫 Отбито: {_n(d.get('dropped'))} новых подключений с последнего применения")
+        lines.append(f"🚫 Отбито: {_n(d.get('dropped'))} новых подключений с установки правила (сбрасывается при перезагрузке)")
     else:
         lines.append("⚪️ Выключен")
     if d.get("updated"):
@@ -77,6 +77,14 @@ async def screen(target: ui.Target, note: str = "") -> None:
 
 @act("on")
 async def _on(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    # Адреса админа бот не знает (в отличие от панели и SSH) — только предупреждение
+    await ui.confirm(cb, "Включить антисканер? Новые подключения из сетей списков не пройдут — в том числе клиенты "
+                     "VPN и, возможно, ты сам: SSH, панель, Mini App. Открытые соединения не рвутся, выключить "
+                     "можно здесь, в боте.", ("✅ Включить", act.data("onok")), act.data())
+
+
+@act("onok")
+async def _on_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ui.render(cb, "⏳ Скачиваю и проверяю списки, ставлю правило…")
     r = await api.call("antiscan", "on", timeout=TIMEOUT)
     await screen(cb, "✅ Включён" if r.ok else ui.fail(r, "Антисканер"))

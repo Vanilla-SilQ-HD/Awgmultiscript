@@ -1156,6 +1156,23 @@ async def run():
     back = [m.text or "" for n, m in SESSION.sent[mark:] if n == "SendMessage"]
     chk("вернулся — «снова онлайн»", any("снова онлайн" in t and "clus" in t for t in back) and "wgobf:clus" not in st,
         [back, st])
+    # awg2 не ответил по обфускатору: состояние офлайн-клиента остаётся, второго 🔴 после ответа нет
+    wg_dump(900)
+    await _mon.tick(BOT, st, True)
+    real_data = _mon.api.data
+
+    async def no_wgobf(*a, **kw):
+        return None if a[:2] == ("wgobf", "clients") else await real_data(*a, **kw)
+    _mon.api.data = no_wgobf
+    try:
+        await _mon.tick(BOT, st, True)
+    finally:
+        _mon.api.data = real_data
+    mark = len(SESSION.sent)
+    await _mon.tick(BOT, st, True)
+    again = [m.text or "" for n, m in SESSION.sent[mark:] if n == "SendMessage" and "офлайн" in (m.text or "")]
+    chk("нет ответа по обфускатору — офлайн-клиент не даёт второго «офлайн»", not again and "wgobf:clus" in st,
+        [again, st])
     os.remove(WG_DUMP)
 
     text, buttons = screen(await press("wo:install"))
@@ -1273,6 +1290,25 @@ async def run():
         chk("панель: команды вне белого списка — 403", st == 403, [st, body])
         st, body = await api_("/api/call", {"args": "status"})
         chk("панель: кривые аргументы — 400", st == 400, [st, body])
+        # Антисканер из панели: адрес соединения — в awg2 (AWG_CLIENT_IP), чтобы тот,
+        # кто включает, не отрезал себя; подставной X-Forwarded-For не в счёт
+        seen_env, real_call_e = [], botapi.call
+
+        async def env_call(*args, **kw):
+            seen_env.append((args, kw.get("env")))
+            return botapi.Result(True)
+        botapi.call = env_call
+        try:
+            for args in (["antiscan", "on"], ["antiscan", "allow", "del", "127.0.0.1"], ["status"]):
+                async with http.post(base + "/api/call", json={"args": args},
+                                     headers={"Authorization": "tma " + init_data(111), "X-Forwarded-For": "77.0.6.6"}) as r:
+                    await r.read()
+        finally:
+            botapi.call = real_call_e
+        chk("панель: включение антисканера получает адрес клиента панели (не X-Forwarded-For); "
+            "удаление исключения и другие команды — нет (свой адрес иначе вернулся бы в исключения)",
+            seen_env == [(("antiscan", "on"), {"AWG_CLIENT_IP": "127.0.0.1"}),
+                         (("antiscan", "allow", "del", "127.0.0.1"), None), (("status",), None)], seen_env)
         admins.add(333, 111)
         st, body = await api_("/api/call", {"args": ["uninstall"]}, uid=333)
         chk("приглашённому админу владельческое закрыто", st == 403 and "владелец" in body.get("error", ""), [st, body])
@@ -1569,6 +1605,8 @@ async def run():
         "🟢 Включён · подсетей 3 129" in text and "Отбито: 1 234" in text and "<code>77.0.3.0/24</code>" in text
         and "Org &lt;MVD&gt;" in text and "✅ Сети госорганов — 2 818" in text and "Исключения: 2" in text
         and "твой SSH не блокируется" in text, text)
+    chk("счётчик «Отбито» — с установки правила (обновление списков его не сбрасывает), а не «с последнего применения»",
+        "с установки правила" in text and "с последнего применения" not in text, text)
     chk("кнопки: выключить, обновить, списки переключателями, исключения, журнал, назад в «Сервер»",
         ("⏹ Выключить", "as:off") in buttons and ("🔄 Обновить списки", "as:upd") in buttons
         and ("✅ Сети госорганов", "as:l:gov") in buttons and ("📝 Исключения", "as:al") in buttons
@@ -1586,7 +1624,12 @@ async def run():
     text, buttons = screen(await press("as:offok"))
     chk("выключен: «Включить», без «Обновить списки»", "⚪️ Выключен" in text and ("✅ Включить", "as:on") in buttons
         and not any(d == "as:upd" for _, d in buttons), [text, buttons])
-    text, _ = screen(await press("as:on"))
+    n = len(as_calls)
+    text, buttons = screen(await press("as:on"))
+    chk("включение — с подтверждением и предупреждением (клиенты VPN и сам админ из сетей списков не войдут)",
+        ("✅ Включить", "as:onok") in buttons and ("✖️ Отмена", "as") in buttons and "клиенты VPN" in text
+        and "ты сам" in text and not any(c[0][0] == "on" for c in as_calls[n:]), [text, buttons, as_calls[n:]])
+    text, _ = screen(await press("as:onok"))
     chk("включение: долгий вызов (списки качаются) и снова экран", as_calls[-2] == (("on",), 300)
         and "✅ Включён" in text, [as_calls[-3:], text])
     text, buttons = screen(await press("as:al"))

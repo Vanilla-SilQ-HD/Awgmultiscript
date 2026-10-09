@@ -1062,6 +1062,16 @@ r = api("clients", "list")
 chk("чтение мимо очереди", r.get("ok") is True, r)
 r = api("traffic", "now", env={"API_LOCK_WAIT": "1"})
 chk("живая скорость (traffic now) — мимо очереди", r.get("ok") is True, r)
+# Чтение — только точные команды по словам: хвост «info» или слово с пробелом
+# внутри не делают запись чтением
+r = api("antiscan", "allow", "add", "1.2.3.4", "info", env={"API_LOCK_WAIT": "1"})
+r2 = api("antiscan", "allow add 1.2.3.4 info", env={"API_LOCK_WAIT": "1"})
+r3 = api("client", "conf x", "info", env={"API_LOCK_WAIT": "1"})
+chk("запись с хвостом «info» или словом с пробелом внутри — в очередь, а не мимо",
+    r.get("rc") == 75 and r2.get("rc") == 75 and r3.get("rc") == 75, [r, r2, r3])
+rr = {" ".join(a): api(*a, env={"API_LOCK_WAIT": "1"}).get("rc") for a in (
+    ("antiscan", "status"), ("server", "info"), ("log", "antiscan", "5"), ("cert",), ("bot", "proxy", "get"))}
+chk("чтения бота и панели — по-прежнему мимо очереди", all(v != 75 for v in rr.values()), rr)
 holder.kill()
 holder.wait()
 
@@ -1557,9 +1567,15 @@ o = out.split()
 chk("страна — из cloudflare cdn-cgi/trace (loc=), в кэш со временем", len(o) == 3 and o[0] == "NL" and o[1].isdigit() and o[2] == "NL", out)
 r = api("status")
 chk("api status: country — код страны из кэша", (r.get("data") or {}).get("country") == "NL", r.get("data"))
-rc, out, _ = bash('curl() { return 28; }; country_refresh; cat "$COUNTRY_CACHE"; echo "[$(server_country)]"')
+rc, out, _ = bash('rm -f "$COUNTRY_CACHE"; curl() { return 28; }; country_refresh; cat "$COUNTRY_CACHE"; echo "[$(server_country)]"')
 chk("Cloudflare не ответил — пометка «-», страна пустая (флага нет)", out.split()[0] == "-" and out.strip().endswith("[]"), out)
-rc, out, _ = bash('curl() { printf "loc=XX\\n"; }; country_refresh; echo "[$(server_country)]"; '
+# Один сбой не стирает уже известную страну (флаг не пропадает на час); метка такая, что повтор — через час
+rc, out, _ = bash('echo "NL $(( $(date +%s) - 90000 ))" > "$COUNTRY_CACHE"; curl() { return 28; }; country_refresh; '
+                  'read -r cc ts < "$COUNTRY_CACHE"; echo "$cc $(( $(date +%s) - ts )) [$(server_country)]"')
+o = out.split()
+chk("Cloudflare не ответил, а страна уже известна — остаётся, повтор через час (не через сутки)",
+    len(o) == 3 and o[0] == "NL" and o[2] == "[NL]" and o[1].isdigit() and 82700 <= int(o[1]) <= 82900, out)
+rc, out, _ = bash('rm -f "$COUNTRY_CACHE"; curl() { printf "loc=XX\\n"; }; country_refresh; echo "[$(server_country)]"; '
                   'printf "<b>\\n" > "$COUNTRY_CACHE"; echo "[$(server_country)]"')
 chk("неизвестная страна (XX) и мусор в кэше — без флага", out.split() == ["[]", "[]"], out)
 CR = 'country_refresh() { touch "$STATE_DIR/cr"; }; rm -f "$STATE_DIR/cr"; unset AWG_NO_UPDATE_CHECK; '
@@ -1913,9 +1929,15 @@ else cat "$IPT_SAVE"; fi""",
     "curl": r"""out="" url=""
 while (( $# )); do case "$1" in -o) out="$2"; shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac; done
 echo "curl $url" >> "$CALLS"
+sleep "${FAKE_CURL_SLEEP:-0}"
 src="$ASLISTS/${url##*/}"
 [[ -f "$src" && -n "$out" ]] || exit 22
 cp "$src" "$out" """,
+    "ip": r"""if [[ "$*" == "-o addr show scope global" ]]; then
+  for a in ${FAKE_ADDRS:-}; do echo "2: eth0    inet $a/24 brd 255.255.255.255 scope global eth0"; done; exit 0
+fi
+PATH="${PATH#"${0%/*}:"}" exec ip "$@"
+""",
     "ss": r"""[[ -n "${FAKE_SSH_PEER:-}" ]] && echo "0 0 203.0.113.10:22 $FAKE_SSH_PEER:51000 users:((\"sshd\",pid=1,fd=4))"
 exit 0""",
 }
@@ -1970,6 +1992,11 @@ rc, out, _ = bash(f'_antiscan_parse 6 < "{ASLISTS}/antiscanner.list"')
 chk("разбор IPv6: только глобальные, без link-local, документационных и кривых", out.split() == ["2a0c:a9c7:157::/48"], out)
 rc, out, _ = bash('printf "10.1.2.3\\n1.2.3.4/8\\n1.2.3.4/7\\n" | _antiscan_parse 4 1')
 chk("исключения: частные адреса можно, но не шире /8", out.split() == ["10.1.2.3/32", "1.0.0.0/8"], out)
+# Одинокое «:» с краю — не IPv6: одна такая запись роняла бы весь ipset restore (набор IPv6 снимался целиком)
+for mode in ("0", "1"):
+    rc, out, _ = bash(f'printf "2a0c::1:\\n:2a0c::1\\n1::2:\\n::1:\\n2a0c:1::\\n2a0c::1\\n" | _antiscan_parse 6 {mode}')
+    chk(f"разбор IPv6 (allow={mode}): одинокое «:» с краю отброшено, верные записи остались",
+        out.split() == ["2a0c:1::/128", "2a0c::1/128"], out)
 
 reset_calls()
 r = api("antiscan", "on", env=dict(ASENV, FAKE_SSH_PEER="77.0.5.9", SSH_CONNECTION="77.0.7.7 5000 203.0.113.10 22"))
@@ -2013,6 +2040,27 @@ chk("короткий ответ сервера списков — прежни�
     r.get("ok") and {x["id"]: x for x in d["lists"]}["gov"]["entries"] == 320 and "оставлен прежний" in d.get("error", ""),
     [r, d])
 with open(os.path.join(ASLISTS, "government_networks.list"), "w") as f:
+    f.write("".join(f"{20 + i // 16777216}.{i // 65536 % 256}.{i // 256 % 256}.{i % 256}\n" for i in range(200001)))
+r = api("antiscan", "update", env=ASENV)
+d = api("antiscan", "status", env=ASENV).get("data") or {}
+chk("раздутый ответ (больше предела применения) — прежний список остаётся, а не ломает применение",
+    r.get("ok") and {x["id"]: x for x in d["lists"]}["gov"]["entries"] == 320 and "оставлен прежний" in d.get("error", ""),
+    [r, d.get("error"), d.get("lists")])
+# Подменённый источник: тысячи /12 — записей в меру, но закрыли бы почти весь IPv4
+with open(os.path.join(ASLISTS, "government_networks.list"), "w") as f:
+    f.write("".join(f"{i // 16 % 223 + 1}.{i % 16 * 16}.0.0/12\n" for i in range(3500)))
+r = api("antiscan", "update", env=ASENV)
+d = api("antiscan", "status", env=ASENV).get("data") or {}
+chk("охват шире 2^24 адресов IPv4 (тысячи /12) — прежний список остаётся, ошибка в статусе и журнале",
+    {x["id"]: x for x in d["lists"]}["gov"]["entries"] == 320 and "охват" in d.get("error", "")
+    and "охват" in open(os.path.join(ROOT, "antiscan.log")).read(), [r, d.get("error"), d.get("lists")])
+with open(os.path.join(ASLISTS, "government_networks.list"), "w") as f:
+    f.write(gov_list(320) + "\n" + "".join(f"2a{i:02x}:ff00::/24\n" for i in range(20)))
+r = api("antiscan", "update", env=ASENV)
+d = api("antiscan", "status", env=ASENV).get("data") or {}
+chk("IPv6: охват больше 4096 сетей /32 — прежний список остаётся",
+    {x["id"]: x for x in d["lists"]}["gov"]["entries"] == 320 and "охват" in d.get("error", ""), [r, d.get("error")])
+with open(os.path.join(ASLISTS, "government_networks.list"), "w") as f:
     f.write(gov_list(320))
 
 # Правило сдвинули (fail2ban вставил своё первым) — таймер возвращает его наверх без скачивания
@@ -2046,6 +2094,24 @@ rc, out, _ = bash(ASPRE + 'sed -i "s/^UPDATED=.*/UPDATED=1/" "$ANTISCAN_CONF"; b
                   'grep -c "^curl" "$CALLS"')
 chk("таймер: списки старше суток — скачивает заново", out.strip().endswith("3"), out)
 
+# Адреса сервера: на загрузке (служба раньше сети) их нет, при смене адреса исключения
+# устаревают — таймер пересобирает набор без скачивания; тот же набор адресов не трогает
+rc, out, _ = bash(ASPRE + 'FAKE_ADDRS="77.0.9.9" bash "$ANTISCAN_SCRIPT" apply; echo "rc=$?"')
+a1 = "77.0.9.9/32 nomatch" in (ipset_set("awg2-antiscan") or [])
+reset_calls()
+rc, out2, _ = bash(ASPRE + 'FAKE_ADDRS="77.0.9.9" bash "$ANTISCAN_SCRIPT" heal; echo "rc=$?"')
+a2 = "ipset restore" not in calls()
+rc, out3, _ = bash(ASPRE + 'FAKE_ADDRS="77.0.9.9 77.0.8.8" bash "$ANTISCAN_SCRIPT" heal; echo "rc=$?"')
+a3 = "77.0.8.8/32 nomatch" in (ipset_set("awg2-antiscan") or []) and "curl" not in calls()
+chk("таймер: адреса сервера те же — набор не пересобирается; сменились — исключения обновлены без скачивания",
+    a1 and a2 and a3 and "rc=0" in out + out2 + out3, [a1, a2, a3, out, out2, out3])
+# Прерванная загрузка оставляет временный набор — выключение убирает и его
+open(os.path.join(IPSET_DIR, "sets", "awg2-antiscan-new"), "w").close()
+rc, out, _ = bash(ASPRE + 'antiscan_down')
+chk("выключение убирает временный набор прерванной загрузки",
+    ipset_set("awg2-antiscan-new") is None and ipset_set("awg2-antiscan") is None, [out, ipset_set("awg2-antiscan-new")])
+api("antiscan", "update", env=ASENV)   # вернуть набор для следующих проверок
+
 r = api("antiscan", "allow", "add", "8.8.4.0/24", env=ASENV)
 r2 = api("antiscan", "allow", "add", "1.2.3.4\nPostUp = x", env=ASENV)
 r3 = api("antiscan", "allow", "add", "300.1.1.1", env=ASENV)
@@ -2057,6 +2123,49 @@ r2 = api("antiscan", "allow", "del", "9.9.9.9", env=ASENV)
 chk("исключение убрано; несуществующее — ошибка",
     r.get("ok") and "8.8.4.0" not in open(os.path.join(ROOT, "var/lib/awg2/antiscan/allow")).read() and not r2.get("ok"),
     [r, r2])
+r = api("antiscan", "allow", "add", "1.0.0.0/4", env=ASENV)
+r2 = api("antiscan", "allow", "add", "2a0c::/8", env=ASENV)
+r3 = api("antiscan", "allow", "add", "300.1.1.1/4", env=ASENV)
+chk("исключение шире /8 (IPv4) или /16 (IPv6) — своим текстом, а не «нужен адрес»",
+    "Слишком широкая" in r.get("error", "") and "Слишком широкая" in r2.get("error", "")
+    and "Нужен IPv4 или IPv6" in r3.get("error", ""), [r.get("error"), r2.get("error"), r3.get("error")])
+
+# Широкое исключение перекрывает узкие записи списка: в hash:net побеждает самый
+# узкий префикс, поэтому записи внутри исключения в набор не идут
+api("antiscan", "allow", "add", "212.41.12.0/24", env=ASENV)
+api("antiscan", "allow", "add", "31.1.2.0/24", env=ASENV)
+r = api("antiscan", "allow", "add", "2a0c:a9c7::/32", env=ASENV)
+v4, v6 = ipset_set("awg2-antiscan") or [], ipset_set("awg2-antiscan6") or []
+chk("исключение шире записей списка: записи внутри него не в наборе (IPv4 и IPv6), шире — остаются",
+    r.get("ok") and not any(x.startswith("212.41.12.") and "nomatch" not in x for x in v4)
+    and "212.41.12.0/24 nomatch" in v4 and "31.1.0.0/16" in v4 and "31.1.2.0/24 nomatch" in v4
+    and "2a0c:a9c7:157::/48" not in v6, [r, [x for x in v4 if x.startswith(("212.", "31.1."))], v6])
+for a in ("212.41.12.0/24", "31.1.2.0/24", "2a0c:a9c7::/32"):
+    api("antiscan", "allow", "del", a, env=ASENV)
+chk("исключение убрано — записи списка снова в наборе",
+    "212.41.12.5/32" in (ipset_set("awg2-antiscan") or []) and "2a0c:a9c7:157::/48" in (ipset_set("awg2-antiscan6") or []),
+    [ipset_set("awg2-antiscan6")])
+
+# Адрес того, кто включает из панели или Mini App (AWG_CLIENT_IP от бота), и
+# IPv6-адрес SSH-сессии внутри списка — в исключения насовсем
+for ip in ("77.0.6.6", "8.8.4.4", "::ffff:77.0.6.8", "2a0c:a9c7:157::5", "77.0.6.7;x", "77.0.6.9\n1.1.1.1", "77.0.6"):
+    api("antiscan", "update", env=dict(ASENV, AWG_CLIENT_IP=ip))
+allow = open(os.path.join(ROOT, "var/lib/awg2/antiscan/allow")).read()
+rows = [x.split()[0] for x in allow.splitlines() if x.strip()]
+chk("адрес клиента панели внутри списка — в исключения (IPv4, IPv4 в IPv6, IPv6); снаружи и мусор — нет",
+    "77.0.6.6 # панель" in allow and "77.0.6.8 # панель" in allow and "2a0c:a9c7:157::5 # панель" in allow
+    and not any(x.startswith(("8.8.4.4", "77.0.6.7", "77.0.6.9", "1.1.1.1")) or x == "77.0.6" for x in rows)
+    and "77.0.6.6/32 nomatch" in (ipset_set("awg2-antiscan") or []), allow)
+api("antiscan", "update", env=dict(ASENV, AWG_CLIENT_IP="77.0.6.6"))
+chk("повторное включение с того же адреса — без дубля", open(os.path.join(ROOT, "var/lib/awg2/antiscan/allow")).read()
+    .count("77.0.6.6 ") == 1, allow)
+api("antiscan", "update", env=dict(ASENV, SSH_CONNECTION="2a0c:a9c7:157::9 5000 2001:db8::1 22"))
+allow = open(os.path.join(ROOT, "var/lib/awg2/antiscan/allow")).read()
+chk("IPv6-адрес SSH-сессии внутри списка — в исключения насовсем",
+    "2a0c:a9c7:157::9 # SSH" in allow and "2a0c:a9c7:157::9/128 nomatch" in (ipset_set("awg2-antiscan6") or []), allow)
+
+r = api("antiscan", "allow", env=ASENV)
+chk("allow без аргументов — ответ JSON с отказом, а не обрыв без ответа (set -u)", r.get("ok") is False and r.get("_rc") != 0, r)
 
 r = api("antiscan", "lists", "scan,skipa", env=ASENV)
 v4 = ipset_set("awg2-antiscan") or []
@@ -2073,6 +2182,16 @@ rc, out, _ = bash(ASPRE + "antiscan_watchdog")
 chk("сторож: таймер молчал больше трёх часов — перезапуск",
     "systemctl start --no-block awg2-antiscan-update.service" in calls(), calls())
 
+# Проход таймера уже увидел ON=1 и качает списки, а в это время выключают:
+# выключение ждёт его замок, проход перед применением видит ON=0 — правило не возвращается
+timer = subprocess.Popen(["bash", "-c", PRELUDE + ASPRE + 'FAKE_CURL_SLEEP=1 bash "$ANTISCAN_SCRIPT" update'],
+                         env=dict(ENV, **ASENV), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+time.sleep(0.7)
+r = api("antiscan", "off", env=ASENV)
+timer.wait(60)
+chk("выключение во время прохода таймера: правило и наборы не возвращаются",
+    r.get("ok") and not any("awg2-antiscan" in x for x in ipt(4) + ipt(6))
+    and ipset_set("awg2-antiscan") is None and ipset_set("awg2-antiscan6") is None, [r, ipt(4), ipt(6)])
 r = api("antiscan", "off", env=ASENV)
 chk("api antiscan off: правила сняты, наборы удалены, службы убраны",
     r.get("ok") and not any("awg2-antiscan" in x for x in ipt(4) + ipt(6))

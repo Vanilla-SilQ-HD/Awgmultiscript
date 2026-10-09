@@ -963,18 +963,23 @@ _api_job() {
 # Команды только для чтения идут мимо очереди: сводка не должна ждать,
 # пока задача собирает модуль.
 _api_readonly() {
-  case "$*" in
-    # Пишущие подкоманды «читающих» разделов — в очередь: bot webapp port и
-    # bot proxy set правят один /etc/awg-bot.conf, параллельно потеряли бы ключ.
-    "bot proxy set"*|"bot proxy clear"*|"bot webapp port"*|"server params set"*) return 1 ;;
-    "server params"|"server params check"*) return 0 ;;
+  local a="${1:-}" b="${2:-}" c="${3:-}"
+  # Разделы, где всё — чтение (задача job start сама идёт через замок, когда запустится)
+  case "$a" in status|version|help|mimicry|log|job|diag) return 0 ;; esac
+  # Дальше — точные команды по словам, а не маски по строке: лишнее слово в
+  # конце или слово с пробелом внутри («allow add X info») чтением не станут.
+  # Пишущие подкоманды «читающих» разделов (bot proxy set, bot webapp port,
+  # server params set — правят общие файлы) сюда не попадают — в очередь.
+  [[ "$a $b" != *[[:space:]]*[[:space:]]* ]] || return 1
+  case "$a $b $c" in
+    "server params "|"server params check"|"bot proxy get"|"bot proxy check"|"bot proxy candidates"|"bot webapp get") return 0 ;;
   esac
-  case "$1 ${2:-}" in
-    "status "|"version "|"help "|"mimicry "|"log "*|"job "*|"diag "*) return 0 ;;
-    *" status"|*" info"|*" report"|*" tags"|*" backups"|*" list"|*" conf"|*" inspect") return 0 ;;
-    "clients "|"tunnels "|"tunnels clients"|"xray diag"|"cascade diag"|"wgobf clients"|\
-    "bot proxy"|"bot webapp"|"update check"|"update changelog"|"module check"|"cert "|"cert find"|\
-    "traffic daily"|"traffic now") return 0 ;;
+  case "$a $b" in
+    "server info"|"module report"|"module tags"|"module check"|"module backups"|"clients "|"clients list"|\
+    "client conf"|"traffic daily"|"traffic now"|"backup list"|"backup inspect"|"tunnels "|"tunnels status"|\
+    "tunnels clients"|"warp status"|"xray status"|"xray diag"|"t2s status"|"exits status"|"cascade list"|\
+    "cascade diag"|"dns status"|"wgobf status"|"wgobf clients"|"update status"|"update check"|"update changelog"|\
+    "bot status"|"cert "|"cert status"|"cert find"|"web status"|"antiscan status") return 0 ;;
   esac
   return 1
 }

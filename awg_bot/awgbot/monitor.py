@@ -72,12 +72,13 @@ def _card(c: dict) -> str:
             + (f"\nЗаметка: {esc(note)}" if note else ""))
 
 
-async def _wgobf_watched(notes: dict[str, str], now: int) -> list[dict]:
+async def _wgobf_watched(notes: dict[str, str], now: int) -> list[dict] | None:
     """Клиенты обфускатора с #ping. Заметки удалённых — прочь; обфускатор
-    удалён (список пуст) — все его заметки тоже. Нет ответа awg2 — не трогаем."""
+    удалён (список пуст) — все его заметки тоже. Нет ответа awg2 — None:
+    ни заметки, ни состояние этих клиентов не трогаем."""
     rows = await api.data("wgobf", "clients")
     if not isinstance(rows, list):
-        return []
+        return None
     alive = {store.WGOBF + c["name"] for c in rows if isinstance(c, dict) and c.get("name")}
     for gone in [n for n in notes if n.startswith(store.WGOBF) and n not in alive]:
         store.drop_note(gone)
@@ -115,7 +116,8 @@ async def tick(bot: Bot, state: dict[str, dict[str, Any]], primed: bool) -> bool
     watched = [c for c in rows if store.MONITOR_TAG in notes.get(c["name"], "").lower()
                and not c.get("blocked") and c.get("handshake")]
     now = int(time.time())
-    watched += await _wgobf_watched(notes, now)
+    wg = await _wgobf_watched(notes, now)
+    watched += wg or []
     for c in watched:
         key = c.get("_key") or c["name"]
         hs = int(c["handshake"])
@@ -132,7 +134,9 @@ async def tick(bot: Bot, state: dict[str, dict[str, Any]], primed: bool) -> bool
                 gone = f"\nОтсутствовал: {ui.fmt_dur(now - int(entry['since']))}" if entry.get("since") else ""
                 await _send(bot, f"🟢 <b>Клиент снова онлайн</b>\n\n{_card(c)}{gone}")
     names = {c.get("_key") or c["name"] for c in watched}
-    for stale in [k for k in state if k not in names]:
+    # Нет ответа по обфускатору — их состояние остаётся: иначе тот же офлайн-клиент
+    # при следующем ответе дал бы второе 🔴
+    for stale in [k for k in state if k not in names and not (wg is None and k.startswith(store.WGOBF))]:
         state.pop(stale)
     store.save(store.MONITOR, state)
     return True
