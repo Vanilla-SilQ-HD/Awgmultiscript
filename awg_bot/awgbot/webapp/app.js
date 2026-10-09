@@ -558,7 +558,7 @@ const logoImg = (cls) => h("img", { class: "tz" + (cls ? " " + cls : ""), src: t
 // Знак-название: крупное AWG на всю высоту, справа «toolza» и строка версии.
 // Буквы меряются в браузере (canvas, тот же шрифт): верх AWG — по верху «toolza»,
 // низ — по низу версии; версия и BETA растянуты ровно по ширине «toolza».
-function lockupEl() {
+function lockupEl(rail) {
   const cv = lockupEl.c || (lockupEl.c = document.createElement("canvas").getContext("2d"));
   const css = getComputedStyle(document.documentElement);
   const SANS = (css.getPropertyValue("--sans") || "system-ui").trim().replace(/"/g, "'");
@@ -570,15 +570,16 @@ function lockupEl() {
       return { l: 0, r: r.width / 10, a: px * 0.72 / 10, d: px * 0.02 / 10 }; }
     return { l: r.actualBoundingBoxLeft / 10, r: r.actualBoundingBoxRight / 10, a: r.actualBoundingBoxAscent / 10, d: r.actualBoundingBoxDescent / 10 }; };
   // На телефоне чуть ниже: рядом поиск и тема
-  const small = !!window.matchMedia && matchMedia("(max-width: 720px)").matches;
-  const H = small ? 27 : 32, GAP = small ? 6 : 8, f2 = `700 ${small ? 9 : 10}px ${MONO}`;
+  // В ленте с подписями — ещё ниже: рядом знак, ширина ленты 208px
+  const small = rail || (!!window.matchMedia && matchMedia("(max-width: 720px)").matches);
+  const H = rail ? 24 : small ? 27 : 32, GAP = rail ? 5 : small ? 6 : 8, f2 = `700 ${rail ? 8.5 : small ? 9 : 10}px ${MONO}`;
   const ver = S.version || "", up = hasUpd() ? "↑" : "", beta = S.channel === "beta" ? "BETA" : "";
   const mv = m(ver || " ", f2), mu = m(up || " ", f2), mb = m(beta || " ", f2);
   const need = ver ? mv.l + mv.r + (up ? 4 + mu.l + mu.r : 0) + (beta ? 10 + mb.l + mb.r : 0) : 0;
   // «toolza» растёт до ширины строки версии, но не выше, чем позволяет зазор над ней:
   // иначе версия прилипает к буквам. Не дотянулась — строка версии чуть шире слова
   const d2 = Math.max(0, mv.d, mb.d), GAPV = small ? 4 : 5, maxA = H - d2 - Math.max(mv.a, mb.a) - GAPV;
-  let F1 = small ? 16 : 19, m1 = m("toolza", `800 ${F1}px ${SANS}`);
+  let F1 = rail ? 14 : small ? 16 : 19, m1 = m("toolza", `800 ${F1}px ${SANS}`);
   while (ver && m1.l + m1.r < need && F1 < 32) {
     const nx = m("toolza", `800 ${F1 + 0.5}px ${SANS}`);
     if (nx.a > maxA) break;
@@ -601,26 +602,135 @@ function lockupEl() {
   return el;
 }
 
+// ── Страна сервера: флаг в шапке ─────────────────────────
+// Свои маленькие SVG: Windows и Telegram Desktop не рисуют эмодзи-флаги (там
+// вместо флага две буквы). Страны, где чаще всего стоят VPS; у остальных —
+// код страны буквами. h — полосы сверху вниз, v — слева направо,
+// x — скандинавский крест (фон, крест, крест внутри)
+const FLAGS = {
+  NL: "h:#AE1C28,#fff,#21468B", DE: "h:#000,#DD0000,#FFCE00", RU: "h:#fff,#0039A6,#D52B1E", LV: "h:#9E3039,#9E3039,#fff,#9E3039,#9E3039",
+  LT: "h:#FDB913,#006A44,#C1272D", EE: "h:#0072CE,#000,#fff", AT: "h:#C8102E,#fff,#C8102E", HU: "h:#CE2939,#fff,#477050",
+  BG: "h:#fff,#00966E,#D62612", UA: "h:#0057B7,#FFD700", PL: "h:#fff,#DC143C", LU: "h:#EA141D,#fff,#51ADDA",
+  AM: "h:#D90012,#0033A0,#F2A800", ES: "h:#AA151B,#F1BF00,#F1BF00,#AA151B", RS: "h:#C6363C,#0C4076,#fff", AZ: "h:#0092BC,#E4002B,#00AF66",
+  BY: "h:#C8313E,#C8313E,#4AA657", FR: "v:#002395,#fff,#ED2939", IT: "v:#009246,#fff,#CE2B37", BE: "v:#000,#FDDA24,#EF3340",
+  IE: "v:#169B62,#fff,#FF883E", RO: "v:#002B7F,#FCD116,#CE1126", MD: "v:#0046AE,#FFD200,#CC092F",
+  FI: "x:#fff,#002F6C", SE: "x:#006AA7,#FECC00", DK: "x:#C8102E,#fff", NO: "x:#BA0C2F,#fff,#00205B", IS: "x:#02529C,#fff,#DC1E35",
+  US: () => `<rect width="30" height="20" fill="#fff"/>${[0, 1, 2, 3, 4, 5, 6].map((i) =>
+    `<rect y="${(i * 40 / 13).toFixed(2)}" width="30" height="1.54" fill="#B22234"/>`).join("")}<rect width="13" height="10.77" fill="#3C3B6E"/>`,
+  GB: () => `<rect width="30" height="20" fill="#012169"/><path d="M0,0 30,20M30,0 0,20" stroke="#fff" stroke-width="4"/>
+    <path d="M0,0 30,20M30,0 0,20" stroke="#C8102E" stroke-width="1.4"/><path d="M15,0V20M0,10H30" stroke="#fff" stroke-width="6"/>
+    <path d="M15,0V20M0,10H30" stroke="#C8102E" stroke-width="3.4"/>`,
+  CH: () => `<rect width="30" height="20" fill="#DA291C"/><rect x="13" y="4" width="4" height="12" fill="#fff"/><rect x="9" y="8" width="12" height="4" fill="#fff"/>`,
+  JP: () => `<rect width="30" height="20" fill="#fff"/><circle cx="15" cy="10" r="6" fill="#BC002D"/>`,
+  TR: () => `<rect width="30" height="20" fill="#E30A17"/><circle cx="11" cy="10" r="5" fill="#fff"/><circle cx="12.3" cy="10" r="4" fill="#E30A17"/>
+    <polygon points="${starPts(17.6, 10, 2.4)}" fill="#fff"/>`,
+  KZ: () => `<rect width="30" height="20" fill="#00AFCA"/><circle cx="15" cy="9" r="3.8" fill="#FEC50C"/>`,
+  CZ: () => `<rect width="30" height="10" fill="#fff"/><rect y="10" width="30" height="10" fill="#D7141A"/><path d="M0,0 15,10 0,20Z" fill="#11457E"/>`,
+  CA: () => `<rect width="30" height="20" fill="#fff"/><rect width="7.5" height="20" fill="#D80621"/><rect x="22.5" width="7.5" height="20" fill="#D80621"/>
+    <polygon points="${starPts(15, 10.3, 4)}" fill="#D80621"/>`,
+  GE: () => `<rect width="30" height="20" fill="#fff"/><rect x="12.5" width="5" height="20" fill="#FF0000"/><rect y="7.5" width="30" height="5" fill="#FF0000"/>`,
+  SG: () => `<rect width="30" height="10" fill="#EF3340"/><rect y="10" width="30" height="10" fill="#fff"/><circle cx="7" cy="5" r="3.2" fill="#fff"/>
+    <circle cx="8.4" cy="5" r="3" fill="#EF3340"/>`,
+  PT: () => `<rect width="12" height="20" fill="#046A38"/><rect x="12" width="18" height="20" fill="#DA291C"/><circle cx="12" cy="10" r="3.5" fill="#FFE900"/>`,
+  IN: () => `${flagBody("h:#FF9933,#fff,#138808")}<circle cx="15" cy="10" r="2.4" fill="none" stroke="#06038D" stroke-width=".8"/>`,
+  GR: () => `${flagBody("h:#0D5EAF,#fff,#0D5EAF,#fff,#0D5EAF,#fff,#0D5EAF,#fff,#0D5EAF")}<rect width="11.1" height="11.1" fill="#0D5EAF"/>
+    <rect x="4.45" width="2.2" height="11.1" fill="#fff"/><rect y="4.45" width="11.1" height="2.2" fill="#fff"/>`,
+  IL: () => `<rect width="30" height="20" fill="#fff"/><rect y="2" width="30" height="3" fill="#0038B8"/><rect y="15" width="30" height="3" fill="#0038B8"/>
+    <path d="M15,6.6 18,11.8 12,11.8ZM15,13.4 12,8.2 18,8.2Z" fill="none" stroke="#0038B8" stroke-width=".9"/>`,
+  AE: () => `${flagBody("h:#00732F,#fff,#000")}<rect width="8" height="20" fill="#FF0000"/>`,
+};
+const COUNTRY = { NL: "Нидерланды", DE: "Германия", RU: "Россия", LV: "Латвия", LT: "Литва", EE: "Эстония", AT: "Австрия", HU: "Венгрия",
+  BG: "Болгария", UA: "Украина", PL: "Польша", LU: "Люксембург", AM: "Армения", ES: "Испания", RS: "Сербия", AZ: "Азербайджан",
+  BY: "Беларусь", FR: "Франция", IT: "Италия", BE: "Бельгия", IE: "Ирландия", RO: "Румыния", MD: "Молдова", FI: "Финляндия",
+  SE: "Швеция", DK: "Дания", NO: "Норвегия", IS: "Исландия", US: "США", GB: "Великобритания", CH: "Швейцария", JP: "Япония",
+  TR: "Турция", KZ: "Казахстан", CZ: "Чехия", CA: "Канада", GE: "Грузия", SG: "Сингапур", PT: "Португалия", IN: "Индия",
+  GR: "Греция", IL: "Израиль", AE: "ОАЭ" };
+function countryName(cc) {
+  if (COUNTRY[cc]) return COUNTRY[cc];
+  try { if (window.Intl && Intl.DisplayNames) return new Intl.DisplayNames(["ru"], { type: "region" }).of(cc) || cc; } catch (_) { /* старый движок */ }
+  return cc;
+}
+function starPts(cx, cy, R) {
+  const p = [];
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 ? R * 0.4 : R, a = Math.PI / 5 * i - Math.PI / 2;
+    p.push(`${(cx + r * Math.cos(a)).toFixed(2)},${(cy + r * Math.sin(a)).toFixed(2)}`);
+  }
+  return p.join(" ");
+}
+function flagBody(f) {
+  if (typeof f === "function") return f();
+  const [k, list] = f.split(":"), c = list.split(","), n = c.length;
+  // Полосы внахлёст на долю пикселя: без светлых щелей между ними при масштабе
+  if (k === "h") return c.map((col, i) => `<rect y="${(20 * i / n).toFixed(2)}" width="30" height="${(20 / n + 0.1).toFixed(2)}" fill="${col}"/>`).join("");
+  if (k === "v") return c.map((col, i) => `<rect x="${(30 * i / n).toFixed(2)}" width="${(30 / n + 0.1).toFixed(2)}" height="20" fill="${col}"/>`).join("");
+  return `<rect width="30" height="20" fill="${c[0]}"/><rect x="8" width="5" height="20" fill="${c[1]}"/><rect y="7.5" width="30" height="5" fill="${c[1]}"/>`
+    + (c[2] ? `<rect x="9.25" width="2.5" height="20" fill="${c[2]}"/><rect y="8.75" width="30" height="2.5" fill="${c[2]}"/>` : "");
+}
+function flagEl(cc, w) {
+  if (!FLAGS[cc]) return null;
+  const el = svg("svg", { class: "flag", viewBox: "0 0 30 20", width: w, height: Math.round(w * 2 / 3), role: "img", "aria-label": countryName(cc) });
+  el.innerHTML = flagBody(FLAGS[cc]);
+  return el;
+}
+const srvState = (st) => { const s = st.server || {}; return !s.exists ? "сервер не создан" : s.up ? "awg0 работает" : "awg0 не поднят"; };
+const srvPulse = (st) => { const s = st.server || {}; return !s.exists ? "off" : s.up ? "" : "bad"; };
+
+// О сервере: страна, имя, адрес, awg0, протокол, аптайм, версия. На ПК — окно
+// под кнопкой, на телефоне — лист снизу. Имя и адрес можно скрыть отсюда же
+function serverInfo(anchor) {
+  closeMore(); closePal();
+  const st = S.status || {}, s = st.server || {}, cc = st.country || "", hide = srvHidden(), up = uptimeParts(st.uptime);
+  const row = (k, v, cls) => h("div", { class: "sir" }, h("span", {}, k), h("b", { class: cls || null, title: v }, v));
+  let close = null;
+  const box = h("div", { class: "sheet sinfo", "aria-label": "О сервере", "data-name": "server-info" },
+    h("div", { class: "sih" }, flagEl(cc, 42) || h("span", { class: "cc big" }, cc || icon("globe")),
+      h("div", {}, h("h3", {}, cc ? countryName(cc) : "Страна не определена"),
+        h("div", { class: "muted small" }, h("i", { class: "pulse " + srvPulse(st) }), srvState(st)))),
+    h("div", { class: "sil" },
+      row("имя", hide ? "скрыто" : st.host || "—", hide ? "hid" : null),
+      row("адрес", !s.exists ? "—" : hide ? "скрыт" : s.endpoint || st.ip || "—", "mono" + (hide ? " hid" : "")),
+      s.exists ? row("протокол", `AWG ${s.proto || "?"} · ${s.port || "?"}/udp`) : null,
+      s.exists ? row("клиенты", `${s.online || 0} в сети из ${s.clients || 0}`) : null,
+      row("аптайм", up[0] + " " + up[1] + (up[2] != null ? ` ${up[2]} ${up[3]}` : "")),
+      row("система", st.os || "—"),
+      row("AWG Toolza", (S.version || "?") + (S.channel === "beta" ? " · бета" : "") + (hasUpd() ? ` · есть ${S.update}` : ""))),
+    h("div", { class: "even2" },
+      h("button", { onclick: () => { close(); toggleSrvHidden(); } }, icon(hide ? "eye" : "eye-off"), hide ? "Показать адрес" : "Скрыть адрес"),
+      h("button", { class: "btn-primary", onclick: () => { close(); go("/server"); } }, icon("server"), "Сервер")));
+  close = sheetOpen(box);
+  // На широком экране — выпадает из кнопки, а не окном посреди экрана или снизу
+  const vw = document.documentElement.clientWidth;
+  if (anchor && box.parentNode && (railOn() || vw > 720)) {
+    const r = anchor.getBoundingClientRect();
+    box.parentNode.classList.add("pop-bg");
+    box.classList.add("pop");
+    box.style.top = Math.round(r.bottom + 8) + "px";
+    if (r.left + r.width / 2 < vw / 2) box.style.left = Math.round(Math.max(12, r.left)) + "px";
+    else box.style.right = Math.round(Math.max(12, vw - r.right)) + "px";
+  }
+}
+
 function drawTop() {
   const app = inApp();
   document.body.classList.toggle("rail-on", railOn());
   document.body.classList.toggle("rail-wide", railOn() && railWide());
   document.body.classList.toggle("bare", !app);
-  const st = S.status || {}, s = st.server || {}, hide = srvHidden();
-  const srv = app && S.status ? h("div", { class: "srv" + (hide ? " hid" : "") },
-    h("a", { class: "srvl", title: "Сервер: имя, адрес и интерфейс", onclick: () => go("/server") },
-      h("i", { class: "pulse" + (!s.exists ? " off" : s.up ? "" : " bad") }), h("b", {}, hide ? "сервер" : st.host || "сервер"),
-      h("span", { class: "mono" }, !s.exists ? "сервер не создан" : hide ? "адрес скрыт · awg0" : `${s.endpoint || st.ip || ""} · awg0`)),
-    h("button", { class: "eye", onclick: toggleSrvHidden, "aria-pressed": String(hide),
-      title: hide ? "Показать имя и адрес сервера" : "Скрыть имя и адрес сервера",
-      "aria-label": hide ? "Показать имя и адрес сервера" : "Скрыть имя и адрес сервера" }, icon(hide ? "eye-off" : "eye"))) : null;
+  // Сервер в шапке — флаг страны VPS и точка состояния; имя, адрес и остальное —
+  // во всплывающем окне по флагу или «i»
+  const st = S.status || {}, s = st.server || {}, cc = st.country || "";
+  const flag = app && S.status ? h("button", { class: "cflag", "aria-label": "О сервере", onclick: (ev) => serverInfo(ev.currentTarget),
+    title: [cc ? countryName(cc) : null, srvState(st)].filter(Boolean).join(" · ") },
+  flagEl(cc, 24) || h("span", { class: "cc" }, cc || icon("globe")), h("i", { class: "pulse " + srvPulse(st) })) : null;
   const upd = hasUpd();
   topEl.replaceChildren(...[
     h("a", { class: "lock", title: upd ? `AWG Toolza ${S.version} · доступна ${S.update}` : "AWG Toolza",
       onclick: app ? () => go(upd && curPath() === "/" ? "/update" : "/") : null }, logoImg(), lockupEl()),
-    srv, h("div", { class: "grow" }),
+    flag, h("div", { class: "grow" }),
     app ? h("button", { class: "kbar", title: "Раздел, клиент или действие (Ctrl+K)", onclick: openPal },
       icon("search"), h("span", {}, "Команда или клиент…"), h("kbd", {}, "Ctrl K")) : null,
+    app && S.status ? h("button", { class: "ibtn sib", title: "О сервере", "aria-label": "О сервере", onclick: (ev) => serverInfo(ev.currentTarget) },
+      icon("info")) : null,
     app ? h("button", { class: "ibtn", title: "Тема и цвета", "aria-label": "Тема", onclick: lookPanel },
       icon(themeNow() === "dark" ? "sun" : "moon")) : null,
     app && WEB ? h("button", { class: "me", title: S.me.name || "Аккаунт", "aria-label": "Аккаунт", onclick: accountMenu },
@@ -643,7 +753,11 @@ function drawNav() {
       class: [cls, !onclick && isOn(p) ? "on" : null].filter(Boolean).join(" ") || null, "aria-label": t,
       onclick: (ev) => { if (onclick) { ev.preventDefault(); onclick(); } else sameTab(ev, p); } },
       icon(ic), h("span", { class: wide ? "lbl" : "tip" }, t), p === "/update" && hasUpd() ? h("i", { class: "badge" }) : null);
-    railEl.replaceChildren(...[h("a", { class: "logo", href: "#/", title: "AWG Toolza", "aria-label": "Обзор" }, logoImg()),
+    // С подписями — рядом со знаком и название с версией (в шапке его тогда нет)
+    const upd = hasUpd();
+    railEl.replaceChildren(...[h("a", { class: "logo", href: "#/", "aria-label": "Обзор",
+      title: upd ? `AWG Toolza ${S.version} · доступна ${S.update}` : "AWG Toolza",
+      onclick: (ev) => { if (upd && curPath() === "/") { ev.preventDefault(); go("/update"); } } }, logoImg(), wide ? lockupEl(true) : null),
       ...NAV.map(([p, ic, t]) => a(p, ic, t)), h("div", { class: "sp" }),
       a("", "sliders-horizontal", "Тема", lookPanel),
       WEB ? a("/account", "user", "Аккаунт") : null,

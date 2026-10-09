@@ -83,6 +83,9 @@
   body.rail-wide .rail a { width: auto; height: 40px; display: flex; align-items: center; justify-content: flex-start; gap: 12px;
     padding: 0 12px; font-size: 13.5px; font-weight: 600; }
   body.rail-wide .rail a.logo { height: 50px; padding: 0 6px; margin-bottom: 10px; }
+  body.rail-wide .rail a.logo { gap: 10px; color: var(--text); }
+  body.rail-wide .rail a.logo img { width: 40px; height: 40px; }
+  body.rail-on.rail-wide .top .lock { display: none; }
   body.rail-wide .rail .badge { top: 50%; right: 12px; margin-top: -4px; }
   .rail .lbl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .rail a.burger { margin-top: 6px; }
@@ -97,23 +100,36 @@
   body.rail-on .lock img { display: none; }
   .lockup { display: block; overflow: visible; flex: none; }
   @media (min-width: 901px) { .lock { flex-shrink: 0; } }
-  .srv { display: flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border: 1px solid var(--line2); border-radius: 999px;
-         background: var(--panel); min-width: 0; }
-  .srv:hover { border-color: var(--acc); }
-  .srv .srvl { display: flex; align-items: center; gap: 9px; min-width: 0; color: inherit; text-decoration: none; cursor: pointer;
-               padding: 3px 0; }
-  .srv .eye { flex: none; display: grid; align-items: center; justify-items: center; place-items: center; width: 28px; height: 28px; min-height: 0; padding: 0; border: 0;
-              border-radius: 50%; background: none; color: var(--muted); cursor: pointer; }
-  .srv .eye:hover { background: var(--hover); color: var(--text); }
-  .srv .eye svg { width: 15px; height: 15px; }
-  .srv.hid .mono { font-style: italic; }
-  .srv .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; animation: pulse 2s infinite; }
-  .srv .pulse.bad { background: var(--red); animation: none; }
-  .srv .pulse.off { background: var(--dim); animation: none; }
+  /* Сервер в шапке — флаг страны VPS и точка состояния в углу флага; остальное — в окне «О сервере» */
+  .cflag { position: relative; flex: none; display: flex; align-items: center; justify-content: center; height: 36px; min-width: 44px; min-height: 0;
+           padding: 0 9px; border: 1px solid var(--line2); border-radius: var(--rc); background: var(--panel); color: var(--muted); cursor: pointer; }
+  .cflag:hover { border-color: var(--acc); }
+  .flag { display: block; flex: none; border-radius: 3px; box-shadow: 0 0 0 1px rgba(127, 127, 127, .28); }
+  .cc { display: grid; align-items: center; justify-items: center; place-items: center; min-width: 24px; height: 16px; padding: 0 3px;
+        border-radius: 3px; border: 1px solid var(--line2); font: 700 10px/1 var(--mono); color: var(--text); }
+  .cc svg { width: 15px; height: 15px; }
+  .cflag .cc { border: 0; min-width: 0; padding: 0; }
+  .cflag .pulse { position: absolute; right: 5px; bottom: 5px; box-shadow: 0 0 0 2px var(--panel); }
+  .pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; animation: pulse 2s infinite; }
+  .pulse.bad { background: var(--red); animation: none; }
+  .pulse.off { background: var(--dim); animation: none; }
   @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent); }
                      70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
-  .srv b { font-weight: 650; white-space: nowrap; }
-  .srv .mono { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* О сервере: на ПК — окно под кнопкой, на телефоне — лист снизу */
+  .sheet-bg.pop-bg { background: transparent; display: block; }
+  .sheet.pop { position: fixed; width: 340px; max-width: calc(100vw - 24px); max-height: calc(100vh - 84px); overflow-y: auto;
+    border-radius: var(--rb); border: 1px solid var(--line2); padding-bottom: 14px; box-shadow: 0 14px 44px rgba(0, 0, 0, .28); }
+  .sinfo .sih { display: flex; align-items: center; gap: 14px; margin: 2px 6px 12px; }
+  .sinfo .sih h3 { margin: 0 0 3px; }
+  .sinfo .sih .small { display: flex; align-items: center; gap: 7px; }
+  .sinfo .cc.big { min-width: 42px; height: 28px; font-size: 13px; }
+  .sinfo .sil { border-top: 1px solid var(--line); margin: 0 0 12px; }
+  .sir { display: flex; align-items: baseline; gap: 12px; padding: 8px 6px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .sir span { color: var(--muted); flex: none; }
+  .sir b { margin-left: auto; font-weight: 600; min-width: 0; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sir b.mono { font: 500 12px var(--mono); }
+  .sir b.hid { font-style: italic; color: var(--muted); }
+  .sinfo .even2 button { width: auto; margin: 0; justify-content: center; }
   .kbar { display: flex; align-items: center; gap: 10px; width: 30vw; max-width: 340px; width: min(340px, 30vw); padding: 8px 12px; border-radius: var(--rc);
           border: 1px solid var(--line2); background: var(--panel); color: var(--muted); cursor: pointer; }
   .kbar:hover { color: var(--text); }
@@ -618,7 +634,7 @@
   .login input { width: 100%; margin: 6px 0; }
   .open-tg .btn { margin-top: 16px; }
   .open-tg a.small { display: inline-block; margin-top: 10px; }
-  body.bare .top .srv, body.bare .top .kbar, body.bare .tabbar { display: none; }
+  body.bare .top .cflag, body.bare .top .kbar, body.bare .tabbar { display: none; }
 
   /* Старая главная (плитки разделов) — на случай прямых ссылок; не используется */
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
@@ -632,11 +648,12 @@
     .ov2 { grid-template-columns: 1fr; }
     .kbar span, .kbar kbd { display: none; } .kbar { width: auto; padding: 8px; }
     .params { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .srv { display: none; }
   }
   @media (max-width: 720px) {
     .top { padding: 0 14px; gap: 8px; height: 56px; }
     .me { display: none; }
+    /* На телефоне «О сервере» — по флагу: места под ещё одну кнопку нет */
+    .top .sib { display: none; }
     #app { padding: 18px 14px calc(104px + 0px); padding: 18px 14px calc(104px + env(safe-area-inset-bottom)); }
     h1 { font-size: 25px; margin-bottom: 14px; }
     .hacts { width: 100%; margin-left: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 10px; }

@@ -28,6 +28,7 @@ MOD_LOG="/var/log/awg-mod-update.log"
 MOD_FALLBACK_TAG="v3.1.20260906"
 TOOLS_FALLBACK_TAG="v3.1.20260812"
 UPSTREAM_CACHE="$STATE_DIR/upstream_tags"
+COUNTRY_CACHE="$STATE_DIR/country"     # «NL 1791500000»: страна сервера (флаг в шапке панели)
 UPSTREAM_TTL=21600
 
 # ── Обновление скрипта ────────────────────────────────────

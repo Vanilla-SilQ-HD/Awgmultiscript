@@ -30,7 +30,9 @@ const say = (ok, label) => console.log(`${ok ? "OK" : "FAIL"} ${label}`);
       await page.press("input[type=password]", "Enter");
       await page.waitForSelector(".kpis .kpi");
       await page.waitForSelector(".topo svg .node");
-      await page.waitForSelector(".top .lockup");
+      // ПК, лента с подписями: название — рядом со знаком в ленте; на телефоне — в шапке
+      await page.waitForSelector(name === "ПК" ? "#rail a.logo .lockup" : ".top .lockup");
+      await page.waitForSelector(".top .cflag svg.flag[aria-label='Нидерланды']");
       await page.waitForTimeout(800);
       await page.screenshot({ path: `${out}/${name}-обзор.png` });
     });
@@ -45,31 +47,44 @@ const say = (ok, label) => console.log(`${ok ? "OK" : "FAIL"} ${label}`);
         await page.click("#rail a.burger");
         await page.waitForSelector("#rail a .tip >> text=Клиенты", { state: "attached" });
         if (await page.locator("#rail a .lbl").count()) throw new Error("подписи остались");
+        // Узкая лента — название снова в шапке, рядом со знаком в ленте его нет
+        await page.waitForSelector(".top .lockup");
+        if (await page.locator("#rail .lockup").count()) throw new Error("название осталось в узкой ленте");
         await page.screenshot({ path: `${out}/${name}-лента-узкая.png` });
         await page.reload({ waitUntil: "domcontentloaded" });
         await page.waitForSelector("#rail a .tip >> text=Клиенты", { state: "attached" });
         await page.click("#rail a.burger");
         await page.waitForSelector("#rail a .lbl >> text=Клиенты");
+        await page.waitForSelector("#rail a.logo .lockup");
+        if (await page.locator(".top .lock").isVisible()) throw new Error("при ленте с подписями название и в шапке");
       });
-      await step("шапка: глазок скрывает имя и адрес сервера (и порт на схеме), выбор запоминается", async () => {
-        await page.waitForSelector(".top .srv .eye");
+      await step("шапка: флаг и «i» — окно «О сервере» под кнопкой; там же скрыть имя и адрес (и порт на схеме)", async () => {
         await page.waitForSelector(".topo svg [data-srv]");
         const st = await page.evaluate(() => [S.status.host, (S.status.server || {}).endpoint || S.status.ip].filter(Boolean));
-        const txt = () => page.locator(".top .srv").innerText();
-        const t0 = await txt();
-        if (!st.length || !st.every((v) => t0.includes(v))) throw new Error("в шапке нет имени/адреса: " + st + " / " + t0);
-        await page.click(".top .srv .eye");
-        await page.waitForSelector(".top .srv.hid");
-        const t = await txt();
-        if (st.some((v) => t.includes(v)) || !t.includes("адрес скрыт")) throw new Error("не скрыто: " + t);
+        const box = "[data-name=server-info]";
+        const open = async (sel) => { await page.click(sel); await page.waitForSelector(box + ".pop"); return page.locator(box).innerText(); };
+        const t0 = await open(".top .sib");
+        if (!st.length || !st.every((v) => t0.includes(v)) || !t0.includes("Нидерланды")) throw new Error("в окне нет страны, имени или адреса: " + t0);
+        const pos = await page.evaluate(() => {
+          const b = document.querySelector(".top .sib").getBoundingClientRect(), p = document.querySelector(".sinfo.pop").getBoundingClientRect();
+          return { gap: p.top - b.bottom, right: Math.abs(p.right - b.right) };
+        });
+        if (pos.gap < 0 || pos.gap > 20 || pos.right > 2) throw new Error("окно не под «i»: " + JSON.stringify(pos));
+        await page.screenshot({ path: `${out}/${name}-о-сервере.png` });
+        await page.click(`${box} button:has-text('Скрыть адрес')`);
+        await page.waitForSelector(box, { state: "detached" });
         await page.waitForFunction(() => { const n = document.querySelector(".topo svg [data-srv]"); return n && !/:\d/.test(n.textContent); });
-        await page.screenshot({ path: `${out}/${name}-шапка-скрыто.png` });
+        // По флагу — то же окно; адрес скрыт и после перезагрузки
         await page.reload({ waitUntil: "domcontentloaded" });
-        await page.waitForSelector(".top .srv.hid");
-        await page.click(".top .srv .eye");
-        await page.waitForSelector(".top .srv:not(.hid)");
-        const back = await txt();
+        await page.waitForSelector(".top .cflag");
+        const t = await open(".top .cflag");
+        if (st.some((v) => t.includes(v)) || !t.includes("скрыт")) throw new Error("не скрыто: " + t);
+        await page.click(`${box} button:has-text('Показать адрес')`);
+        await page.waitForSelector(box, { state: "detached" });
+        const back = await open(".top .sib");
         if (!st.every((v) => back.includes(v))) throw new Error("не вернулось: " + back);
+        await page.keyboard.press("Escape");
+        await page.waitForSelector(box, { state: "detached" });
       });
     }
     await step("палитра команд: Ctrl+K — клиент по имени", async () => {

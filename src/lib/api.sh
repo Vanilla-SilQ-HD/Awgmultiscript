@@ -74,11 +74,12 @@ _api_status() {
   os_detect
   update_check_async || true
   upstream_refresh_async || true
+  country_refresh_async || true
   server_exists && n=$(clients_tsv | grep -c . || true)
   {
     _kv version "$VERSION_SHOW"; _kv api:n "$API_VERSION"
     _kv channel "$UPDATE_CHANNEL"; _kv update "$(update_available || true)"
-    _kv host "$(hostname)"; _kv ip "$(public_ip_cached)"
+    _kv host "$(hostname)"; _kv ip "$(public_ip_cached)"; _kv country "$(server_country)"
     _kv uptime:n "$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)"
     _kv os "$OS_LABEL"; _kv kernel "$(uname -r)"
     _kv components.installed:b "$(_b command -v awg)"

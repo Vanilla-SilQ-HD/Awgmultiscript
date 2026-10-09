@@ -1551,6 +1551,31 @@ r = api("status")
 chk("api status: components.kernel_gap", r.get("ok") and "kernel_gap" in (r["data"].get("components") or {}), r.get("data"))
 chk("api status: uptime — секунды работы системы", isinstance(r["data"].get("uptime"), int) and r["data"]["uptime"] > 0, r.get("data"))
 
+print("Страна сервера — флаг в шапке панели")
+rc, out, _ = bash('curl() { printf "fl=1\\nip=203.0.113.10\\nloc=NL\\nwarp=off\\n"; }; country_refresh; cat "$COUNTRY_CACHE"; server_country')
+o = out.split()
+chk("страна — из cloudflare cdn-cgi/trace (loc=), в кэш со временем", len(o) == 3 and o[0] == "NL" and o[1].isdigit() and o[2] == "NL", out)
+r = api("status")
+chk("api status: country — код страны из кэша", (r.get("data") or {}).get("country") == "NL", r.get("data"))
+rc, out, _ = bash('curl() { return 28; }; country_refresh; cat "$COUNTRY_CACHE"; echo "[$(server_country)]"')
+chk("Cloudflare не ответил — пометка «-», страна пустая (флага нет)", out.split()[0] == "-" and out.strip().endswith("[]"), out)
+rc, out, _ = bash('curl() { printf "loc=XX\\n"; }; country_refresh; echo "[$(server_country)]"; '
+                  'printf "<b>\\n" > "$COUNTRY_CACHE"; echo "[$(server_country)]"')
+chk("неизвестная страна (XX) и мусор в кэше — без флага", out.split() == ["[]", "[]"], out)
+CR = 'country_refresh() { touch "$STATE_DIR/cr"; }; rm -f "$STATE_DIR/cr"; unset AWG_NO_UPDATE_CHECK; '
+for cache, age, want, what in (("NL", 3600, False, "узнали час назад — не спрашивает"),
+                               ("NL", 90000, True, "узнали больше суток назад — спрашивает"),
+                               ("-", 600, False, "не узнали 10 мин назад — ждёт"),
+                               ("-", 3700, True, "не узнали больше часа назад — спрашивает снова")):
+    rc, out, _ = bash(CR + f'echo "{cache} $(( $(date +%s) - {age} ))" > "$COUNTRY_CACHE"; country_refresh_async; sleep 0.3; '
+                      '[[ -e "$STATE_DIR/cr" ]] && echo ASK || echo SKIP')
+    chk(f"страна: {what}", out.strip().endswith("ASK" if want else "SKIP"), out)
+rc, out, err = bash(CR + 'rm -f "$COUNTRY_CACHE"; country_refresh_async; sleep 0.3; [[ -e "$STATE_DIR/cr" ]] && echo ASK || echo SKIP')
+chk("страна: кэша ещё нет — спрашивает, без ошибок в stderr", out.strip().endswith("ASK") and not err.strip(), [out, err])
+rc, out, _ = bash('AWG_NO_UPDATE_CHECK=1; country_refresh() { touch "$STATE_DIR/cr"; }; rm -f "$STATE_DIR/cr" "$COUNTRY_CACHE"; '
+                  'country_refresh_async; sleep 0.3; [[ -e "$STATE_DIR/cr" ]] && echo ASK || echo SKIP')
+chk("страна: в тестах и без сети (AWG_NO_UPDATE_CHECK) — не спрашивает", out.strip().endswith("SKIP"), out)
+
 print("Домен мимикрии по региону")
 STUBSCAN = 'scan_domains() { shift; SCAN_OK=("$@"); }; '
 rc, out, _ = bash(STUBSCAN + 'SERVER_CONF=/nonexistent; S_REGION=world; MIMICRY=dns; mimicry_pool_domain >/dev/null; '

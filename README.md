@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-ffffff?style=flat-square&labelColor=000000)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Ubuntu%2024%20%2F%20Debian%2012%2B-E95420?style=flat-square&logo=ubuntu&logoColor=white)](https://ubuntu.com/)
 [![Protocol](https://img.shields.io/badge/AWG-2.0%20%2F%203.1-00d4ff?style=flat-square)](#)
-[![Version](https://img.shields.io/badge/version-v1.2.23-ff6b00?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v1.2.24-ff6b00?style=flat-square)](#)
 
 <br>
 
@@ -362,8 +362,12 @@ Mini App и HTTPS-сертификат** (или в боте: **Telegram-бот 
 Панель открывается кнопкой «Меню» слева от поля ввода или в боте: **Telegram-бот →
 📱 Mini App → Открыть панель**. Внизу — Обзор · Клиенты · Туннели · Сервер · Ещё.
 **Обзор**: сводка (в сети, скорость сейчас, трафик сегодня и за месяц, аптайм),
-маршруты трафика — схема клиенты → awg0 → выходы или список с долями выходов,
+маршруты трафика — схема клиенты → awg0 → выходы или список с долями выходов
+(есть клиенты WG + обфускатора — второе окно «Phobos», листается свайпом),
 живая скорость, лимиты, сроки на 30 дней, события блокировок, трафик за 14 дней.
+В шапке — флаг страны сервера (по геобазе Cloudflare, раз в сутки) с точкой
+состояния awg0; флаг или «i» — окно «О сервере» (имя, адрес, протокол, аптайм,
+версия, «Скрыть адрес» для скриншотов).
 Панель «Тема» (луна/солнце в шапке): тёмная / светлая / как Telegram, акцент,
 оттенок фона, скругление, масштаб — запоминается на устройстве.
 
@@ -513,6 +517,6 @@ python3 tests/test_admins.py && python3 tests/test_net.py
 
 *Сообщество [AWG-Toolza](https://t.me/awgToolza)*
 
-**AWG Toolza v1.2.23** · MIT License
+**AWG Toolza v1.2.24** · MIT License
 
 </div>

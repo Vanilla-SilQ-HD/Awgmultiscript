@@ -66,6 +66,45 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await shot("01-home");
   });
 
+  await step("шапка: флаг страны сервера, «О сервере» — по флагу и «i»", async () => {
+    await nav("/", ".head h1");
+    const nl = profile !== "none", box = "[data-name=server-info]";
+    if (nl) {
+      if (await page.getAttribute(".top .cflag svg.flag", "aria-label") !== "Нидерланды") throw new Error("нет флага Нидерландов");
+    } else await page.waitForSelector(".top .cflag .cc svg");          // страна не известна — глобус
+    if (await page.isVisible(".top .sib")) throw new Error("на телефоне «i» лишняя — окно по флагу");
+    await page.click(".top .cflag");
+    await page.waitForSelector(box);
+    const t = await page.textContent(box);
+    if (nl ? !/Нидерланды/.test(t) || !/awg0 (работает|не поднят)/.test(t) || !/AWG \d\.\d · \d+\/udp/.test(t)
+      : !/Страна не определена/.test(t) || !/сервер не создан/.test(t)) throw new Error("окно «О сервере»: " + t);
+    // Лист снизу — снимок экрана, а не всей страницы
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: `${out}/01b-server-info.png` });
+    // Скрыть имя и адрес — отсюда же, и вернуть
+    await page.click(`${box} button:has-text('Скрыть адрес')`);
+    await page.waitForSelector(box, { state: "detached" });
+    await page.click(".top .cflag");
+    await page.waitForSelector(`${box} b.hid >> text=скрыто`);
+    await page.click(`${box} button:has-text('Показать адрес')`);
+    await page.waitForSelector(box, { state: "detached" });
+    // Широкий экран: «i» в шапке, окно выпадает из кнопки
+    const vp = page.viewportSize();
+    await page.setViewportSize({ width: 1366, height: 900 });
+    await page.click(".top .sib");
+    await page.waitForSelector(`${box}.pop`);
+    const pos = await page.evaluate(() => {
+      const b = document.querySelector(".top .sib").getBoundingClientRect(), p = document.querySelector(".sinfo.pop").getBoundingClientRect();
+      return { gap: p.top - b.bottom, right: Math.abs(p.right - b.right), w: p.width };
+    });
+    if (pos.gap < 0 || pos.gap > 20 || pos.right > 2) throw new Error("окно не под кнопкой «i»: " + JSON.stringify(pos));
+    await shot("01c-server-info-pc");
+    await page.keyboard.press("Escape");
+    await page.waitForSelector(box, { state: "detached" });
+    await page.setViewportSize(vp);
+    await page.waitForTimeout(300);
+  });
+
   await step("уже открытый экран — сразу прежний вид, без «Загрузка…», свежий — следом", async () => {
     await nav("/", ".head h1");
     await nav("/clients", "#app .search input");

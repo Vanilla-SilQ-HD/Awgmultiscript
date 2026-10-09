@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.2.23"
+VERSION="v1.2.24"
 # Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
 # в сравнении версий не участвует. У выпущенной сборки пусто.
 BUILD=""
@@ -384,6 +384,7 @@ MOD_LOG="/var/log/awg-mod-update.log"
 MOD_FALLBACK_TAG="v3.1.20260906"
 TOOLS_FALLBACK_TAG="v3.1.20260812"
 UPSTREAM_CACHE="$STATE_DIR/upstream_tags"
+COUNTRY_CACHE="$STATE_DIR/country"     # «NL 1791500000»: страна сервера (флаг в шапке панели)
 UPSTREAM_TTL=21600
 
 # ── Обновление скрипта ────────────────────────────────────
@@ -888,6 +889,30 @@ _PUBLIC_IP=""
 public_ip_cached() {
   [[ -n "$_PUBLIC_IP" ]] || _PUBLIC_IP=$(public_ip || true)
   echo "$_PUBLIC_IP"
+}
+
+# Страна сервера — флаг в шапке панели. Код страны IP сервера по геобазе
+# Cloudflare (cdn-cgi/trace, строка «loc=»): без ключей и своих баз. В кэше
+# на сутки (не узнали — повтор через час), обновляется в фоне: статус сеть не ждёт.
+server_country() { awk 'NR == 1 && $1 ~ /^[A-Z][A-Z]$/ {print $1}' "$COUNTRY_CACHE" 2>/dev/null || true; }
+
+country_refresh() {
+  local loc=""
+  command -v curl &>/dev/null || return 0
+  loc=$(curl -s --max-time 6 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^loc=//p' | head -1 || true)
+  [[ "$loc" =~ ^[A-Z]{2}$ && "$loc" != XX ]] || loc="-"
+  printf '%s %s\n' "$loc" "$(date +%s)" | write_file "$COUNTRY_CACHE" 644
+}
+
+country_refresh_async() {
+  local cc="" ts=0 ttl=86400
+  [[ -n "${AWG_NO_UPDATE_CHECK:-}" ]] && return 0
+  read -r cc ts 2>/dev/null < "$COUNTRY_CACHE" || true
+  [[ "$ts" =~ ^[0-9]+$ ]] || ts=0
+  [[ "$cc" =~ ^[A-Z]{2}$ ]] || ttl=3600
+  (( $(date +%s) - ts < ttl )) && return 0
+  ( country_refresh ) </dev/null >/dev/null 2>&1 3>&- 4>&- 8>&- &
+  disown 2>/dev/null || true
 }
 
 udp_listening() { ss -lunH "sport = :$1" 2>/dev/null | grep -q .; }
@@ -10409,11 +10434,12 @@ _api_status() {
   os_detect
   update_check_async || true
   upstream_refresh_async || true
+  country_refresh_async || true
   server_exists && n=$(clients_tsv | grep -c . || true)
   {
     _kv version "$VERSION_SHOW"; _kv api:n "$API_VERSION"
     _kv channel "$UPDATE_CHANNEL"; _kv update "$(update_available || true)"
-    _kv host "$(hostname)"; _kv ip "$(public_ip_cached)"
+    _kv host "$(hostname)"; _kv ip "$(public_ip_cached)"; _kv country "$(server_country)"
     _kv uptime:n "$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)"
     _kv os "$OS_LABEL"; _kv kernel "$(uname -r)"
     _kv components.installed:b "$(_b command -v awg)"
@@ -15646,5 +15672,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=2af95dff2d238838
+_BUILD_SUM=3d220b7743a69b09
 main "$@"

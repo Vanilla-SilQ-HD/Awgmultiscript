@@ -38,7 +38,11 @@ with open(os.path.join(BIN, "curl"), "w") as f:
 with open(os.path.join(BIN, "wg"), "w") as f:
     f.write('#!/usr/bin/env bash\necho "wg $*" >> "$CALLS"\ncase "$1" in\n'
             '  genkey|genpsk) head -c 32 /dev/urandom | base64 ;;\n  pubkey) sha256sum | head -c 43; echo "=" ;;\n'
-            '  show) [[ "${3:-}" == dump && -f "$WG_DUMP" ]] && cat "$WG_DUMP" ;;\nesac\nexit 0\n')
+            # Рукопожатие «-30» — 30 с назад от момента вызова: клиент в сети, сколько бы ни шёл сценарий
+            '  show) [[ -f "$WG_DUMP" ]] || exit 0\n'
+            '        dump() { awk -v now="$(date +%s)" \'BEGIN {FS = OFS = "\\t"} NR > 1 && $5 ~ /^-[0-9]+$/ {$5 = now + $5} {print}\' "$WG_DUMP"; }\n'
+            '        [[ "${3:-}" == dump ]] && dump\n'
+            '        [[ "${3:-}" == transfer ]] && dump | awk -F\'\\t\' \'NR > 1 {print $1 "\\t" $6 "\\t" $7}\' ;;\nesac\nexit 0\n')
 with open(os.path.join(BIN, "wg-quick"), "w") as f:
     f.write('#!/usr/bin/env bash\necho "wg-quick $*" >> "$CALLS"\n[[ "$1" == strip ]] && printf "[Interface]\\nPrivateKey = x\\n"\nexit 0\n')
 for tool in ("wg", "wg-quick"):
@@ -78,6 +82,9 @@ if PROFILE != "none":
     os.makedirs(os.path.join(ROOT, "var/lib/awg2"), exist_ok=True)
     with open(os.path.join(ROOT, "var/lib/awg2/traffic.json"), "w") as f:
         json.dump(db, f)
+    # Страна сервера уже известна (Cloudflare trace) — в шапке флаг Нидерландов
+    with open(os.path.join(ROOT, "var/lib/awg2/country"), "w") as f:
+        f.write(f"NL {now}\n")
     # Работают exit-ноды: нода n1 поднята, маршруты — «все клиенты»
     with open(os.path.join(AWG_DIR, "awg-exit-n1.conf"), "w") as f:
         f.write("[Interface]\nPrivateKey = X\nTable = off\n\n[Peer]\nEndpoint = 1.2.3.4:51820\n")
@@ -98,7 +105,7 @@ if PROFILE != "none":
         f.write("[Interface]\nPrivateKey = X\nAddress = 10.66.66.1/24\nListenPort = 51900\n\n"
                 "[Peer]\n# client=ob1\nPublicKey = OBPUB=\nAllowedIPs = 10.66.66.2/32\n")
     with open(WG_DUMP, "w") as f:
-        f.write(f"SRVPRIV=\tSRVPUB=\t51900\toff\nOBPUB=\t(none)\t127.0.0.1:40000\t10.66.66.2/32\t{now - 30}"
+        f.write(f"SRVPRIV=\tSRVPUB=\t51900\toff\nOBPUB=\t(none)\t127.0.0.1:40000\t10.66.66.2/32\t-30"
                 f"\t3145728\t1048576\t25\n")
     with open(ACTIVE, "a") as f:
         f.write("awg-wgobf.service\n")

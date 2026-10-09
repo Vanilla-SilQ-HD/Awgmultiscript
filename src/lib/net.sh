@@ -86,6 +86,30 @@ public_ip_cached() {
   echo "$_PUBLIC_IP"
 }
 
+# Страна сервера — флаг в шапке панели. Код страны IP сервера по геобазе
+# Cloudflare (cdn-cgi/trace, строка «loc=»): без ключей и своих баз. В кэше
+# на сутки (не узнали — повтор через час), обновляется в фоне: статус сеть не ждёт.
+server_country() { awk 'NR == 1 && $1 ~ /^[A-Z][A-Z]$/ {print $1}' "$COUNTRY_CACHE" 2>/dev/null || true; }
+
+country_refresh() {
+  local loc=""
+  command -v curl &>/dev/null || return 0
+  loc=$(curl -s --max-time 6 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^loc=//p' | head -1 || true)
+  [[ "$loc" =~ ^[A-Z]{2}$ && "$loc" != XX ]] || loc="-"
+  printf '%s %s\n' "$loc" "$(date +%s)" | write_file "$COUNTRY_CACHE" 644
+}
+
+country_refresh_async() {
+  local cc="" ts=0 ttl=86400
+  [[ -n "${AWG_NO_UPDATE_CHECK:-}" ]] && return 0
+  read -r cc ts 2>/dev/null < "$COUNTRY_CACHE" || true
+  [[ "$ts" =~ ^[0-9]+$ ]] || ts=0
+  [[ "$cc" =~ ^[A-Z]{2}$ ]] || ttl=3600
+  (( $(date +%s) - ts < ttl )) && return 0
+  ( country_refresh ) </dev/null >/dev/null 2>&1 3>&- 4>&- 8>&- &
+  disown 2>/dev/null || true
+}
+
 udp_listening() { ss -lunH "sport = :$1" 2>/dev/null | grep -q .; }
 
 # Занят ли UDP-порт кем угодно из известных: сокет, AWG, каскад, обфускатор.
