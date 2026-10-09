@@ -383,6 +383,9 @@
 
   /* ── Обзор ── */
   .ov1 { grid-template-columns: minmax(0, 1.75fr) minmax(300px, 1fr); }
+  /* Есть WG + обфускатор: его окно — под маршрутами AWG, «Скорость сейчас» — справа на оба */
+  .ov1 > .wbox { grid-column: 1; }
+  .ov1.has-w > .live { grid-column: 2; grid-row: 1 / span 2; }
   .ov2 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   /* Маршруты трафика: полоса долей и выходы списком */
   .rhead { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
@@ -617,6 +620,7 @@
   /* ── Ширина ── */
   @media (max-width: 1180px) {
     .ov1 { grid-template-columns: 1fr; }
+    .ov1 > .wbox, .ov1.has-w > .live { grid-column: auto; grid-row: auto; }
   }
   @media (max-width: 900px) {
     .ov2 { grid-template-columns: 1fr; }

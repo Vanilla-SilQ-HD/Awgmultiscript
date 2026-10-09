@@ -839,11 +839,23 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
   await step("обзор: клиенты обфускатора — своя схема wgobf0, нажатие — карточка клиента", async () => {
     await nav("/", "[data-name=wgobf-routes]");
     const t = await page.textContent("[data-name=wgobf-routes]");
-    if (!/1 из 1 в сети/.test(t)) throw new Error("подпись блока: " + t);
+    if (!/1 из 1 клиента в сети/.test(t)) throw new Error("подпись блока: " + t);
     if (!/обфускатор: 1 из 1 в сети/.test(await page.textContent(".head"))) throw new Error("нет обфускатора в подзаголовке");
     const topo = page.locator(".topo").nth(1);
     await topo.locator("text=wgobf0").waitFor();
     await shot("51b-overview-wgobf");
+    // ПК: окно обфускатора — под маршрутами AWG, «Скорость сейчас» — справа на оба окна
+    const vp = page.viewportSize();
+    await page.setViewportSize({ width: 1366, height: 900 });
+    await page.waitForTimeout(400);
+    const box = await page.evaluate(() => {
+      const r = (sel) => document.querySelector(sel).getBoundingClientRect();
+      const a = r(".ov1 > .box:not(.wbox):not(.live)"), w = r(".ov1 > .wbox"), l = r(".ov1 > .live");
+      return { wUnder: Math.abs(w.left - a.left) < 2 && w.top >= a.bottom, lRight: l.left > a.right, lSpan: l.bottom >= w.bottom - 2 };
+    });
+    await shot("51c-overview-wgobf-pc");
+    await page.setViewportSize(vp);
+    if (!box.wUnder || !box.lRight || !box.lSpan) throw new Error("раскладка ПК: " + JSON.stringify(box));
     // Узел внизу экрана — под нижней панелью разделов: нажатие событием, тот же обработчик
     await topo.locator(".node[data-c=ob1]").first().dispatchEvent("click");
     await page.waitForURL(/#\/wgobf\/client\/ob1$/);

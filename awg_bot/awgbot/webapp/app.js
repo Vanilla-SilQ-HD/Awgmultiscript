@@ -1657,20 +1657,23 @@ route(/^\/$/, async (ctx) => {
   const exps = rows.filter((c) => expLive(c) && c.expires - nowS < D30).sort((a, b) => a.expires - b.expires);
   const events = parseEvents(evlog && evlog.log);
   // Маршруты трафика: схема (по умолчанию) или список — выбор запоминается на устройстве
-  const routesIn = h("div", { class: "in" });
+  const routesIn = h("div", { class: "in" }), wgIn = h("div", { class: "in" });
+  const wcap = () => h("div", { class: "muted small", style: "margin-bottom:6px" },
+    `${won} из ${wrows.length} ${plural(wrows.length, "клиента", "клиентов", "клиентов")} в сети · идут напрямую · трафик с запуска wgobf0`);
   const drawRoutes = () => {
     if (!ctx.live()) return;
     const v = pref("routes", "map") === "list" ? "list" : "map";
-    const wtopo = v === "map" && wrows.length ? h("div", { class: "topo" }) : null;
-    const wsec = wrows.length ? [h("div", { class: "eyebrow", style: "margin:16px 0 6px", "data-name": "wgobf-routes" },
-      `WG + обфускатор · ${won} из ${wrows.length} в сети`), wtopo || wgobfRoutes(wrows)] : [];
-    const drawW = () => { if (wtopo) requestAnimationFrame(() => { if (ctx.live()) topology(wtopo, wrows, wmdl, "WG + обфускатор",
-      { hub: "wgobf0", hubPath: "/wgobf", exitPath: "/wgobf", key: "w", esub: (n) => `${fmtBytes(n)} с запуска`,
-        cpath: (n) => "/wgobf/client/" + encodeURIComponent(n) }); }); };
-    if (clErr) { routesIn.replaceChildren(clFail(), ...wsec); drawW(); return; }
+    // Окно WG + обфускатора — тот же вид (схема или список), что у маршрутов AWG
+    if (wrows.length) {
+      const wtopo = v === "map" ? h("div", { class: "topo" }) : null;
+      wgIn.replaceChildren(wcap(), wtopo || wgobfRoutes(wrows));
+      if (wtopo) requestAnimationFrame(() => { if (ctx.live()) topology(wtopo, wrows, wmdl, "WG + обфускатор",
+        { hub: "wgobf0", hubPath: "/wgobf", exitPath: "/wgobf", key: "w", esub: (n) => `${fmtBytes(n)} с запуска`,
+          cpath: (n) => "/wgobf/client/" + encodeURIComponent(n) }); });
+    }
+    if (clErr) { routesIn.replaceChildren(clFail()); return; }
     if (!rows.length) {
-      routesIn.replaceChildren(h("div", { class: "empty" }, "Клиентов AWG пока нет — ", linkTo("создать первого", "/add")), ...wsec);
-      drawW();
+      routesIn.replaceChildren(h("div", { class: "empty" }, "Клиентов AWG пока нет — ", linkTo("создать первого", "/add")));
       return;
     }
     const topo = v === "map" ? h("div", { class: "topo" }) : null;
@@ -1682,9 +1685,8 @@ route(/^\/$/, async (ctx) => {
           .map((e) => h("span", { title: e.name }, h("i", { style: `background:${e.c}` }), e.short)) : null),
         h("div", { class: "seg rseg", role: "group", "aria-label": "Вид маршрутов" }, [["map", "схема"], ["list", "список"]].map(([k, t]) =>
           h("button", { class: v === k ? "on" : null, "aria-pressed": String(v === k), onclick: () => { setPref("routes", k); drawRoutes(); } }, t)))),
-      ...(topo ? [topo] : routesView(rows, mdl)), ...wsec);
+      ...(topo ? [topo] : routesView(rows, mdl)));
     if (topo) requestAnimationFrame(() => { if (ctx.live()) topology(topo, rows, mdl, `AWG ${s.proto || "?"}` + (srvHidden() ? "" : ` · :${s.port || "?"}`)); });
-    drawW();
   };
   const subText = () => [`${rows.filter((c) => c.online).length} из ${rows.length} ${plural(rows.length, "клиента", "клиентов", "клиентов")} в сети`,
     byLimit ? `${byLimit} ${plural(byLimit, "заблокирован", "заблокированы", "заблокированы")} по лимиту` : null,
@@ -1704,9 +1706,12 @@ route(/^\/$/, async (ctx) => {
       kpi("сегодня", ...fmtBytes(today).split(" "), h("span", {}, `за месяц ${fmtBytes(month)}`)),
       kpi("аптайм сервера", h("span", {}, uD, h("small", {}, uDu), uH != null ? " " + uH : "", uH != null ? h("small", {}, uHu) : null), null,
         h("span", {}, [comp.module ? "модуль " + comp.module : null, d.kernel ? "ядро " + String(d.kernel).split("-")[0] : null].filter(Boolean).join(" · ")))),
-    h("div", { class: "g ov1" },
+    h("div", { class: "g ov1" + (wrows.length ? " has-w" : "") },
       h("section", { class: "box" }, h("header", {}, h("h3", {}, "Маршруты трафика"), h("div", { class: "r" }, linkTo("туннели →", "/tunnels"))),
         routesIn),
+      wrows.length ? h("section", { class: "box wbox", "data-name": "wgobf-routes" },
+        h("header", {}, h("h3", {}, "WG + обфускатор"), h("div", { class: "r" }, linkTo("обфускатор →", "/wgobf"))),
+        wgIn) : null,
       h("section", { class: "box live" }, h("header", {}, h("h3", {}, "Скорость сейчас"), h("div", { class: "r" }, livePill)),
         h("div", { class: "in" }, h("div", { class: "big" }, h("div", { class: "dn" }, lrx, lrxU), h("div", { class: "up" }, ltx, ltxU)), chart,
           h("div", { class: "eyebrow", style: "margin-top:16px" }, "больше всех сегодня"),
