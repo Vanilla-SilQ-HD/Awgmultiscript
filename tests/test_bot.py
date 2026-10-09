@@ -1125,6 +1125,39 @@ async def run():
     chk("архив для Linux — отдельной кнопкой", docs(sent) and docs(sent)[0].document.filename == "wgobf-clus.zip",
         [n for n, _ in sent])
 
+    # Трафик и мониторинг клиента обфускатора: dump wgobf0 — рукопожатие минуту назад
+    import time as _t
+    from awgbot import monitor as _mon
+
+    def wg_dump(ago):
+        with open(WG_DUMP, "w") as f:
+            f.write(f"SRVPRIV=\tSRVPUB=\t45888\toff\nCPUB=\tPSK=\t127.0.0.1:40000\t10.77.1.2/32\t"
+                    f"{int(_t.time()) - ago}\t1048576\t2097152\t25\n")
+    wg_dump(60)
+    text, buttons = screen(await press("wo:v:clus"))
+    chk("карточка клиента обфускатора: трафик с запуска и мониторинг выключен",
+        "↓ 1.0 МБ · ↑ 2.0 МБ" in text and "🔕 выкл" in text and ("🔔 Мониторинг", "wo:mon:clus") in buttons, [text, buttons])
+    text, buttons = screen(await press("wo:mon:clus"))
+    chk("мониторинг включается кнопкой — своя метка, не заметка AWG-клиента с тем же именем",
+        "🔔 вкл" in text and store.monitored("wgobf:clus") and not store.monitored("clus"), [text, store.notes()])
+    st = {}
+    await _mon.tick(BOT, st, True)
+    chk("клиент в сети — молчит, метка не стёрта чисткой AWG-заметок",
+        "wgobf:clus" not in st and store.monitored("wgobf:clus"), [st, store.notes()])
+    wg_dump(900)
+    mark = len(SESSION.sent)
+    await _mon.tick(BOT, st, True)
+    off = [m.text or "" for n, m in SESSION.sent[mark:] if n == "SendMessage"]
+    chk("пропал больше 5 минут — «офлайн» с пометкой обфускатора", any("офлайн" in t and "clus · WG + обфускатор" in t
+                                                                        for t in off) and "wgobf:clus" in st, [off, st])
+    wg_dump(5)
+    mark = len(SESSION.sent)
+    await _mon.tick(BOT, st, True)
+    back = [m.text or "" for n, m in SESSION.sent[mark:] if n == "SendMessage"]
+    chk("вернулся — «снова онлайн»", any("снова онлайн" in t and "clus" in t for t in back) and "wgobf:clus" not in st,
+        [back, st])
+    os.remove(WG_DUMP)
+
     text, buttons = screen(await press("wo:install"))
     chk("установка обфускатора: DNS по умолчанию Cloudflare", "DNS клиентов: Cloudflare" in text, text)
     text, buttons = screen(await press("wo:iopt:dns"))

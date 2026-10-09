@@ -368,7 +368,13 @@ def setup(app: web.Application, user_of: UserOf) -> None:
         png = media.qr_png(direct) if direct else None
         return web.json_response({"ok": True, "link": (r.data.get("phobos") or "").strip(),
                                   "conf": _read(files.get("phobos.conf", "")), "direct": direct,
-                                  "png": base64.b64encode(png).decode() if png else None})
+                                  "png": base64.b64encode(png).decode() if png else None,
+                                  "mon": store.monitored(store.WGOBF + body["name"])})
+
+    @route("/api/wgobf/mon")
+    async def _wgobf_mon(request: web.Request, user: dict, body: dict) -> web.Response:
+        store.set_monitored(store.WGOBF + _name(body), bool(body.get("on")))
+        return web.json_response({"ok": True})
 
     # ── Бот: админы, оформление, сервер панели ──
     @route("/api/bot/info")

@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.2.20"
+VERSION="v1.2.21"
 # Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
 # в сравнении версий не участвует. У выпущенной сборки пусто.
 BUILD=""
@@ -10981,7 +10981,7 @@ _api_dns() {
 }
 
 _api_wgobf() {
-  local a="${1:-}" name dir f dump now pub ip hs
+  local a="${1:-}" name dir f dump now pub ip hs rx tx
   shift || true
   case "$a" in
     status)
@@ -11000,10 +11000,13 @@ _api_wgobf() {
       while IFS= read -r name; do
         pub=$(awk -v t="# client=$name" '$0 == t {f = 1; next} f && /^PublicKey = / {print $3; exit}' "$WGOBF_WG_CONF")
         ip=$(awk -v t="# client=$name" '$0 == t {f = 1; next} f && /^AllowedIPs = / {print $3; exit}' "$WGOBF_WG_CONF")
-        hs=$(awk -v k="$pub" '$1 == k {print $5; exit}' <<< "$dump")
-        [[ "$hs" =~ ^[0-9]+$ ]] && (( hs > 0 )) && hs=$((now - hs)) || hs=""
-        printf '%s\t%s\t%s\n' "$name" "${ip%/32}" "$hs"
-      done < <(wgobf_clients) | api_rows name ip ago:n ;;
+        # Рукопожатие и трафик с подъёма wgobf0 (счётчики WireGuard)
+        hs="" rx="" tx=""          # у нового клиента строки в dump нет: прошлый не тянется
+        read -r hs rx tx < <(awk -v k="$pub" '$1 == k {print $5, $6, $7; exit}' <<< "$dump") || true
+        [[ "${hs:-}" =~ ^[0-9]+$ ]] && (( hs > 0 )) && hs=$((now - hs)) || hs=""
+        [[ "${rx:-}" =~ ^[0-9]+$ ]] || rx=0; [[ "${tx:-}" =~ ^[0-9]+$ ]] || tx=0
+        printf '%s\t%s\t%s\t%s\t%s\n' "$name" "${ip%/32}" "$hs" "$rx" "$tx"
+      done < <(wgobf_clients) | api_rows name ip ago:n rx:n tx:n ;;
     add|del|bundle)
       name="${1:-}"
       [[ -n "$name" ]] || { _api_usage "wgobf $a ИМЯ"; return; }
@@ -15619,5 +15622,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=c97ad6bbf256cc46
+_BUILD_SUM=d1f8ac02a2e3c2c4
 main "$@"

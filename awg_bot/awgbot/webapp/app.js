@@ -1315,8 +1315,28 @@ function routesView(rows, mdl) {
   ];
 }
 
-// Схема: клиенты → сервер → выходы. Клиентов много — показаны самые активные
-function topology(el, rows, mdl, srvLabel) {
+// Клиенты WG + обфускатора в виде «список»: одна строка — все идут напрямую,
+// клиенты чипами (нажатие — карточка клиента обфускатора)
+function wgobfRoutes(wrows) {
+  const on = wrows.filter((c) => c.online).length, n = wrows.length;
+  const total = wrows.reduce((a, c) => a + (c.today || 0), 0);
+  return h("div", { class: "rlist" }, h("div", { class: "rx", onclick: () => go("/wgobf") },
+    h("i", { class: "sw", style: "background:var(--muted)" }),
+    h("div", { class: "rm" }, h("b", {}, "wgobf0 → напрямую"),
+      h("span", {}, `${n} ${plural(n, "клиент", "клиента", "клиентов")}` + (on ? ` · ${on} в сети` : " · никого в сети")),
+      h("div", { class: "rc" }, sortRows(wrows, "activity").map((c) => h("a", { class: "cchip" + (c.online ? " on" : ""), title: c.sub,
+        onclick: (ev) => { ev.stopPropagation(); go("/wgobf/client/" + encodeURIComponent(c.name)); } }, c.name)))),
+    h("div", { class: "rv" }, fmtBytes(total), h("small", {}, "с запуска"))));
+}
+
+// Схема: клиенты → сервер → выходы. Клиентов много — показаны самые активные.
+// opt — та же схема для WG + обфускатора: свой узел (hub), куда ведут нажатия
+// (hubPath, cpath, exitPath), подпись трафика выхода (esub), ключ прокрутки (key)
+function topology(el, rows, mdl, srvLabel, opt) {
+  opt = opt || {};
+  const hub = opt.hub || "awg0", stKey = "topoSt" + (opt.key || "");
+  const cpath = opt.cpath || ((n) => "/client/" + encodeURIComponent(n));
+  const esub = opt.esub || ((v) => `${fmtBytes(v)} сегодня`);
   const W = Math.max(300, el.clientWidth || 600), narrow = W < 560, MAXC = 6;
   const shown = sortRows(rows, "activity").sort((a, b) => (b.online - a.online) || ((b.today || 0) - (a.today || 0)));
   // Клиентов больше, чем влезает, — схема той же высоты, а столбец клиентов
@@ -1345,7 +1365,7 @@ function topology(el, rows, mdl, srvLabel) {
   const sum = {}, maxT = Math.max(1, ...rows.map((c) => c.today || 0));
   rows.forEach((c) => { const e = mdl.of[c.name]; sum[e] = (sum[e] || 0) + (c.today || 0); });
   const maxE = Math.max(1, ...Object.values(sum));
-  const csub = (c) => (c.blocked ? blockedWord(c) : c.online ? `${fmtBytes(c.today || 0)} сегодня` : c.handshake ? `${fmtDur(c.ago)} назад` : "не подключался");
+  const csub = (c) => c.sub || (c.blocked ? blockedWord(c) : c.online ? `${fmtBytes(c.today || 0)} сегодня` : c.handshake ? `${fmtDur(c.ago)} назад` : "не подключался");
   const ctitle = (c) => `${c.name} → ${mdl.get(mdl.of[c.name]).name}`;
   // Линии клиент → awg0 (у листаемого столбца — только видимых клиентов)
   const links = (y0) => {
@@ -1383,17 +1403,17 @@ function topology(el, rows, mdl, srvLabel) {
   }
   s += `<g class="node" data-srv="1"><rect x="${sx - sw / 2}" y="${sy - sh / 2}" width="${sw}" height="${sh}" rx="16" fill="var(--panel2)" stroke="var(--acc)" stroke-width="1.5"/>
     <image class="tz" x="${sx - 18}" y="${sy - sh / 2 + 8}" width="36" height="36" href="${tzIcon()}"/>
-    <text class="lbl" x="${sx}" y="${sy + (narrow ? 26 : 18)}" text-anchor="middle">awg0</text>
+    <text class="lbl" x="${sx}" y="${sy + (narrow ? 26 : 18)}" text-anchor="middle">${esc(hub)}</text>
     ${narrow ? "" : `<text class="lbl2" x="${sx}" y="${sy + 34}" text-anchor="middle">${esc(srvLabel)}</text>`}</g>`;
   exits.forEach((e, j) => {
     s += `<g class="node" data-e="${esc(e.id)}"><title>${esc(e.name)}</title><rect x="${exX - 11}" y="${ey(j) - 11}" width="22" height="22" rx="7" fill="${e.c}"/>
       <text class="lbl" x="${exX + 20}" y="${ey(j) + (narrow ? 4 : 0)}">${esc(exLabel(e))}</text>
-      ${narrow ? "" : `<text class="lbl2" x="${exX + 20}" y="${ey(j) + 14}">${fmtBytes(sum[e.id] || 0)} сегодня</text>`}</g>`;
+      ${narrow ? "" : `<text class="lbl2" x="${exX + 20}" y="${ey(j) + 14}">${esc(esub(sum[e.id] || 0))}</text>`}</g>`;
   });
-  el.innerHTML = `<svg viewBox="0 0 ${W} ${Hh}" height="${Hh}" role="img" aria-label="Маршруты трафика: клиенты, сервер, выходы">${s}</svg>`;
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${Hh}" height="${Hh}" role="img" aria-label="Маршруты трафика: клиенты, ${esc(hub)}, выходы">${s}</svg>`;
   if (scroll) {
     // Столбец клиентов — обычная прокрутка браузера; линии перерисовываются по ней
-    const prev = S.topoSt || 0;
+    const prev = S[stKey] || 0;
     const inner = h("div", { class: "tci", style: `height:${shown.length * row + 24}px` }, shown.map((c, i) => h("div", {
       class: "node tc", "data-c": c.name, "data-e": mdl.of[c.name], title: ctitle(c), style: `top:${cy(i) - row / 2}px;height:${row}px` },
     h("span", { class: "tn" }, h("b", {}, cname(c)), narrow ? null : h("small", {}, csub(c))),
@@ -1402,7 +1422,7 @@ function topology(el, rows, mdl, srvLabel) {
     el.append(col);
     const g = el.querySelector("g.cl");
     let raf = 0;
-    const redraw = () => { raf = 0; S.topoSt = col.scrollTop; g.innerHTML = links(col.scrollTop); };
+    const redraw = () => { raf = 0; S[stKey] = col.scrollTop; g.innerHTML = links(col.scrollTop); };
     col.addEventListener("scroll", () => { if (!raf) raf = requestAnimationFrame(redraw); }, { passive: true });
     col.scrollTop = prev;
     redraw();
@@ -1418,7 +1438,8 @@ function topology(el, rows, mdl, srvLabel) {
       });
     });
     g.addEventListener("mouseleave", () => { el.classList.remove("dimmed"); el.querySelectorAll(".hl").forEach((p) => p.classList.remove("hl")); });
-    g.addEventListener("click", () => go(g.dataset.srv ? "/server" : g.dataset.c ? "/client/" + encodeURIComponent(g.dataset.c) : "/tunnels"));
+    g.addEventListener("click", () => go(g.dataset.srv ? opt.hubPath || "/server" : g.dataset.c ? cpath(g.dataset.c)
+      : opt.exitPath || "/tunnels"));
   });
 }
 
@@ -1579,14 +1600,21 @@ function setStatus(d) {
 
 route(/^\/$/, async (ctx) => {
   let clErr = null;
-  const [me, d, cl, traffic, evlog] = await Promise.all([post("/api/me"), post("/api/status"), post("/api/clients").catch((e) => { clErr = e; return null; }),
-    call("traffic", "daily", "all", 14).catch(() => null), callR(["log", "expire", "80"]).catch(() => null)]);
+  const [me, d, cl, traffic, evlog, wob] = await Promise.all([post("/api/me"), post("/api/status"), post("/api/clients").catch((e) => { clErr = e; return null; }),
+    call("traffic", "daily", "all", 14).catch(() => null), callR(["log", "expire", "80"]).catch(() => null),
+    call("wgobf", "clients").catch(() => null)]);
   S.me = me;
   setStatus(d);
   if (cl) { S.clients = cl; if (!S.sort) S.sort = cl.sort || "activity"; }
   drawTop();
   const s = d.server || {}, comp = d.components || {}, rows = (cl && cl.rows) || [], r = (cl && cl.route) || {};
   const mdl = exitsModel(rows, r), alerts = homeAlerts(d);
+  // Клиенты WG + обфускатора — своя схема под схемой AWG: wgobf0 → напрямую.
+  // Трафик — счётчики WireGuard с запуска обфускатора, суточного учёта у него нет
+  const wrows = (Array.isArray(wob) ? wob : []).map((c) => Object.assign({}, c, { online: wgobfOnline(c), blocked: false,
+    handshake: c.ago != null, today: (c.rx || 0) + (c.tx || 0),
+    sub: wgobfOnline(c) ? `в сети · ${fmtBytes((c.rx || 0) + (c.tx || 0))}` : c.ago != null ? `${fmtDur(c.ago)} назад` : "не подключался" }));
+  const wmdl = exitsModel(wrows, {}), won = wrows.filter((c) => c.online).length;
   for (const c of rows) c.online = liveOnline(c, S.live);
   const now = new Date();
   const eyebrow = now.toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long" }) + " · "
@@ -1632,9 +1660,19 @@ route(/^\/$/, async (ctx) => {
   const routesIn = h("div", { class: "in" });
   const drawRoutes = () => {
     if (!ctx.live()) return;
-    if (clErr) { routesIn.replaceChildren(clFail()); return; }
-    if (!rows.length) { routesIn.replaceChildren(h("div", { class: "empty" }, "Клиентов пока нет — ", linkTo("создать первого", "/add"))); return; }
     const v = pref("routes", "map") === "list" ? "list" : "map";
+    const wtopo = v === "map" && wrows.length ? h("div", { class: "topo" }) : null;
+    const wsec = wrows.length ? [h("div", { class: "eyebrow", style: "margin:16px 0 6px", "data-name": "wgobf-routes" },
+      `WG + обфускатор · ${won} из ${wrows.length} в сети`), wtopo || wgobfRoutes(wrows)] : [];
+    const drawW = () => { if (wtopo) requestAnimationFrame(() => { if (ctx.live()) topology(wtopo, wrows, wmdl, "WG + обфускатор",
+      { hub: "wgobf0", hubPath: "/wgobf", exitPath: "/wgobf", key: "w", esub: (n) => `${fmtBytes(n)} с запуска`,
+        cpath: (n) => "/wgobf/client/" + encodeURIComponent(n) }); }); };
+    if (clErr) { routesIn.replaceChildren(clFail(), ...wsec); drawW(); return; }
+    if (!rows.length) {
+      routesIn.replaceChildren(h("div", { class: "empty" }, "Клиентов AWG пока нет — ", linkTo("создать первого", "/add")), ...wsec);
+      drawW();
+      return;
+    }
     const topo = v === "map" ? h("div", { class: "topo" }) : null;
     routesIn.replaceChildren(
       h("div", { class: "rhead" },
@@ -1644,12 +1682,14 @@ route(/^\/$/, async (ctx) => {
           .map((e) => h("span", { title: e.name }, h("i", { style: `background:${e.c}` }), e.short)) : null),
         h("div", { class: "seg rseg", role: "group", "aria-label": "Вид маршрутов" }, [["map", "схема"], ["list", "список"]].map(([k, t]) =>
           h("button", { class: v === k ? "on" : null, "aria-pressed": String(v === k), onclick: () => { setPref("routes", k); drawRoutes(); } }, t)))),
-      ...(topo ? [topo] : routesView(rows, mdl)));
+      ...(topo ? [topo] : routesView(rows, mdl)), ...wsec);
     if (topo) requestAnimationFrame(() => { if (ctx.live()) topology(topo, rows, mdl, `AWG ${s.proto || "?"}` + (srvHidden() ? "" : ` · :${s.port || "?"}`)); });
+    drawW();
   };
   const subText = () => [`${rows.filter((c) => c.online).length} из ${rows.length} ${plural(rows.length, "клиента", "клиентов", "клиентов")} в сети`,
     byLimit ? `${byLimit} ${plural(byLimit, "заблокирован", "заблокированы", "заблокированы")} по лимиту` : null,
-    byExp ? `${byExp} с истёкшим сроком` : null, alerts.length ? "есть замечания" : "сервер без замечаний"].filter(Boolean).join(" · ");
+    byExp ? `${byExp} с истёкшим сроком` : null, wrows.length ? `обфускатор: ${won} из ${wrows.length} в сети` : null,
+    alerts.length ? "есть замечания" : "сервер без замечаний"].filter(Boolean).join(" · ");
   const sub = h("span", {}, subText()), kOnline = h("span", {}, String(online));
 
   ctx.put(
@@ -3453,7 +3493,8 @@ route(/^\/wgobf$/, async (ctx) => {
     h("div", { style: "margin-top:10px" }, rows.length ? rows.map((c) => {
       const enc = encodeURIComponent(c.name);
       return ecard({ state: wgobfOnline(c) ? "on" : "", name: c.name, attrs: { "data-name": c.name },
-        onopen: () => go(`/wgobf/client/${enc}`), right: wgobfSeen(c), lines: [c.ip],
+        onopen: () => go(`/wgobf/client/${enc}`), right: wgobfSeen(c),
+        lines: [c.ip + (c.rx || c.tx ? ` · ↓ ${fmtBytes(c.rx)} ↑ ${fmtBytes(c.tx)}` : "")],
         acts: [act("file-text", "Комплект", () => go(`/wgobf/client/${enc}`)), act(WEB ? "download" : "send", TO("В чат", "Файл"), (b) => sendWgobf(b, c.name, "wgobf")),
           act("trash-2", "Удалить", (b) => quickAsk(b, `Удалить клиента ${c.name}?`, "Клиент удалён", ["wgobf", "del", c.name]), "bad")] });
     }) : h("div", { class: "card empty" }, "Клиентов нет")),
@@ -3482,8 +3523,17 @@ route(/^\/wgobf\/add$/, async (ctx) => {
 });
 
 route(/^\/wgobf\/client\/([^/]+)$/, async (ctx, name) => {
-  const d = await post("/api/wgobf/bundle", { name });
+  // Комплект не собрался — статус и мониторинг всё равно на экране, ошибка — плашкой
+  const [d, rows] = await Promise.all([post("/api/wgobf/bundle", { name }).catch((e) => ({ error: e.message })),
+    call("wgobf", "clients").catch(() => [])]);
+  const c = (rows || []).find((x) => x.name === name);
+  if (d.error && !c) throw new Error(d.error);
   ctx.put(title(name, pill("обфускатор", "accent")),
+    c ? h("div", { class: "card", "data-name": "wgobf-status" }, kv("Статус", wgobfSeen(c)), kv("Адрес", c.ip),
+      kv("Трафик с запуска", `↓ ${fmtBytes(c.rx)} · ↑ ${fmtBytes(c.tx)}`)) : null,
+    d.error ? h("div", { class: "card warn small" }, "Комплект клиента не собрался: " + d.error) : null,
+    switchRow("Мониторинг", "сообщу в чат, когда клиент пропал (5 минут без связи) и когда вернулся", !!d.mon,
+      (on) => post("/api/wgobf/mon", { name, on })),
     h("div", { class: "pair" },
       btn(TO("✉️ Всё в чат", "⬇️ Файл .conf"), (b) => sendWgobf(b, name, "wgobf"), "btn-primary"),
       btn("📦 Архив Linux", (b) => sendWgobf(b, name, "wgobf_zip"))),

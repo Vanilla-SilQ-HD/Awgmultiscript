@@ -37,7 +37,8 @@ with open(os.path.join(BIN, "curl"), "w") as f:
 # wg умеет ключи (клиенты WG + обфускатор), wg-quick — strip
 with open(os.path.join(BIN, "wg"), "w") as f:
     f.write('#!/usr/bin/env bash\necho "wg $*" >> "$CALLS"\ncase "$1" in\n'
-            '  genkey|genpsk) head -c 32 /dev/urandom | base64 ;;\n  pubkey) sha256sum | head -c 43; echo "=" ;;\nesac\nexit 0\n')
+            '  genkey|genpsk) head -c 32 /dev/urandom | base64 ;;\n  pubkey) sha256sum | head -c 43; echo "=" ;;\n'
+            '  show) [[ "${3:-}" == dump && -f "$WG_DUMP" ]] && cat "$WG_DUMP" ;;\nesac\nexit 0\n')
 with open(os.path.join(BIN, "wg-quick"), "w") as f:
     f.write('#!/usr/bin/env bash\necho "wg-quick $*" >> "$CALLS"\n[[ "$1" == strip ]] && printf "[Interface]\\nPrivateKey = x\\n"\nexit 0\n')
 for tool in ("wg", "wg-quick"):
@@ -92,8 +93,13 @@ if PROFILE != "none":
         f.write("PORT=41000\nENDPOINT=203.0.113.10\nMASKING=STUN\nALLOW_CLEAN=1\nNET=10.66.66.0/24\nKEY=s3cretObfKey\n"
                 "SERVER_PUB=SRVPUBKEYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=\nWG_PORT=51900\nMTU=1380\nDNS=1.1.1.1, 1.0.0.1\n")
     os.makedirs(os.path.join(ROOT, "etc/wireguard"), exist_ok=True)
+    # Клиент обфускатора ob1 — в сети: на обзоре своя схема wgobf0 → напрямую
     with open(os.path.join(ROOT, "etc/wireguard/wgobf0.conf"), "w") as f:
-        f.write("[Interface]\nPrivateKey = X\nAddress = 10.66.66.1/24\nListenPort = 51900\n")
+        f.write("[Interface]\nPrivateKey = X\nAddress = 10.66.66.1/24\nListenPort = 51900\n\n"
+                "[Peer]\n# client=ob1\nPublicKey = OBPUB=\nAllowedIPs = 10.66.66.2/32\n")
+    with open(WG_DUMP, "w") as f:
+        f.write(f"SRVPRIV=\tSRVPUB=\t51900\toff\nOBPUB=\t(none)\t127.0.0.1:40000\t10.66.66.2/32\t{now - 30}"
+                f"\t3145728\t1048576\t25\n")
     with open(ACTIVE, "a") as f:
         f.write("awg-wgobf.service\n")
     with open(LINKS, "a") as f:

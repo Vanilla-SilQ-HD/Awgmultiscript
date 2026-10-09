@@ -13,7 +13,8 @@ import subprocess
 import sys
 import tempfile
 
-__all__ = ["fake_xray", "HERE", "AWG2", "chk", "summary", "TMP", "BIN", "CALLS", "LINKS", "ACTIVE", "IPT_SAVE", "AWG_DUMP", "ROOT", "LIB",
+__all__ = ["fake_xray", "HERE", "AWG2", "chk", "summary", "TMP", "BIN", "CALLS", "LINKS", "ACTIVE", "IPT_SAVE", "AWG_DUMP", "WG_DUMP",
+           "ROOT", "LIB",
            "PRELUDE", "ENV", "bash", "run_script", "calls", "reset_calls", "kv", "OLD20", "api_wrapper", "fake_acme",
            "json", "os", "re", "shutil", "subprocess", "sys"]
 
@@ -43,6 +44,7 @@ LINKS = os.path.join(TMP, "links")          # «поднятые» интерф�
 ACTIVE = os.path.join(TMP, "active")        # «работающие» юниты systemd, по строке
 IPT_SAVE = os.path.join(TMP, "iptables-save.txt")
 AWG_DUMP = os.path.join(TMP, "awg-dump")      # вывод `awg show awg0 dump`, если файл есть
+WG_DUMP = os.path.join(TMP, "wg-dump")        # вывод `wg show wgobf0 dump` (WG + обфускатор), если файл есть
 open(LINKS, "w").close()
 open(ACTIVE, "w").close()
 open(IPT_SAVE, "w").close()
@@ -82,7 +84,9 @@ exit 0''',
     "awg-quick": r'''echo "awg-quick $*" >> "$CALLS"
 [[ "$1" == strip ]] && printf '[Interface]\nPrivateKey = x\n'
 exit 0''',
-    "wg": r'''echo "wg $*" >> "$CALLS"; exit 0''',
+    "wg": r'''echo "wg $*" >> "$CALLS"
+[[ "$1" == show && "${3:-}" == dump && -f "$WG_DUMP" ]] && cat "$WG_DUMP"
+exit 0''',
     "conntrack": r'''exit 0''',
     "ss": r'''exit 0''',
     "curl": r'''for a in "$@"; do [[ "$a" == *http_code* ]] && { echo 204; exit 0; }; done
@@ -144,7 +148,7 @@ mkdir -p "$AWG_DIR" "$CLIENT_DIR" "$STATE_DIR" "{ROOT}/scripts"
 '''
 
 ENV = dict(os.environ, PATH=BIN + ":" + os.environ["PATH"], CALLS=CALLS, LINKS=LINKS, ACTIVE=ACTIVE,
-           IPT_SAVE=IPT_SAVE, AWG_DUMP=AWG_DUMP, LC_ALL="C.UTF-8")
+           IPT_SAVE=IPT_SAVE, AWG_DUMP=AWG_DUMP, WG_DUMP=WG_DUMP, LC_ALL="C.UTF-8")
 
 
 def bash(code, stdin=None):

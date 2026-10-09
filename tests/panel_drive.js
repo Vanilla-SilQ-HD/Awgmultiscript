@@ -801,9 +801,10 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     if (/null|undefined/.test(await page.textContent(".top"))) throw new Error("в шапке «null»");
   });
   // ── WG + обфускатор ──
-  await step("обфускатор", async () => {
+  await step("обфускатор: клиент ob1 в сети, трафик в карточке", async () => {
     await nav("/wgobf", "[data-name=wgobf]");
-    await page.waitForSelector("text=Клиентов нет");
+    await page.waitForSelector("[data-name=ob1] >> text=онлайн");
+    await page.waitForSelector("[data-name=ob1] >> text=↓ 3.0 МБ ↑ 1.0 МБ");
     await shot("50-wgobf");
   });
   await step("обфускатор: маскировка", async () => {
@@ -818,14 +819,35 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.waitForSelector("text=Ссылка для Keenetic");
     await page.waitForSelector("pre >> text=[instance]");
     await page.waitForSelector("img.qr");
+    await page.waitForSelector("[data-name=wgobf-status] >> text=не подключался");
     await shot("51-wgobf-client");
     await page.click("button:has-text('Всё в чат')");
     await page.waitForSelector(".toast >> text=в чате с ботом");
   });
+  await step("обфускатор: мониторинг клиента включается и запоминается", async () => {
+    await page.click(".card.item:has-text('Мониторинг')");
+    await page.waitForSelector(".card.item:has-text('Мониторинг') .switch.on");
+    await nav("/wgobf/client/kn1", "text=Ссылка для Keenetic");
+    await page.waitForSelector(".card.item:has-text('Мониторинг') .switch.on");
+  });
   await step("обфускатор: удалить клиента", async () => {
     await page.click("button:has-text('Удалить клиента')");
     await page.waitForURL(/#\/wgobf$/);
-    await page.waitForSelector("text=Клиентов нет");
+    await page.waitForSelector("[data-name=kn1]", { state: "detached" });
+    await page.waitForSelector("[data-name=ob1]");
+  });
+  await step("обзор: клиенты обфускатора — своя схема wgobf0, нажатие — карточка клиента", async () => {
+    await nav("/", "[data-name=wgobf-routes]");
+    const t = await page.textContent("[data-name=wgobf-routes]");
+    if (!/1 из 1 в сети/.test(t)) throw new Error("подпись блока: " + t);
+    if (!/обфускатор: 1 из 1 в сети/.test(await page.textContent(".head"))) throw new Error("нет обфускатора в подзаголовке");
+    const topo = page.locator(".topo").nth(1);
+    await topo.locator("text=wgobf0").waitFor();
+    await shot("51b-overview-wgobf");
+    // Узел внизу экрана — под нижней панелью разделов: нажатие событием, тот же обработчик
+    await topo.locator(".node[data-c=ob1]").first().dispatchEvent("click");
+    await page.waitForURL(/#\/wgobf\/client\/ob1$/);
+    await page.waitForSelector("[data-name=wgobf-status] >> text=онлайн");
   });
 
   // ── Бот ──

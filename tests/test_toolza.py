@@ -2057,6 +2057,24 @@ chk("выключен — служба при загрузке ничего не
 rc, out, _ = bash(ASPRE + 'antiscan_remove; ls "$ANTISCAN_DIR" "$ANTISCAN_SCRIPT" 2>&1')
 chk("удаление вместе со скриптом: каталог и скрипт убраны", out.count("No such file") == 2, out)
 
+print("\n── WG + обфускатор: клиенты с трафиком ──")
+os.makedirs(os.path.join(ROOT, "etc/awg-wgobf"), exist_ok=True)
+os.makedirs(os.path.join(ROOT, "etc/wireguard"), exist_ok=True)
+with open(os.path.join(ROOT, "etc/awg-wgobf/state"), "w") as f:
+    f.write("PORT=41000\nENDPOINT=203.0.113.10\nMASKING=STUN\nKEY=k\nNET=10.66.66.0/24\nWG_PORT=51900\n")
+with open(os.path.join(ROOT, "etc/wireguard/wgobf0.conf"), "w") as f:
+    f.write("[Interface]\nPrivateKey = X\n\n[Peer]\n# client=wa\nPublicKey = WAPUB=\nAllowedIPs = 10.66.66.2/32\n\n"
+            "[Peer]\n# client=wb\nPublicKey = WBPUB=\nAllowedIPs = 10.66.66.3/32\n")
+with open(WG_DUMP, "w") as f:
+    f.write(f"SRVPRIV=\tSRVPUB=\t51900\toff\nWAPUB=\t(none)\t127.0.0.1:40000\t10.66.66.2/32\t{int(time.time()) - 40}"
+            "\t5000\t7000\t25\n")
+r = api("wgobf", "clients")
+rows = {x["name"]: x for x in r.get("data") or []}
+chk("клиенты обфускатора: рукопожатие и трафик с запуска; у второго (нет в dump) — пусто, не цифры соседа",
+    r.get("ok") and rows.get("wa", {}).get("rx") == 5000 and rows["wa"].get("tx") == 7000 and 30 <= rows["wa"].get("ago", -1) <= 120
+    and rows.get("wb", {}).get("rx") == 0 and rows["wb"].get("ago") is None, r)
+os.remove(WG_DUMP)
+
 print("\n── Проверка новой версии: бета — раз в 20 минут, стабильный — раз в час ──")
 PEEK = 'update_peek() { touch "$STATE_DIR/peeked"; }; rm -f "$STATE_DIR/peeked"; '
 for chan, age, want in (("beta", 1300, True), ("beta", 600, False), ("stable", 1300, False), ("stable", 3700, True)):

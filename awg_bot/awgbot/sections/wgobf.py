@@ -9,7 +9,7 @@ from aiogram import Bot, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
-from .. import api, ask, jobs, media, ui
+from .. import api, ask, jobs, media, store, ui
 from ..ui import esc
 
 router = Router()
@@ -242,14 +242,30 @@ async def _view(cb: ui.Target, state: FSMContext, name: str) -> None:
     ago = c.get("ago")
     seen = ("не подключался" if ago is None
             else f"🟢 онлайн ({ui.fmt_dur(ago)} назад)" if ago < 180 else f"был {ui.fmt_dur(ago)} назад")
+    mon = store.monitored(store.WGOBF + name)
     await ui.render(cb, f"<b>🛡 {esc(name)}</b> — WG + обфускатор\n\nIP: <code>{esc(c['ip'])}</code>\n"
-                        f"Статус: {seen}\n\n"
+                        f"Статус: {seen}\n"
+                        f"Трафик с запуска: ↓ {ui.fmt_bytes(c.get('rx'))} · ↑ {ui.fmt_bytes(c.get('tx'))}\n"
+                        f"Мониторинг: {'🔔 вкл' if mon else '🔕 выкл'}\n\n"
                         "<i>📄 Конфиг — ссылка и конфиг текстом, плюс один файл .conf со всеми данными\n"
-                        "📦 Архив — wg.conf, obfuscator.conf и установщик для Linux</i>",
+                        "📦 Архив — wg.conf, obfuscator.conf и установщик для Linux\n"
+                        "🔔 Мониторинг — сообщу, когда клиент пропал (5 минут без связи) и вернулся</i>",
                     ui.kb(("📄 Конфиг", act.data("bundle", name)),
                           ("📦 Архив", act.data("zip", name)),
+                          ("🔕 Выключить мониторинг" if mon else "🔔 Мониторинг", act.data("mon", name)),
                           ("🗑 Удалить", act.data("del", name)),
                           ui.back(act.data("list"))))
+
+
+@act("mon")
+async def _mon(cb: CallbackQuery, state: FSMContext, name: str) -> None:
+    if not NAME_RE.match(name):
+        await cb.answer("Кнопка устарела — открой клиента заново", show_alert=True)
+        return
+    on = not store.monitored(store.WGOBF + name)
+    store.set_monitored(store.WGOBF + name, on)
+    await cb.answer("🔔 Мониторинг включён" if on else "🔕 Мониторинг выключен")
+    await _view(cb, state, name)
 
 
 @act("bundle")
