@@ -463,7 +463,11 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
   });
 
   // ── Сервер ──
-  await step("сервер", async () => { await nav("/server", "text=Endpoint"); await page.waitForSelector("text=Модуль ядра"); await shot("20-server"); });
+  await step("сервер", async () => {
+    await nav("/server", "text=Endpoint"); await page.waitForSelector("text=Модуль ядра"); await shot("20-server");
+    // Сервер на 2.0 — обычный выбор: подсказка о 3.1 не висит предупреждением (переход — в «Протоколе»)
+    for (const t of await page.locator("#app .card.warn").allTextContents()) if (/3\.1/.test(t)) throw new Error("плашка про 3.1: " + t);
+  });
   await step("рестарт awg0 — с вопросом, как в палитре", async () => {
     await page.click(".ecard button:has-text('Рестарт')"); await page.waitForSelector(".toast");
     if (!(await page.evaluate(() => window.__log)).some((l) => l.startsWith("confirm:Перезапустить awg0"))) throw new Error("без подтверждения");

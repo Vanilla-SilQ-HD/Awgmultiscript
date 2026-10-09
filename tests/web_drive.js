@@ -72,6 +72,23 @@ const say = (ok, label) => console.log(`${ok ? "OK" : "FAIL"} ${label}`);
         await page.evaluate(() => { [S.version, S.channel, S.update] = window.__railWas; drawTop(); });
         if (!fit.beta || fit.lockR > fit.linkR || fit.h < 18) throw new Error("название в ленте: " + JSON.stringify(fit));
       });
+      await step("тема: значок вкладки — знак Тулзы или флаг страны с точкой awg0, выбор запоминается", async () => {
+        const isFlag = () => page.evaluate(() => /viewBox="0 0 30 20"/.test(decodeURIComponent(document.getElementById("favicon").getAttribute("href") || "")));
+        const waitFlag = (on) => page.waitForFunction((on) =>
+          /viewBox="0 0 30 20"/.test(decodeURIComponent(document.getElementById("favicon").getAttribute("href") || "")) === on, on);
+        if (await isFlag()) throw new Error("по умолчанию во вкладке флаг, а не знак");
+        await page.click(".top button[aria-label='Тема']");
+        await page.click("[data-name=tab-icon] button:has-text('Флаг страны')");
+        await waitFlag(true);
+        await page.keyboard.press("Escape");
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.waitForSelector(".top .cflag");
+        await waitFlag(true);
+        await page.click(".top button[aria-label='Тема']");
+        await page.click("[data-name=tab-icon] button:has-text('Знак Тулзы')");
+        await waitFlag(false);
+        await page.keyboard.press("Escape");
+      });
       await step("шапка: флаг — окно «О сервере» под ним; там же скрыть имя и адрес (и порт на схеме)", async () => {
         await page.waitForSelector(".topo svg [data-srv]");
         const st = await page.evaluate(() => [S.status.host, (S.status.server || {}).endpoint || S.status.ip].filter(Boolean));

@@ -356,7 +356,7 @@ const setPref = (k, v) => { try { localStorage.setItem("awg-" + k, v); } catch (
 
 // ── Вид: тема, акцент, фон, скругление, масштаб — панель «Тема» ──
 // Хранится в этом браузере; «Авто» — как тема Telegram (в Mini App) или системы
-const LOOK_DEF = { mode: "auto", hue: null, sat: 80, bgHue: null, tint: 22, rb: 16, zoom: 100, grid: false };
+const LOOK_DEF = { mode: "auto", hue: null, sat: 80, bgHue: null, tint: 22, rb: 16, zoom: 100, grid: false, tab: "logo" };
 const ZOOM_MIN = 75, ZOOM_MAX = 130;
 function loadLook() {
   let v = null;
@@ -366,6 +366,7 @@ function loadLook() {
   const L = Object.assign({}, LOOK_DEF, v);
   L.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(L.zoom) || 100));
   if (!["auto", "dark", "light"].includes(L.mode)) L.mode = "auto";
+  if (!["logo", "flag"].includes(L.tab)) L.tab = "logo";
   return L;
 }
 let LOOK = loadLook();
@@ -411,8 +412,24 @@ function tzIcon(big = false) {
 function tzRefresh() {
   document.querySelectorAll("img.tz").forEach((i) => { i.src = tzIcon(i.classList.contains("big")); });
   document.querySelectorAll("image.tz").forEach((i) => i.setAttribute("href", tzIcon()));
+  favRefresh();
+}
+// Значок вкладки браузера (веб-панель): знак Тулзы или флаг страны сервера с точкой
+// состояния awg0 — много вкладок с разными серверами различаются с первого взгляда
+function favRefresh() {
   const fav = document.getElementById("favicon");
-  if (fav) fav.href = tzIcon();
+  if (!fav) return;
+  const st = S.status || {}, cc = String(st.country || "").replace(/[^A-Z]/g, "").slice(0, 2);
+  const set = (href) => { if (fav.getAttribute("href") !== href) fav.href = href; };
+  if (!WEB || LOOK.tab !== "flag" || !cc) { set(tzIcon()); return; }
+  const dot = { "": "#22c55e", bad: "#ef4444", off: "#9ca3af" }[srvPulse(st)];
+  const body = FLAGS[cc] ? `<svg x="0" y="5" width="32" height="22" viewBox="0 0 30 20" preserveAspectRatio="none">${flagBody(FLAGS[cc])}</svg>`
+    : `<rect y="5" width="32" height="22" fill="#4b5563"/><text x="16" y="21" text-anchor="middle" font-family="sans-serif" font-weight="700"
+      font-size="12" fill="#fff">${cc}</text>`;
+  set("data:image/svg+xml;charset=utf-8," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+    <defs><clipPath id="c"><rect y="5" width="32" height="22" rx="4"/></clipPath></defs><g clip-path="url(#c)">${body}</g>
+    <rect x=".5" y="5.5" width="31" height="21" rx="3.5" fill="none" stroke="rgba(0,0,0,.25)"/>
+    <circle cx="26" cy="25" r="5.5" fill="${dot}" stroke="#fff" stroke-width="2"/></svg>`));
 }
 
 function applyLook(save = false) {
@@ -492,6 +509,10 @@ function lookPanel() {
         h("div", { class: "eyebrow tsep" }, "фон"),
         slider("bgHue", "Оттенок фона", 0, 360, LOOK.bgHue != null ? LOOK.bgHue : 220, "°", "hue"),
         slider("tint", "Тонировка", 0, 40, LOOK.tint, "%"),
+        WEB ? h("div", {}, h("div", { class: "eyebrow tsep" }, "значок вкладки браузера"), h("div", { class: "even2", "data-name": "tab-icon" },
+          [["logo", "Знак Тулзы"], ["flag", "Флаг страны"]].map(([k, t]) =>
+            h("button", { class: "chip" + (LOOK.tab === k ? " on" : ""), onclick: () => { LOOK.tab = k; applyLook(true); favRefresh(); draw(); } }, t))),
+        h("div", { class: "muted small", style: "margin-top:6px" }, "много вкладок с разными серверами — флаг страны и точка состояния awg0")) : null,
         h("div", { class: "eyebrow tsep" }, "форма и размер"),
         slider("rb", "Скругление углов", 0, 24, LOOK.rb, " px"),
         slider("zoom", "Масштаб", ZOOM_MIN, ZOOM_MAX, LOOK.zoom, "%"),
@@ -1806,6 +1827,7 @@ function setStatus(d, gen) {
     S.channel = d.channel || S.channel;
     S.update = d.update || "";           // «↑» прежнего канала — тоже не затирать
   }
+  favRefresh();
 }
 
 route(/^\/$/, async (ctx) => {
@@ -2546,8 +2568,10 @@ const DNS = [["Cloudflare", "1.1.1.1, 1.0.0.1"], ["Google", "8.8.8.8, 8.8.4.4"],
 
 route(/^\/server$/, async (ctx) => {
   const r = await callR(["server", "info"]);
-  const d = r.data || {}, tip = (r.log || "").trim();
-  const warnings = [d.reboot, tip].filter(Boolean);
+  // Подсказка о переходе на 3.1 — не предупреждение: сервер на 2.0 — обычный выбор,
+  // а переход — в «Протоколе»; в карточке — только то, что правда требует внимания
+  const d = r.data || {};
+  const warnings = [d.reboot].filter(Boolean);
   const state = !d.exists ? "" : d.up ? "on" : "bad";
   ctx.put(title("Сервер"),
     warnings.length ? h("div", { class: "card warn small" }, warnings.map((w) => h("div", { class: "row", style: "padding:2px 0" },
@@ -4223,7 +4247,7 @@ if (window.matchMedia) {
   const mq = matchMedia("(prefers-color-scheme: light)");
   if (mq.addEventListener) mq.addEventListener("change", () => { if (WEB && LOOK.mode === "auto") { applyLook(); drawTop(); } });
 }
-document.getElementById("favicon").href = tzIcon();
+favRefresh();
 window.addEventListener("hashchange", render);
 // Окно стало шире или уже: лента ↔ нижняя панель, таблица ↔ карточки
 if (WEB && DESK_MQ && DESK_MQ.addEventListener) {
