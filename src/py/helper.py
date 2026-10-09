@@ -821,16 +821,37 @@ def cmd_traffic_daily(conf, db, transfer, name="", days="30"):
     print(json.dumps(out, ensure_ascii=False))
 
 
-def cmd_traffic_now(conf, transfer):
+def _wgobf_names(conf):
+    """wgobf0.conf: ключ клиента → имя из «# client=имя» в его [Peer]."""
+    names, name = {}, None
+    for line in read(conf).splitlines():
+        line = line.strip()
+        if line == "[Peer]":
+            name = None
+        elif line.startswith("# client="):
+            name = line[len("# client="):]
+        elif name and line.startswith("PublicKey") and "=" in line:
+            names[line.split("=", 1)[1].strip()] = name
+    return names
+
+
+def cmd_traffic_now(conf, transfer, wconf="", wtransfer=""):
     """Счётчики awg0 сейчас — для живой скорости в панели: время (с долями
-    секунды) и {имя: [приём, отдача]}. Только чтение, база трафика не трогается."""
+    секунды) и {имя: [приём, отдача]}; клиенты WG + обфускатора (wgobf0) —
+    отдельно в wpeers, имена у них свои. Только чтение, база трафика не трогается."""
     _, peers = split_peers(read(conf))
     names = {peer_field(b, "PublicKey"): peer_name(b) for b in peers if peer_field(b, "PublicKey")}
     out = {}
     for pub, (rx, tx) in _read_transfer(transfer).items():
         if pub in names:
             out[names[pub] or pub[:8]] = [rx, tx]
-    print(json.dumps({"ts": round(time.time(), 3), "peers": out}, ensure_ascii=False))
+    wout = {}
+    if wconf and wtransfer and os.path.isfile(wconf):
+        wnames = _wgobf_names(wconf)
+        for pub, (rx, tx) in _read_transfer(wtransfer).items():
+            if pub in wnames:
+                wout[wnames[pub]] = [rx, tx]
+    print(json.dumps({"ts": round(time.time(), 3), "peers": out, "wpeers": wout}, ensure_ascii=False))
 
 
 def cmd_traffic_rows(conf, db, transfer):

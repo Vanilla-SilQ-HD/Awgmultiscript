@@ -185,7 +185,7 @@ def update_text(d: dict[str, Any], upd: str) -> str:
     """Уведомление о новой версии — одна строка: в шторке телефона виден весь
     текст сообщения. Что вошло в релиз — за кнопкой «Что нового»."""
     beta = " бета" if d.get("channel") == "beta" else ""
-    return f"🚀 AWG Toolza{beta} обновилась: <b>{esc(upd)}</b>"
+    return f"🚀 AWG Toolza{beta}: есть обновление <b>{esc(upd)}</b>"
 
 
 async def tick(bot: Bot, st: dict[str, Any]) -> bool:

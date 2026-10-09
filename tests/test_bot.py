@@ -855,9 +855,9 @@ async def run():
         and {"upd:go", "upd:notes", "mod:rebuild", "app"} <= set(btns), [sent, btns])
     upd_text = next(t for t in sent if "v1.2.1" in t)
     chk("о новой версии — одна строка для шторки: Тулза, канал, версия",
-        upd_text == "🚀 AWG Toolza бета обновилась: <b>v1.2.1</b>", upd_text)
+        upd_text == "🚀 AWG Toolza бета: есть обновление <b>v1.2.1</b>", upd_text)
     text = al.update_text({"version": "v1.2.0", "channel": "stable"}, "v1.2.5")
-    chk("стабильный канал — без «бета»", text == "🚀 AWG Toolza обновилась: <b>v1.2.5</b>", text)
+    chk("стабильный канал — без «бета»", text == "🚀 AWG Toolza: есть обновление <b>v1.2.5</b>", text)
     CL["sections"] = [{"version": "v1.2.1", "title": "2026-10-08",
                        "body": "**Быстрее панель, понятнее бот.**\n\n### Панель\n\n- Переходы — `сразу`."}]
     real_call_n = al.api.call

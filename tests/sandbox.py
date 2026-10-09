@@ -86,6 +86,7 @@ exit 0''',
 exit 0''',
     "wg": r'''echo "wg $*" >> "$CALLS"
 [[ "$1" == show && "${3:-}" == dump && -f "$WG_DUMP" ]] && cat "$WG_DUMP"
+[[ "$1" == show && "${3:-}" == transfer && -f "$WG_DUMP" ]] && awk -F'\t' 'NR > 1 {print $1 "\t" $6 "\t" $7}' "$WG_DUMP"
 exit 0''',
     "conntrack": r'''exit 0''',
     "ss": r'''exit 0''',

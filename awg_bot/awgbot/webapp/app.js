@@ -1561,6 +1561,12 @@ async function liveLoop(ctx, onTick) {
               per[n] = [a, b]; rx += a; tx += b;
               if (r > p[0]) L.act[n] = Date.now();             // от клиента пришёл пакет
             }
+            // Клиенты WG + обфускатора (wgobf0) — в общую скорость сервера
+            const wp = L.prev.wpeers || {};
+            for (const [n, [r, t]] of Object.entries(d.wpeers || {})) {
+              const p = wp[n];
+              if (p) { rx += Math.max(0, r - p[0]) / dt; tx += Math.max(0, t - p[1]) / dt; }
+            }
             L.rx.push(rx); L.tx.push(tx);
             if (L.rx.length > 60) { L.rx.shift(); L.tx.shift(); }
             L.per = per;

@@ -5,7 +5,7 @@
 # ненулевая команда обрывала бы скрипт посреди настройки сети.
 set -uo pipefail
 
-VERSION="v1.2.22"
+VERSION="v1.2.23"
 # Буква тестовой сборки (AWG_BUILD=b ./build.sh): видна в меню, боте и панели,
 # в сравнении версий не участвует. У выпущенной сборки пусто.
 BUILD=""
@@ -10711,7 +10711,7 @@ _api_mimicry() {
 
 # ── Трафик по дням ────────────────────────────────────────
 _api_traffic() {
-  local tr name="" days=30
+  local tr wtr name="" days=30
   case "${1:-}" in
     daily)
       # Два аргумента — всегда «ИМЯ|all ДНЕЙ»: имя клиента может быть числом
@@ -10724,11 +10724,14 @@ _api_traffic() {
       awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || true
       py traffic-daily "$SERVER_CONF" "$TRAFFIC_DB" "$tr" "$name" "$days" > "$API_DATA" ;;
     now)
-      # Счётчики прямо сейчас — панель считает по ним живую скорость
+      # Счётчики прямо сейчас — панель считает по ним живую скорость:
+      # клиенты awg0 и отдельно клиенты WG + обфускатора (wgobf0)
       server_exists || { err "Сервер не создан"; return 1; }
       mktmp tr || return 1
+      mktmp wtr || return 1
       awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || true
-      py traffic-now "$SERVER_CONF" "$tr" > "$API_DATA" ;;
+      if wgobf_installed; then wg show "$WGOBF_IF" transfer > "$wtr" 2>/dev/null || true; fi
+      py traffic-now "$SERVER_CONF" "$tr" "$WGOBF_WG_CONF" "$wtr" > "$API_DATA" ;;
     *) _api_usage "traffic daily [ИМЯ|all] [ДНЕЙ] | now" ;;
   esac
 }
@@ -13345,7 +13348,7 @@ if __name__ == "__main__":
 '
 # CPS_GENERATOR_END v2
 
-_PY_HELPER_SUM=da9cb7ba6b473839
+_PY_HELPER_SUM=53b71a375d926f57
 IFS= read -r -d '' _PY_HELPER <<'__AWG2_PY_HELPER__' || true
 """Встроенный помощник awg2: разбор и атомарная правка конфигов, JSON Xray,
 расчёты подсетей, разбор pcap. Вызывается как `py <команда> [аргументы]`.
@@ -14170,16 +14173,37 @@ def cmd_traffic_daily(conf, db, transfer, name="", days="30"):
     print(json.dumps(out, ensure_ascii=False))
 
 
-def cmd_traffic_now(conf, transfer):
+def _wgobf_names(conf):
+    """wgobf0.conf: ключ клиента → имя из «# client=имя» в его [Peer]."""
+    names, name = {}, None
+    for line in read(conf).splitlines():
+        line = line.strip()
+        if line == "[Peer]":
+            name = None
+        elif line.startswith("# client="):
+            name = line[len("# client="):]
+        elif name and line.startswith("PublicKey") and "=" in line:
+            names[line.split("=", 1)[1].strip()] = name
+    return names
+
+
+def cmd_traffic_now(conf, transfer, wconf="", wtransfer=""):
     """Счётчики awg0 сейчас — для живой скорости в панели: время (с долями
-    секунды) и {имя: [приём, отдача]}. Только чтение, база трафика не трогается."""
+    секунды) и {имя: [приём, отдача]}; клиенты WG + обфускатора (wgobf0) —
+    отдельно в wpeers, имена у них свои. Только чтение, база трафика не трогается."""
     _, peers = split_peers(read(conf))
     names = {peer_field(b, "PublicKey"): peer_name(b) for b in peers if peer_field(b, "PublicKey")}
     out = {}
     for pub, (rx, tx) in _read_transfer(transfer).items():
         if pub in names:
             out[names[pub] or pub[:8]] = [rx, tx]
-    print(json.dumps({"ts": round(time.time(), 3), "peers": out}, ensure_ascii=False))
+    wout = {}
+    if wconf and wtransfer and os.path.isfile(wconf):
+        wnames = _wgobf_names(wconf)
+        for pub, (rx, tx) in _read_transfer(wtransfer).items():
+            if pub in wnames:
+                wout[wnames[pub]] = [rx, tx]
+    print(json.dumps({"ts": round(time.time(), 3), "peers": out, "wpeers": wout}, ensure_ascii=False))
 
 
 def cmd_traffic_rows(conf, db, transfer):
@@ -15622,5 +15646,5 @@ if __name__ == "__main__":
     main()
 __AWG2_PY_HELPER__
 
-_BUILD_SUM=ea1e963afd9880dd
+_BUILD_SUM=2af95dff2d238838
 main "$@"

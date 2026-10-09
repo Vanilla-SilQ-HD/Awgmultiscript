@@ -2073,6 +2073,10 @@ rows = {x["name"]: x for x in r.get("data") or []}
 chk("клиенты обфускатора: рукопожатие и трафик с запуска; у второго (нет в dump) — пусто, не цифры соседа",
     r.get("ok") and rows.get("wa", {}).get("rx") == 5000 and rows["wa"].get("tx") == 7000 and 30 <= rows["wa"].get("ago", -1) <= 120
     and rows.get("wb", {}).get("rx") == 0 and rows["wb"].get("ago") is None, r)
+r = api("traffic", "now")
+d = r.get("data") or {}
+chk("api traffic now — клиенты обфускатора отдельно (wpeers): живая скорость считает и их",
+    r.get("ok") and d.get("wpeers") == {"wa": [5000, 7000]} and "wa" not in (d.get("peers") or {}), r)
 os.remove(WG_DUMP)
 
 print("\n── Проверка новой версии: бета — раз в 20 минут, стабильный — раз в час ──")

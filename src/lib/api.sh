@@ -376,7 +376,7 @@ _api_mimicry() {
 
 # ── Трафик по дням ────────────────────────────────────────
 _api_traffic() {
-  local tr name="" days=30
+  local tr wtr name="" days=30
   case "${1:-}" in
     daily)
       # Два аргумента — всегда «ИМЯ|all ДНЕЙ»: имя клиента может быть числом
@@ -389,11 +389,14 @@ _api_traffic() {
       awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || true
       py traffic-daily "$SERVER_CONF" "$TRAFFIC_DB" "$tr" "$name" "$days" > "$API_DATA" ;;
     now)
-      # Счётчики прямо сейчас — панель считает по ним живую скорость
+      # Счётчики прямо сейчас — панель считает по ним живую скорость:
+      # клиенты awg0 и отдельно клиенты WG + обфускатора (wgobf0)
       server_exists || { err "Сервер не создан"; return 1; }
       mktmp tr || return 1
+      mktmp wtr || return 1
       awg show "$AWG_IF" transfer > "$tr" 2>/dev/null || true
-      py traffic-now "$SERVER_CONF" "$tr" > "$API_DATA" ;;
+      if wgobf_installed; then wg show "$WGOBF_IF" transfer > "$wtr" 2>/dev/null || true; fi
+      py traffic-now "$SERVER_CONF" "$tr" "$WGOBF_WG_CONF" "$wtr" > "$API_DATA" ;;
     *) _api_usage "traffic daily [ИМЯ|all] [ДНЕЙ] | now" ;;
   esac
 }
