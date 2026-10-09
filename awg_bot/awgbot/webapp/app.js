@@ -682,7 +682,7 @@ const srvState = (st) => { const s = st.server || {}; return !s.exists ? "сер
 const srvPulse = (st) => { const s = st.server || {}; return !s.exists ? "off" : s.up ? "" : "bad"; };
 
 // О сервере: страна, имя, адрес, awg0, протокол, аптайм, версия. На ПК — окно
-// под кнопкой, на телефоне — лист снизу. «Скрыть адрес» — тут же, окно не закрывается
+// под флагом, на телефоне — лист снизу. «Скрыть адрес» — тут же, окно не закрывается
 function serverInfo(anchor) {
   closeMore(); closePal();
   const row = (k, v, cls) => h("div", { class: "sir" }, h("span", {}, k), h("b", { class: cls || null, title: v }, v));
@@ -730,10 +730,10 @@ function drawTop() {
   document.body.classList.toggle("rail-wide", railOn() && railWide());
   document.body.classList.toggle("bare", !app);
   // Сервер в шапке — флаг страны VPS и точка состояния; имя, адрес и остальное —
-  // во всплывающем окне по флагу или «i»
+  // во всплывающем окне по нажатию на флаг
   const st = S.status || {}, s = st.server || {}, cc = st.country || "";
   const flag = app && S.status ? h("button", { class: "cflag", "aria-label": "О сервере", onclick: (ev) => serverInfo(ev.currentTarget),
-    title: [cc ? countryName(cc) : null, srvState(st)].filter(Boolean).join(" · ") },
+    title: ["О сервере", cc ? countryName(cc) : null, srvState(st)].filter(Boolean).join(" · ") },
   flagEl(cc, 24) || h("span", { class: "cc" }, cc || icon("globe")), h("i", { class: "pulse " + srvPulse(st) })) : null;
   const upd = hasUpd();
   topEl.replaceChildren(...[
@@ -742,8 +742,6 @@ function drawTop() {
     flag, h("div", { class: "grow" }),
     app ? h("button", { class: "kbar", title: "Раздел, клиент или действие (Ctrl+K)", onclick: openPal },
       icon("search"), h("span", {}, "Команда или клиент…"), h("kbd", {}, "Ctrl K")) : null,
-    app && S.status ? h("button", { class: "ibtn sib", title: "О сервере", "aria-label": "О сервере", onclick: (ev) => serverInfo(ev.currentTarget) },
-      icon("info")) : null,
     app ? h("button", { class: "ibtn", title: "Тема и цвета", "aria-label": "Тема", onclick: lookPanel },
       icon(themeNow() === "dark" ? "sun" : "moon")) : null,
     app && WEB ? h("button", { class: "me", title: S.me.name || "Аккаунт", "aria-label": "Аккаунт", onclick: accountMenu },

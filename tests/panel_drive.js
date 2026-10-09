@@ -66,13 +66,13 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await shot("01-home");
   });
 
-  await step("шапка: флаг страны сервера, «О сервере» — по флагу и «i»", async () => {
+  await step("шапка: флаг страны сервера, «О сервере» — по нажатию на флаг", async () => {
     await nav("/", ".head h1");
     const nl = profile !== "none", box = "[data-name=server-info]";
     if (nl) {
       if (await page.getAttribute(".top .cflag svg.flag", "aria-label") !== "Нидерланды") throw new Error("нет флага Нидерландов");
     } else await page.waitForSelector(".top .cflag .cc svg");          // страна не известна — глобус
-    if (await page.isVisible(".top .sib")) throw new Error("на телефоне «i» лишняя — окно по флагу");
+    if (await page.locator(".top .sib").count()) throw new Error("кнопка «i» лишняя — окно по флагу");
     await page.click(".top .cflag");
     await page.waitForSelector(box);
     const t = await page.textContent(box);
@@ -89,16 +89,16 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     if (await page.locator(`${box} b.hid`).count()) throw new Error("адрес не вернулся");
     await page.keyboard.press("Escape");
     await page.waitForSelector(box, { state: "detached" });
-    // Широкий экран: «i» в шапке, окно выпадает из кнопки
+    // Широкий экран: окно выпадает из флага
     const vp = page.viewportSize();
     await page.setViewportSize({ width: 1366, height: 900 });
-    await page.click(".top .sib");
+    await page.click(".top .cflag");
     await page.waitForSelector(`${box}.pop`);
     const pos = await page.evaluate(() => {
-      const b = document.querySelector(".top .sib").getBoundingClientRect(), p = document.querySelector(".sinfo.pop").getBoundingClientRect();
-      return { gap: p.top - b.bottom, right: Math.abs(p.right - b.right), w: p.width };
+      const b = document.querySelector(".top .cflag").getBoundingClientRect(), p = document.querySelector(".sinfo.pop").getBoundingClientRect();
+      return { gap: p.top - b.bottom, left: Math.abs(p.left - b.left), w: p.width };
     });
-    if (pos.gap < 0 || pos.gap > 20 || pos.right > 2) throw new Error("окно не под кнопкой «i»: " + JSON.stringify(pos));
+    if (pos.gap < 0 || pos.gap > 20 || pos.left > 2) throw new Error("окно не под флагом: " + JSON.stringify(pos));
     await shot("01c-server-info-pc");
     await page.keyboard.press("Escape");
     await page.waitForSelector(box, { state: "detached" });

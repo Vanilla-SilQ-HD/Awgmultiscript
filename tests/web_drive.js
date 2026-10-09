@@ -72,18 +72,19 @@ const say = (ok, label) => console.log(`${ok ? "OK" : "FAIL"} ${label}`);
         await page.evaluate(() => { [S.version, S.channel, S.update] = window.__railWas; drawTop(); });
         if (!fit.beta || fit.lockR > fit.linkR || fit.h < 18) throw new Error("название в ленте: " + JSON.stringify(fit));
       });
-      await step("шапка: флаг и «i» — окно «О сервере» под кнопкой; там же скрыть имя и адрес (и порт на схеме)", async () => {
+      await step("шапка: флаг — окно «О сервере» под ним; там же скрыть имя и адрес (и порт на схеме)", async () => {
         await page.waitForSelector(".topo svg [data-srv]");
         const st = await page.evaluate(() => [S.status.host, (S.status.server || {}).endpoint || S.status.ip].filter(Boolean));
         const box = "[data-name=server-info]";
         const open = async (sel) => { await page.click(sel); await page.waitForSelector(box + ".pop"); return page.locator(box).innerText(); };
-        const t0 = await open(".top .sib");
+        if (await page.locator(".top .sib").count()) throw new Error("кнопка «i» лишняя — окно по флагу");
+        const t0 = await open(".top .cflag");
         if (!st.length || !st.every((v) => t0.includes(v)) || !t0.includes("Нидерланды")) throw new Error("в окне нет страны, имени или адреса: " + t0);
         const pos = await page.evaluate(() => {
-          const b = document.querySelector(".top .sib").getBoundingClientRect(), p = document.querySelector(".sinfo.pop").getBoundingClientRect();
-          return { gap: p.top - b.bottom, right: Math.abs(p.right - b.right) };
+          const b = document.querySelector(".top .cflag").getBoundingClientRect(), p = document.querySelector(".sinfo.pop").getBoundingClientRect();
+          return { gap: p.top - b.bottom, left: Math.abs(p.left - b.left) };
         });
-        if (pos.gap < 0 || pos.gap > 20 || pos.right > 2) throw new Error("окно не под «i»: " + JSON.stringify(pos));
+        if (pos.gap < 0 || pos.gap > 20 || pos.left > 2) throw new Error("окно не под флагом: " + JSON.stringify(pos));
         await page.screenshot({ path: `${out}/${name}-о-сервере.png` });
         // Скрыть — тут же, окно остаётся открытым; порт на схеме тоже скрыт
         await page.click(`${box} button:has-text('Скрыть адрес')`);
