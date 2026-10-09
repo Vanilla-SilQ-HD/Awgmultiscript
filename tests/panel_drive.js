@@ -836,30 +836,89 @@ const [port, initData, out, theme, profile, sandboxRoot] = process.argv.slice(2)
     await page.waitForSelector("[data-name=kn1]", { state: "detached" });
     await page.waitForSelector("[data-name=ob1]");
   });
-  await step("обзор: клиенты обфускатора — своя схема wgobf0, нажатие — карточка клиента", async () => {
-    await nav("/", "[data-name=wgobf-routes]");
-    const t = await page.textContent("[data-name=wgobf-routes]");
-    if (!/1 из 1 клиента в сети/.test(t)) throw new Error("подпись блока: " + t);
+  await step("обзор: маршруты — два окна, AWG и Phobos, листаются свайпом и вкладками", async () => {
+    await nav("/", "[data-name=routes] .ptabs");
+    const st = () => page.evaluate(() => {
+      const tabs = [...document.querySelectorAll("[data-name=routes] .ptabs button")];
+      const sl = [...document.querySelectorAll("[data-name=routes] .ptrack > *")];
+      return { tabs: tabs.map((b) => b.textContent.trim()), on: tabs.findIndex((b) => b.classList.contains("on")),
+        off: sl.map((x) => x.classList.contains("off")), link: document.querySelector("[data-name=routes] > header .r").textContent.trim(),
+        pane: localStorage.getItem("awg-routes-pane") };
+    });
+    let x = await st();
+    if (x.on !== 0 || x.off.join() !== "false,true" || x.link !== "туннели →") throw new Error("сначала окно AWG: " + JSON.stringify(x));
+    if (!/^AWG \d+\/\d+$/.test(x.tabs[0]) || x.tabs[1] !== "Phobos 1/1") throw new Error("вкладки: " + JSON.stringify(x.tabs));
     if (!/обфускатор: 1 из 1 в сети/.test(await page.textContent(".head"))) throw new Error("нет обфускатора в подзаголовке");
-    const topo = page.locator(".topo").nth(1);
+    // Палец влево по окну — следующее окно: Phobos
+    const swipe = (dx, dy) => page.evaluate(([dx, dy]) => {
+      const el = document.querySelector("[data-name=routes] .pager"), r = el.getBoundingClientRect();
+      const x0 = r.left + r.width / 2, y0 = r.top + 60;
+      const t = (x, y) => new Touch({ identifier: 1, target: el, clientX: x, clientY: y });
+      const fire = (type, x, y) => el.dispatchEvent(new TouchEvent(type, { bubbles: true, cancelable: true,
+        touches: type === "touchend" ? [] : [t(x, y)], changedTouches: [t(x, y)] }));
+      fire("touchstart", x0, y0);
+      for (let i = 1; i <= 5; i++) fire("touchmove", x0 + dx * i / 5, y0 + dy * i / 5);
+      fire("touchend", x0 + dx, y0 + dy);
+    }, [dx, dy]);
+    await swipe(-30, -120);
+    await page.waitForTimeout(450);
+    if ((await st()).on !== 0) throw new Error("вертикальный жест перелистнул окно");
+    await swipe(-140, 10);
+    await page.waitForFunction(() => {
+      const sl = document.querySelectorAll("[data-name=routes] .ptrack > *");
+      return !sl[1].classList.contains("off") && sl[0].classList.contains("off");
+    }, null, { timeout: 3000 });
+    x = await st();
+    if (x.on !== 1 || x.link !== "обфускатор →" || x.pane !== "w") throw new Error("после свайпа — Phobos: " + JSON.stringify(x));
+    const t = await page.textContent("[data-name=wgobf-routes]");
+    if (!/1 из 1 клиента в сети/.test(t)) throw new Error("подпись окна: " + t);
+    const topo = page.locator("[data-name=wgobf-routes] .topo");
     await topo.locator("text=wgobf0").waitFor();
+    // Окно AWG свёрнуто — блок по высоте окна Phobos
+    const hh = await page.evaluate(() => [document.querySelector("[data-name=routes] .pager").offsetHeight,
+      document.querySelector("[data-name=wgobf-routes]").offsetHeight]);
+    if (Math.abs(hh[0] - hh[1] - 6) > 2) throw new Error("высота блока не по окну Phobos: " + hh);
     await shot("51b-overview-wgobf");
-    // ПК: окно обфускатора — под маршрутами AWG, «Скорость сейчас» — справа на оба окна
     const vp = page.viewportSize();
     await page.setViewportSize({ width: 1366, height: 900 });
     await page.waitForTimeout(400);
-    const box = await page.evaluate(() => {
-      const r = (sel) => document.querySelector(sel).getBoundingClientRect();
-      const a = r(".ov1 > .box:not(.wbox):not(.live)"), w = r(".ov1 > .wbox"), l = r(".ov1 > .live");
-      return { wUnder: Math.abs(w.left - a.left) < 2 && w.top >= a.bottom, lRight: l.left > a.right, lSpan: l.bottom >= w.bottom - 2 };
-    });
     await shot("51c-overview-wgobf-pc");
     await page.setViewportSize(vp);
-    if (!box.wUnder || !box.lRight || !box.lSpan) throw new Error("раскладка ПК: " + JSON.stringify(box));
+    await page.waitForTimeout(400);
+    // За последнее окно не листается
+    await swipe(-140, 0);
+    await page.waitForTimeout(450);
+    if ((await st()).on !== 1) throw new Error("пролистнул за последнее окно");
     // Узел внизу экрана — под нижней панелью разделов: нажатие событием, тот же обработчик
     await topo.locator(".node[data-c=ob1]").first().dispatchEvent("click");
     await page.waitForURL(/#\/wgobf\/client\/ob1$/);
     await page.waitForSelector("[data-name=wgobf-status] >> text=онлайн");
+    // Обзор снова — открыто то же окно; вкладка AWG возвращает маршруты AWG
+    await nav("/", "[data-name=routes] .ptabs");
+    x = await st();
+    if (x.on !== 1 || x.off.join() !== "true,false") throw new Error("окно не запомнилось: " + JSON.stringify(x));
+    await page.click("[data-name=routes] .ptabs button:has-text('AWG')");
+    await page.waitForFunction(() => !document.querySelector("[data-name=routes] .ptrack > *").classList.contains("off"), null, { timeout: 3000 });
+    await page.waitForTimeout(450);
+    x = await st();
+    if (x.on !== 0 || x.off.join() !== "false,true" || x.pane !== "awg" || x.link !== "туннели →") throw new Error("вкладка AWG: " + JSON.stringify(x));
+    // Сенсорный экран без touch-событий (Edge) — тот же жест указателем; мышью не листается
+    const pswipe = (dx, type) => page.evaluate(([dx, type]) => {
+      const el = document.querySelector("[data-name=routes] .pager"), r = el.getBoundingClientRect();
+      const x0 = r.left + r.width / 2, y0 = r.top + 60;
+      const fire = (ev, x) => el.dispatchEvent(new PointerEvent(ev, { bubbles: true, cancelable: true, pointerId: 7, pointerType: type,
+        isPrimary: true, clientX: x, clientY: y0 }));
+      fire("pointerdown", x0);
+      for (let i = 1; i <= 5; i++) fire("pointermove", x0 + dx * i / 5);
+      fire("pointerup", x0 + dx);
+    }, [dx, type]);
+    await pswipe(-140, "mouse");
+    await page.waitForTimeout(450);
+    if ((await st()).on !== 0) throw new Error("мышь перелистнула окно");
+    await pswipe(-140, "touch");
+    await page.waitForFunction(() => document.querySelectorAll("[data-name=routes] .ptabs button")[1].classList.contains("on"), null, { timeout: 3000 });
+    await page.click("[data-name=routes] .ptabs button:has-text('AWG')");
+    await page.waitForTimeout(450);
   });
 
   // ── Бот ──

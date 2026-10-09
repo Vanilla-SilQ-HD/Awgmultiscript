@@ -383,15 +383,22 @@
 
   /* ── Обзор ── */
   .ov1 { grid-template-columns: minmax(0, 1.75fr) minmax(300px, 1fr); }
-  /* Есть WG + обфускатор: его окно — под маршрутами AWG, «Скорость сейчас» — справа на оба */
-  .ov1 > .wbox { grid-column: 1; }
-  .ov1.has-w > .live { grid-column: 2; grid-row: 1 / span 2; }
   .ov2 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   /* Маршруты трафика: полоса долей и выходы списком */
   .rhead { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
   .rhead .legend { margin: 6px 0 0; min-width: 0; }
   .rseg { flex: none; padding: 3px; gap: 2px; }
   .rseg button { flex: none; min-height: 30px; padding: 4px 12px; font-size: 12px; }
+  /* Два окна маршрутов (AWG и Phobos): вкладки и лента, которая листается пальцем */
+  .ptabs { margin-bottom: 12px; }
+  .ptabs button { font-size: 12.5px; }
+  .ptabs small { margin-left: 4px; font: 500 11px var(--mono); color: var(--muted); }
+  /* Поля в 3px — рамка фокуса у кнопок с краю не обрезается */
+  .pager { overflow: hidden; touch-action: pan-y; padding: 3px; margin: -3px; }
+  .ptrack { display: flex; align-items: flex-start; transition: transform .3s ease; }
+  .ptrack > * { flex: 0 0 100%; min-width: 0; }
+  .ptrack > .peek { overflow: hidden; }
+  .ptrack > .off { height: 0; overflow: hidden; visibility: hidden; }
   .topo { position: relative; }
   .topo > svg { display: block; width: 100%; overflow: visible; }
   .topo .lbl { font: 600 12px var(--sans); fill: var(--text); }
@@ -401,7 +408,7 @@
   .topo .link.idle { opacity: .35; }
   .topo .flow { fill: none; stroke-width: 2.6; stroke-linecap: round; stroke-dasharray: 1 14; animation: flow linear infinite; }
   @keyframes flow { to { stroke-dashoffset: -150; } }
-  @media (prefers-reduced-motion: reduce) { .topo .flow { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .topo .flow { animation: none; } .ptrack { transition: none; } }
   .topo.dimmed .link, .topo.dimmed .flow, .topo.dimmed .node { opacity: .12; }
   .topo.dimmed .hl { opacity: 1 !important; }
   .topo .node { cursor: pointer; transition: opacity .15s; }
@@ -620,7 +627,6 @@
   /* ── Ширина ── */
   @media (max-width: 1180px) {
     .ov1 { grid-template-columns: 1fr; }
-    .ov1 > .wbox, .ov1.has-w > .live { grid-column: auto; grid-row: auto; }
   }
   @media (max-width: 900px) {
     .ov2 { grid-template-columns: 1fr; }

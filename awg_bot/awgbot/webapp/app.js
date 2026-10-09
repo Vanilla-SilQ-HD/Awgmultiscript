@@ -1443,6 +1443,75 @@ function topology(el, rows, mdl, srvLabel, opt) {
   });
 }
 
+// Окна, которые листаются пальцем и вкладками (tabs — кнопки окон). Лента едет
+// transform'ом, без scroll-snap — работает и в старом Edge. Неактивное окно
+// сжато по высоте: короткое окно не тянет за собой высоту длинного; на время
+// сдвига соседнее — не выше текущего. onGo(i) — окно сменилось
+function swiper(slides, tabs, i0, onGo) {
+  const track = h("div", { class: "ptrack" }, slides), el = h("div", { class: "pager" }, track);
+  let cur = Math.max(0, Math.min(slides.length - 1, i0)), tmr = 0, x0 = null, y0 = 0, dx = 0, horiz = null, swiped = 0;
+  const open = () => {
+    const hh = slides[cur].offsetHeight;
+    slides.forEach((s, k) => { if (k !== cur) { s.style.maxHeight = hh + "px"; s.classList.remove("off"); s.classList.add("peek"); } });
+  };
+  const settle = () => slides.forEach((s, k) => {
+    s.classList.remove("peek"); s.style.maxHeight = ""; s.classList.toggle("off", k !== cur); s.setAttribute("aria-hidden", String(k !== cur));
+  });
+  const show = (i, anim) => {
+    i = Math.max(0, Math.min(slides.length - 1, i));
+    const was = cur;
+    clearTimeout(tmr);
+    if (anim) open();
+    cur = i;
+    track.style.transition = anim ? "" : "none";
+    track.style.transform = `translateX(${-100 * cur}%)`;
+    tabs.forEach((b, k) => { b.classList.toggle("on", k === cur); b.setAttribute("aria-pressed", String(k === cur)); });
+    if (anim) tmr = setTimeout(settle, 320); else settle();
+    if (i !== was) onGo(i);
+  };
+  tabs.forEach((b, k) => b.addEventListener("click", () => show(k, true)));
+  // Палец: в сторону — листает, вверх-вниз — прокрутка страницы как обычно
+  const start = (x, y) => { x0 = x; y0 = y; dx = 0; horiz = null; };
+  const move = (x, y, ev) => {
+    if (x0 == null) return;
+    if (horiz == null) {
+      if (Math.abs(x - x0) < 8 && Math.abs(y - y0) < 8) return;
+      horiz = Math.abs(x - x0) > Math.abs(y - y0);
+      if (horiz) { clearTimeout(tmr); open(); track.style.transition = "none"; }
+    }
+    if (!horiz) return;
+    if (ev.cancelable) ev.preventDefault();
+    dx = x - x0;
+    // За крайним окном лента тянется туго
+    const edge = (cur === 0 && dx > 0) || (cur === slides.length - 1 && dx < 0);
+    track.style.transform = `translateX(${-cur * track.clientWidth + (edge ? dx / 3 : dx)}px)`;
+  };
+  const end = () => {
+    if (x0 == null) return;
+    x0 = null;
+    if (!horiz) return;
+    swiped = Date.now();
+    const need = Math.min(60, track.clientWidth / 5);
+    show(cur + (dx < -need ? 1 : dx > need ? -1 : 0), true);
+  };
+  el.addEventListener("touchstart", (ev) => { if (ev.touches.length === 1) start(ev.touches[0].clientX, ev.touches[0].clientY); else x0 = null; },
+    { passive: true });
+  el.addEventListener("touchmove", (ev) => { if (ev.touches.length === 1) move(ev.touches[0].clientX, ev.touches[0].clientY, ev); }, { passive: false });
+  el.addEventListener("touchend", end);
+  el.addEventListener("touchcancel", end);
+  if (!("ontouchstart" in window) && window.PointerEvent) {
+    // Сенсорный экран без touch-событий (Edge): те же жесты указателем, мышь — вкладками
+    el.addEventListener("pointerdown", (ev) => { if (ev.pointerType !== "mouse" && ev.isPrimary) start(ev.clientX, ev.clientY); });
+    el.addEventListener("pointermove", (ev) => { if (ev.pointerType !== "mouse" && ev.isPrimary) move(ev.clientX, ev.clientY, ev); });
+    el.addEventListener("pointerup", end);
+    el.addEventListener("pointercancel", end);
+  }
+  // Пролистнул — отпущенный палец не нажимает узел схемы под ним
+  el.addEventListener("click", (ev) => { if (Date.now() - swiped < 400) { ev.stopPropagation(); ev.preventDefault(); } }, true);
+  show(cur, false);
+  return el;
+}
+
 // Живая скорость — по счётчикам awg0 раз в 3 секунды, пока открыт обзор
 function liveSvg(L) {
   const W = 300, Hh = 120, n = Math.max(L.rx.length, 2);
@@ -1656,17 +1725,27 @@ route(/^\/$/, async (ctx) => {
   const nowS = Date.now() / 1000, D30 = 30 * 86400;
   const exps = rows.filter((c) => expLive(c) && c.expires - nowS < D30).sort((a, b) => a.expires - b.expires);
   const events = parseEvents(evlog && evlog.log);
-  // Маршруты трафика: схема (по умолчанию) или список — выбор запоминается на устройстве
-  const routesIn = h("div", { class: "in" }), wgIn = h("div", { class: "in" });
-  const wcap = () => h("div", { class: "muted small", style: "margin-bottom:6px" },
+  // Маршруты трафика: схема (по умолчанию) или список — выбор запоминается на устройстве.
+  // Есть клиенты WG + обфускатора — в блоке два окна, AWG и Phobos: листаются
+  // свайпом и вкладками, открытое окно тоже запоминается
+  const routesIn = h("div", { class: wrows.length ? null : "in" }), wgIn = h("div", { "data-name": "wgobf-routes" });
+  const tA = h("small", {}), tW = h("small", {});
+  const tabs = wrows.length ? [h("button", {}, "AWG ", tA), h("button", {}, "Phobos ", tW)] : [];
+  const rlink = (i) => (i ? linkTo("обфускатор →", "/wgobf") : linkTo("туннели →", "/tunnels"));
+  const rhLink = h("div", { class: "r" }, rlink(wrows.length && pref("routes-pane", "awg") === "w" ? 1 : 0));
+  const vseg = (v) => h("div", { class: "seg rseg", role: "group", "aria-label": "Вид маршрутов" }, [["map", "схема"], ["list", "список"]].map(([k, t]) =>
+    h("button", { class: v === k ? "on" : null, "aria-pressed": String(v === k), onclick: () => { setPref("routes", k); drawRoutes(); } }, t)));
+  const wcap = () => h("div", { class: "muted small", style: "margin-top:6px" },
     `${won} из ${wrows.length} ${plural(wrows.length, "клиента", "клиентов", "клиентов")} в сети · идут напрямую · трафик с запуска wgobf0`);
   const drawRoutes = () => {
     if (!ctx.live()) return;
     const v = pref("routes", "map") === "list" ? "list" : "map";
     // Окно WG + обфускатора — тот же вид (схема или список), что у маршрутов AWG
     if (wrows.length) {
+      tA.textContent = clErr ? "—" : `${rows.filter((c) => c.online).length}/${rows.length}`;
+      tW.textContent = `${won}/${wrows.length}`;
       const wtopo = v === "map" ? h("div", { class: "topo" }) : null;
-      wgIn.replaceChildren(wcap(), wtopo || wgobfRoutes(wrows));
+      wgIn.replaceChildren(h("div", { class: "rhead" }, wcap(), vseg(v)), wtopo || wgobfRoutes(wrows));
       if (wtopo) requestAnimationFrame(() => { if (ctx.live()) topology(wtopo, wrows, wmdl, "WG + обфускатор",
         { hub: "wgobf0", hubPath: "/wgobf", exitPath: "/wgobf", key: "w", esub: (n) => `${fmtBytes(n)} с запуска`,
           cpath: (n) => "/wgobf/client/" + encodeURIComponent(n) }); });
@@ -1683,11 +1762,13 @@ route(/^\/$/, async (ctx) => {
           // «Напрямую» — в легенде, только если кто-то и правда идёт напрямую (как на схеме)
           .filter((e) => e.id !== "direct" || mdl.ex.length === 1 || rows.some((c) => mdl.of[c.name] === "direct"))
           .map((e) => h("span", { title: e.name }, h("i", { style: `background:${e.c}` }), e.short)) : null),
-        h("div", { class: "seg rseg", role: "group", "aria-label": "Вид маршрутов" }, [["map", "схема"], ["list", "список"]].map(([k, t]) =>
-          h("button", { class: v === k ? "on" : null, "aria-pressed": String(v === k), onclick: () => { setPref("routes", k); drawRoutes(); } }, t)))),
+        vseg(v)),
       ...(topo ? [topo] : routesView(rows, mdl)));
     if (topo) requestAnimationFrame(() => { if (ctx.live()) topology(topo, rows, mdl, `AWG ${s.proto || "?"}` + (srvHidden() ? "" : ` · :${s.port || "?"}`)); });
   };
+  const routesBody = wrows.length ? h("div", { class: "in" }, h("div", { class: "seg ptabs", role: "group", "aria-label": "Окно маршрутов" }, tabs),
+    swiper([routesIn, wgIn], tabs, pref("routes-pane", "awg") === "w" ? 1 : 0, (i) => {
+      setPref("routes-pane", i ? "w" : "awg"); rhLink.replaceChildren(rlink(i)); })) : routesIn;
   const subText = () => [`${rows.filter((c) => c.online).length} из ${rows.length} ${plural(rows.length, "клиента", "клиентов", "клиентов")} в сети`,
     byLimit ? `${byLimit} ${plural(byLimit, "заблокирован", "заблокированы", "заблокированы")} по лимиту` : null,
     byExp ? `${byExp} с истёкшим сроком` : null, wrows.length ? `обфускатор: ${won} из ${wrows.length} в сети` : null,
@@ -1706,12 +1787,8 @@ route(/^\/$/, async (ctx) => {
       kpi("сегодня", ...fmtBytes(today).split(" "), h("span", {}, `за месяц ${fmtBytes(month)}`)),
       kpi("аптайм сервера", h("span", {}, uD, h("small", {}, uDu), uH != null ? " " + uH : "", uH != null ? h("small", {}, uHu) : null), null,
         h("span", {}, [comp.module ? "модуль " + comp.module : null, d.kernel ? "ядро " + String(d.kernel).split("-")[0] : null].filter(Boolean).join(" · ")))),
-    h("div", { class: "g ov1" + (wrows.length ? " has-w" : "") },
-      h("section", { class: "box" }, h("header", {}, h("h3", {}, "Маршруты трафика"), h("div", { class: "r" }, linkTo("туннели →", "/tunnels"))),
-        routesIn),
-      wrows.length ? h("section", { class: "box wbox", "data-name": "wgobf-routes" },
-        h("header", {}, h("h3", {}, "WG + обфускатор"), h("div", { class: "r" }, linkTo("обфускатор →", "/wgobf"))),
-        wgIn) : null,
+    h("div", { class: "g ov1" },
+      h("section", { class: "box", "data-name": "routes" }, h("header", {}, h("h3", {}, "Маршруты трафика"), rhLink), routesBody),
       h("section", { class: "box live" }, h("header", {}, h("h3", {}, "Скорость сейчас"), h("div", { class: "r" }, livePill)),
         h("div", { class: "in" }, h("div", { class: "big" }, h("div", { class: "dn" }, lrx, lrxU), h("div", { class: "up" }, ltx, ltxU)), chart,
           h("div", { class: "eyebrow", style: "margin-top:16px" }, "больше всех сегодня"),
