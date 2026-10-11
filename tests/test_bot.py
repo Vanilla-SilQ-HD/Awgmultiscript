@@ -1605,6 +1605,13 @@ async def run():
             return botapi.Result(True, data={"url": URL, "user": "admin", "password": PW})
         if args[1] == "stop":
             WEBST["active"] = False
+        if args[1] == "access":
+            web_calls.append(args[2:])
+            if "300.1.1.1" in args:
+                return botapi.Result(False, rc=1, error="Не адрес или слишком широкая подсеть: 300.1.1.1")
+            WEBST["access"] = args[2]
+            if args[2] == "ip":
+                WEBST["allow"] = list(args[3:])
         return botapi.Result(True)
     botapi.call = web_call
     text, buttons = screen(await press("web:inst"))
@@ -1626,6 +1633,42 @@ async def run():
     chk("остановка: статус и кнопка «Запустить», ссылки «Открыть» нет",
         "Остановлена" in text and ("▶️ Запустить", "web:start") in buttons
         and not any(d == URL for _, d in buttons), [text, buttons])
+
+    WEBST.update(access="all", allow=[], vpn_url="https://10.8.0.1:41234/AbCdEfGh123456/", vpn_nets=["10.8.0.0/24"])
+    text, buttons = screen(await press("web"))
+    chk("веб-панель: строка «Доступ: для всех» и кнопка «🛡 Доступ»",
+        "🛡 Доступ: для всех" in text and ("🛡 Доступ", "web:acc") in buttons, [text, buttons])
+    text, buttons = screen(await press("web:acc"))
+    chk("экран доступа: три режима, текущий отмечен, адрес изнутри VPN",
+        "Сейчас: <b>для всех</b>" in text and "https://10.8.0.1:41234/AbCdEfGh123456/" in text
+        and ("✅ 🌍 Для всех", "web:acc_all") in buttons and ("📍 По адресам", "web:acc_ip") in buttons
+        and ("🔒 Только через VPN", "web:acc_vpn") in buttons, [text, buttons])
+    await press("web:acc_ip")
+    text, buttons = screen(await say("300.1.1.1, 198.51.100.7"))
+    chk("неверный адрес — ошибка awg2 и тот же вопрос снова", "300.1.1.1" in text and "⚠️" in text
+        and ("✖️ Отмена", "web:acc") in buttons and WEBST["access"] == "all", [text, buttons])
+    text, buttons = screen(await say("198.51.100.7, 203.0.113.0/24;2001:db8::/32"))
+    chk("«По адресам»: список уходит в awg2 по одному, режим отмечен",
+        web_calls[-2] == ("ip", "198.51.100.7", "203.0.113.0/24", "2001:db8::/32")
+        and "✅ Доступ: по адресам и через VPN" in text and "<code>203.0.113.0/24</code>" in text
+        and ("✅ 📍 По адресам", "web:acc_ip") in buttons, [web_calls[-3:], text, buttons])
+    text, buttons = screen(await press("web:acc_vpn"))
+    chk("«Только через VPN» — с подтверждением", "Снаружи порт панели закроется" in text
+        and ("🔒 Закрыть снаружи", "web:acc_vpnok") in buttons and WEBST["access"] == "ip", [text, buttons])
+    text, buttons = screen(await press("web:acc_vpnok"))
+    chk("«Только через VPN» включён; прежние адреса — одной кнопкой",
+        "Сейчас: <b>только через VPN</b>" in text and ("📍 Прежние адреса (3)", "web:acc_old") in buttons, [text, buttons])
+    text, buttons = screen(await press("web:acc_old"))
+    chk("прежние адреса — снова «по адресам» тем же списком",
+        web_calls[-2] == ("ip", "198.51.100.7", "203.0.113.0/24", "2001:db8::/32") and WEBST["access"] == "ip", web_calls[-3:])
+    text, buttons = screen(await press("web:acc_all"))
+    chk("«Для всех» — одним нажатием (бот — путь назад, если адрес сменился)",
+        web_calls[-2] == ("all",) and "Сейчас: <b>для всех</b>" in text, [web_calls[-3:], text])
+    admin = User(id=333, is_bot=False, first_name="Admin")
+    admins.add(333, 111)
+    denied = [alerts(await press(d, admin)) for d in ("web:acc", "web:acc_all", "web:acc_vpnok", "web:acc_ip")]
+    chk("приглашённому админу доступ к панели не менять", all(len(a) == 1 and "только владелец" in a[0] for a in denied), denied)
+    admins.remove(333, removed_by=111)
     botapi.call = real_call_
 
     print("Антисканер")

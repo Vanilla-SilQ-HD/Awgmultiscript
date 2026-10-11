@@ -822,6 +822,9 @@ _api_web() {
       { _kv installed:b "$(_b web_installed)"; _kv active:b "$(_b web_active)"
         if web_installed; then
           _kv url "$(web_url)"; _kv user "$(web_conf_get WEB_USER)"; _kv port:n "$(web_conf_get WEB_PORT)"
+          # Доступ: all | ip | vpn, список адресов и адрес панели изнутри VPN
+          _kv access "$(web_access_mode)"; _kv allow:j "$(web_access_allow | py json-list)"
+          _kv vpn_url "$(web_vpn_url 2>/dev/null)"; _kv vpn_nets:j "$(web_vpn_nets | py json-list)"
         fi
         _kv cert:b "$(_b cert_installed)"; _kv cert_name "$(cert_get name)"; _kv cert_expires:n "$(cert_expires)"
       } | api_obj ;;
@@ -834,8 +837,9 @@ _api_web() {
       web_installed || { err "Веб-панель не установлена"; return 1; }
       web_restart ;;
     stop) web_stop ;;
+    access) web_access_set "$@" ;;
     remove) web_installed || { err "Веб-панель не установлена"; return 1; }; web_remove quiet ;;
-    *) _api_usage "web status|install|password|path|restart|start|stop|remove" ;;
+    *) _api_usage "web status|install|password|path|restart|start|stop|access all|vpn|ip АДРЕС...|remove" ;;
   esac
 }
 

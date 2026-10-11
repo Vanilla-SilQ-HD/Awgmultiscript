@@ -307,6 +307,8 @@ helpers_refresh() {
   # Xray прежних версий жил во временных юнитах и перезагрузку не переживал
   [[ -f "$XRAY_STATE" && ! -f "/etc/systemd/system/$XRAY_UNIT" ]] && ! xray_is_up && rm -f "$XRAY_STATE"
   wgobf_installed && _wgobf_write_service_files
+  # Веб-панель: скрипт правила доступа и его запуск в юните — до старта панели
+  if web_installed; then _web_fw_emit && web_write_unit; fi
   echo "$stamp" > "$mark"
   log_info "служебные скрипты обновлены под $VERSION_SHOW"
 }

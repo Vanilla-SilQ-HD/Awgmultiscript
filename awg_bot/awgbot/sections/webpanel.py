@@ -5,16 +5,22 @@
 сервера. Пароль на сервере хранится только хешем: прежний показать нельзя,
 можно выдать новый. Его бот показывает один раз — «✅ Сохранил» правит это же
 сообщение, и пароль из чата пропадает.
+
+Доступ к панели: для всех, только с указанных адресов (и через свой VPN) или
+только через VPN. Бот работает всегда — отсюда и возвращают «для всех», если
+адрес дома сменился.
 """
 
 from __future__ import annotations
 
+import re
+
 from aiogram import Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, Message
 
-from .. import api, ui
+from .. import api, ask, ui
 from ..ui import esc
 
 router = Router()
@@ -25,6 +31,13 @@ TIMEOUT = 180                       # установка: код уже стои
 @act()
 async def show(cb: CallbackQuery, state: FSMContext, arg: str = "") -> None:
     await screen(cb)
+
+
+def _access_label(d: dict) -> str:
+    mode = d.get("access") or "all"
+    if mode == "ip":
+        return f"по адресам ({len(d.get('allow') or [])}) и через VPN"
+    return "только через VPN" if mode == "vpn" else "для всех"
 
 
 def _cert_line(d: dict) -> str:
@@ -53,13 +66,14 @@ async def screen(target: ui.Target, note: str = "") -> None:
         "🟢 Работает" if d.get("active") else "🔴 Остановлена",
         f"Адрес: <code>{esc(url)}</code>",
         f"Логин: <code>{esc(d.get('user') or '')}</code>",
+        f"🛡 Доступ: {_access_label(d)}",
         _cert_line(d), "",
         "<i>Пароль на сервере хранится только хешем — прежний не показать, можно выдать новый. "
         "Новый адрес — другой секретный путь: старая ссылка перестанет открываться.</i>",
     ]
     buttons = [
         ("🔑 Новый пароль", act.data("pw")), ("🔀 Новый адрес", act.data("path")),
-        ("🔄 Перезапустить", act.data("restart")),
+        ("🛡 Доступ", act.data("acc")), ("🔄 Перезапустить", act.data("restart")),
         ("⏹ Остановить", act.data("stop")) if d.get("active") else ("▶️ Запустить", act.data("start")),
         ("📜 Журнал входов", "diag:log:web|web"), ("🔐 Сертификат", "app"),
         ("🗑 Удалить", act.data("rm")), ui.back(),
@@ -73,6 +87,100 @@ async def screen(target: ui.Target, note: str = "") -> None:
     except TelegramBadRequest:
         # Ссылку на голый IP Telegram может не принять — адрес и так виден текстом
         await ui.render(target, text, ui.kb(*buttons))
+
+
+async def access_screen(target: ui.Target, note: str = "") -> None:
+    r = await api.call("web", "status")
+    if not r.ok or not isinstance(r.data, dict) or not r.data.get("installed"):
+        await ui.render(target, ui.fail(r, "Веб-панель") if not r.ok else "Веб-панель не установлена",
+                        ui.kb(ui.back(act.data())))
+        return
+    d = r.data
+    mode, allow = d.get("access") or "all", d.get("allow") or []
+    lines = ["<b>🛡 Доступ к веб-панели</b>", f"Сейчас: <b>{_access_label(d)}</b>", ""]
+    if note:
+        lines += [note, ""]
+    if allow:
+        lines.append("Адреса: " + ", ".join(f"<code>{esc(a)}</code>" for a in allow[:20])
+                     + (f" и ещё {len(allow) - 20}" if len(allow) > 20 else ""))
+    if d.get("vpn_url"):
+        lines.append(f"Изнутри VPN: <code>{esc(d['vpn_url'])}</code>")
+    lines += ["", "<i>«По адресам» — только с них и через свой VPN (AWG, WG + обфускатор): сменился адрес "
+                  "дома — зайди через VPN. «Только через VPN» — снаружи порт закрыт для всех. Изнутри VPN "
+                  "браузер предупредит о сертификате: он выписан на внешний адрес. Бот и SSH работают "
+                  "всегда — вернуть «для всех» можно отсюда.</i>"]
+    mark = {m: "✅ " if mode == m else "" for m in ("all", "ip", "vpn")}
+    buttons: list = [(f"{mark['all']}🌍 Для всех", act.data("acc_all")),
+                     (f"{mark['ip']}📍 По адресам", act.data("acc_ip"))]
+    if allow and mode != "ip":
+        buttons.append((f"📍 Прежние адреса ({len(allow)})", act.data("acc_old")))
+    if d.get("vpn_nets"):
+        buttons.append((f"{mark['vpn']}🔒 Только через VPN", act.data("acc_vpn")))
+    await ui.render(target, "\n".join(lines), ui.kb(*buttons, ui.back(act.data())))
+
+
+@act("acc")
+async def _acc(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await access_screen(cb)
+
+
+async def _acc_set(target: ui.Target, mode: str, *allow: str) -> api.Result:
+    r = await api.call("web", "access", mode, *allow, timeout=TIMEOUT)
+    labels = {"all": "для всех", "ip": "по адресам и через VPN", "vpn": "только через VPN"}
+    if r.ok:
+        await access_screen(target, f"✅ Доступ: {labels[mode]}")
+    return r
+
+
+@act("acc_all")
+async def _acc_all(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    r = await _acc_set(cb, "all")
+    if not r.ok:
+        await access_screen(cb, ui.fail(r, "Доступ"))
+
+
+@act("acc_vpn")
+async def _acc_vpn(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await ui.confirm(cb, "<b>🔒 Только через VPN?</b>\n\nСнаружи порт панели закроется для всех — открывать её "
+                         "придётся с подключённым VPN по адресу изнутри VPN. Бот и SSH продолжат работать.",
+                     ("🔒 Закрыть снаружи", act.data("acc_vpnok")), act.data("acc"))
+
+
+@act("acc_vpnok")
+async def _acc_vpn_ok(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    r = await _acc_set(cb, "vpn")
+    if not r.ok:
+        await access_screen(cb, ui.fail(r, "Доступ"))
+
+
+@act("acc_old")
+async def _acc_old(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    r = await api.call("web", "status")
+    allow = r.data.get("allow") if r.ok and isinstance(r.data, dict) else None
+    if not allow:
+        await access_screen(cb, ui.fail(r, "Доступ") if not r.ok else "Список адресов пуст")
+        return
+    r = await _acc_set(cb, "ip", *allow)
+    if not r.ok:
+        await access_screen(cb, ui.fail(r, "Доступ"))
+
+
+@act("acc_ip")
+async def _acc_ip(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
+    await ask.ask(cb, state, "web_allow", "Адреса и подсети, с которых открывать панель, — через запятую или "
+                                          "пробел: <code>1.2.3.4, 5.6.7.0/24</code> (IPv6 тоже можно). Список "
+                                          "заменит прежний; свой VPN пускается всегда.", act.data("acc"))
+
+
+@ask.on("web_allow")
+async def _acc_ip_answer(msg: Message, state: FSMContext, ctx: ask.Ctx) -> None:
+    items = [a for a in re.split(r"[\s,;]+", ask.text_of(msg)) if a][:64]
+    if not items:
+        await ask.retry(msg, state, ctx, "Нужен хотя бы один адрес или подсеть")
+        return
+    r = await _acc_set(msg, "ip", *items)
+    if not r.ok:
+        await ask.retry(msg, state, ctx, r.message)
 
 
 async def _access(target: ui.Target, r: api.Result, title: str) -> None:

@@ -2234,6 +2234,110 @@ chk("выключен — служба при загрузке ничего не
 rc, out, _ = bash(ASPRE + 'antiscan_remove; ls "$ANTISCAN_DIR" "$ANTISCAN_SCRIPT" 2>&1')
 chk("удаление вместе со скриптом: каталог и скрипт убраны", out.count("No such file") == 2, out)
 
+print("\n── Веб-панель: доступ по адресам и только через VPN ──")
+WFW = os.path.join(TMP, "awg2-web-fw")
+WNETS = os.path.join(TMP, "awg-web", "access.nets")
+WACC = ASPRE + WEBAPI + f'WEB_FW_SCRIPT="{WFW}"; WEB_NETS_FILE="{WNETS}"; need_cmds() {{ return 0; }}; '
+for fam in ("iptables", "ip6tables"):
+    open(f"{IPT_RULES}.{fam}", "w").close()
+wport = dict(ln.split("=", 1) for ln in open(WEBC).read().split("\n") if "=" in ln)["WEB_PORT"]
+rc, out, _ = bash(WACC + 'server_net; wgobf_get NET')
+VPN = out.split()
+WRULE = lambda port, st: (f"INPUT ! -i lo -p tcp --dport {port} -m conntrack --ctstate NEW -m set ! --match-set {st} src "
+                          "-m comment --comment awg2-webacl -j DROP")
+webacl = lambda fam=4: [x for x in ipt(fam) if "awg2-webacl" in x]
+wconf = lambda: dict(ln.split("=", 1) for ln in open(WEBC).read().split("\n") if "=" in ln)
+chk("для проверки есть подсети своего VPN (awg0 и обфускатор)", len(VPN) == 2, VPN)
+rc, out, err = bash(WACC + 'web_access_set ip 1.2.3.4 999.1.1.1 0.0.0.0/0')
+chk("не адрес и слишком широкая подсеть — отказ, режим не меняется",
+    rc != 0 and "999.1.1.1" in out + err and "0.0.0.0/0" in out + err and "WEB_ACCESS" not in wconf(), [out, err])
+rc, out, err = bash(WACC + 'web_access_set ip "1.2.3.4, 5.6.7.8/16" 2A02:6B8::/32 1.2.3.4')
+c = wconf()
+chk("по адресам: список нормализован (подсеть, регистр IPv6, без дублей), в конфиге режим ip",
+    rc == 0 and c.get("WEB_ACCESS") == "ip" and c.get("WEB_ALLOW") == "1.2.3.4/32,5.6.0.0/16,2a02:6b8::/32", [out, err, c])
+chk("список для самой панели: адреса и свой VPN; права 600",
+    open(WNETS).read().split() == ["1.2.3.4/32", "5.6.0.0/16", "2a02:6b8::/32"] + VPN
+    and os.stat(WNETS).st_mode & 0o777 == 0o600, open(WNETS).read())
+chk("набор IPv4 — адреса и VPN, IPv6 — свой; правило DROP первым в INPUT на порт панели (и для IPv6)",
+    sorted(ipset_set("awg2-web") or []) == sorted(["1.2.3.4/32", "5.6.0.0/16"] + VPN)
+    and ipset_set("awg2-web6") == ["2a02:6b8::/32"] and ipt(4)[:1] == [WRULE(wport, "awg2-web")]
+    and ipt(6)[:1] == [WRULE(wport, "awg2-web6")], [ipset_set("awg2-web"), ipset_set("awg2-web6"), ipt(4), ipt(6)])
+chk("скрипт правила для загрузки и самой панели сгенерирован", os.path.isfile(WFW)
+    and subprocess.run(["bash", "-n", WFW]).returncode == 0, WFW)
+fwu = open(os.path.join(ROOT, "units", "awg2-web-fw.service")).read()
+chk("служба правила при загрузке — раньше UFW и netfilter-persistent (сохранённые правила найдут набор)",
+    "DefaultDependencies=no" in fwu and "Before=network-pre.target ufw.service netfilter-persistent.service" in fwu
+    and f"ExecStart=-{WFW} apply" in fwu and "WantedBy=multi-user.target" in fwu, fwu)
+# Антисканер: оба правила DROP — друг друга не двигают, его проверка «первый» проходит
+rc, out, _ = bash(WACC + 'ipset create awg2-antiscan hash:net; _antiscan_rule_up iptables awg2-antiscan; '
+                  'antiscan_rules_ok && echo AS-OK; web_fw_run apply; antiscan_rules_ok && echo AS-OK2; '
+                  '_antiscan_rule_up iptables awg2-antiscan; antiscan_rules_ok && echo AS-OK3')
+chk("с антисканером: его правило «первое» и до, и после нашего (наш DROP он допускает выше себя); по одному правилу",
+    out.split() == ["AS-OK", "AS-OK2", "AS-OK3"] and len(webacl()) == 1
+    and sum("awg2-antiscan" in x for x in ipt(4)) == 1, [out, ipt(4)])
+rc, out, _ = bash(WACC + f'bash "{WFW}" check; echo "rc=$?"; iptables -D {WRULE(wport, "awg2-web")}; '
+                  f'bash "{WFW}" check; echo "rc=$?"; bash "{WFW}" apply; bash "{WFW}" check; echo "rc=$?"')
+chk("проверка: на месте — 0; правило сняли — 1, apply возвращает", out.split() == ["rc=0", "rc=1", "rc=0"]
+    and len(webacl()) == 1, [out, ipt(4)])
+rc, out, _ = bash(WACC + f'echo "NET=10.99.0.0/24" > "{TMP}/wgobf-state-x"; WGOBF_STATE="{TMP}/wgobf-state-x"; '
+                  f'_web_fw_emit; bash "{WFW}" check; echo "rc=$?"; _web_fw_emit')
+chk("сменилась подсеть VPN (обфускатор поставили заново) — проверка просит обновить список", out.split() == ["rc=1"], out)
+rc, out, _ = bash(WACC + 'web_conf_set WEB_PORT 40123; web_fw_run apply; web_conf_set WEB_PORT ' + wport + '; '
+                  'iptables -S INPUT | grep -c awg2-webacl')
+chk("смена порта — правило на новом порту, старое снято", out.split() == ["1"] and webacl()[0] == WRULE(40123, "awg2-web"),
+    [out, ipt(4)])
+bash(WACC + 'web_fw_run apply')
+rc, out, err = bash(WACC + 'AWG_CLIENT_IP=203.0.113.9 web_access_set ip 198.51.100.0/24')
+rc2, out2, err2 = bash(WACC + 'AWG_CLIENT_IP=198.51.100.7 web_access_set ip 198.51.100.0/24')
+chk("из панели: свой адрес не в списке — отказ (панель закрылась бы сама); в списке — можно",
+    rc != 0 and "203.0.113.9" in out + err and rc2 == 0 and wconf().get("WEB_ALLOW") == "198.51.100.0/24", [out, err, out2, err2])
+vhost = VPN[0].rsplit(".", 1)[0] + ".5"
+rc, out, err = bash(WACC + 'AWG_CLIENT_IP=203.0.113.9 web_access_set vpn')
+rc2, out2, err2 = bash(WACC + f'AWG_CLIENT_IP={vhost} web_access_set vpn')
+chk("только через VPN: зашли не через VPN — отказ с адресом панели изнутри VPN; через VPN — можно",
+    rc != 0 and "не через VPN" in out + err and rc2 == 0 and wconf().get("WEB_ACCESS") == "vpn"
+    and sorted(ipset_set("awg2-web") or []) == sorted(VPN) and ipset_set("awg2-web6") == []
+    and wconf().get("WEB_ALLOW") == "198.51.100.0/24", [out, err, out2, err2, ipset_set("awg2-web")])
+rc, out, err = bash(WACC + 'AWG_CLIENT_IP=127.0.0.1 web_access_set vpn && AWG_CLIENT_IP=::1 web_access_set vpn')
+chk("с самого сервера (127.0.0.1, ::1) — можно любой режим: так панель открывается всегда", rc == 0, [out, err])
+WGC = os.path.join(TMP, "wgobf0-only.conf")
+with open(WGC, "w") as f:
+    f.write("[Interface]\nAddress = 10.77.0.1/24\nPrivateKey = X\n")
+rc, out, _ = bash(WACC + f'SERVER_CONF="{TMP}/no-awg0.conf"; WGOBF_WG_CONF="{WGC}"; web_vpn_url')
+chk("адрес изнутри VPN без AWG — адрес wgobf0", out.strip() == f"https://10.77.0.1:{wport}/{wconf()['WEB_PATH']}/", out)
+rc, out, _ = bash(WACC + "api_main web status")
+st = json.loads(out)["data"]
+chk("api web status: доступ, список (хранится и в режиме VPN), подсети VPN, адрес из VPN",
+    st.get("access") == "vpn" and st.get("allow") == ["198.51.100.0/24"] and st.get("vpn_nets") == VPN
+    and st.get("vpn_url", "").startswith("https://" + VPN[0].rsplit(".", 1)[0] + ".1:" + wport + "/"), st)
+rc, out, _ = bash(WACC + "api_main web access all")
+chk("для всех: правила и наборы сняты, файл списка убран, список адресов сохранён",
+    json.loads(out).get("ok") and not webacl(4) and not webacl(6) and ipset_set("awg2-web") is None
+    and ipset_set("awg2-web6") is None and not os.path.exists(WNETS) and wconf().get("WEB_ALLOW") == "198.51.100.0/24",
+    [out, ipt(4), ipt(6)])
+# Скрипт сам по себе (загрузка, сама панель): без функций awg2
+with open(WEBC, "a") as f:
+    f.write("WEB_ACCESS=vpn\n")
+rc, out, err = bash(ASPRE + f'bash "{WFW}" apply; echo "rc=$?"')
+chk("скрипт без awg2 (ExecStartPre при загрузке): ставит правило по конфигу", out.split()[-1:] == ["rc=0"]
+    and webacl()[:1] == [WRULE(wport, "awg2-web")], [out, err, ipt(4)])
+rc, out, _ = bash(WACC + 'web_write_unit; cat "' + ROOT + '/units/awg-web.service"')
+chk("юнит панели: правило ставится до старта (с «-»: не встало — панель всё равно стартует), путь скрипта панели",
+    f"ExecStartPre=-{WFW} apply" in out and f"AWG_WEB_FW={WFW}" in out and f"AWG_WEB_NETS={WNETS}" in out, out)
+rc, out, _ = bash(WACC + 'unset SSH_CONNECTION; web_access_menu; web_conf_get WEB_ACCESS; web_conf_get WEB_ALLOW',
+                  stdin="2\n198.51.100.0/24, 192.0.2.7\n")
+rc2, out2, _ = bash(WACC + 'web_access_menu; web_conf_get WEB_ACCESS; do_web_menu', stdin="1\n0\n")
+chk("меню awg2: «Только с моих адресов» — список через запятую; «Для всех»; строка «Доступ» в меню панели",
+    out.split()[-2:] == ["ip", "198.51.100.0/24,192.0.2.7/32"] and "Только через VPN" in out
+    and "\nall\n" in out2 and any("a)" in ln and "Доступ" in ln and "для всех" in ln for ln in out2.splitlines()), [out[-600:], out2[-900:]])
+rc, out, _ = bash(WACC + 'web_access_set vpn >/dev/null; command() { [[ "$*" == "-v ipset" ]] && return 1; builtin command "$@"; }; '
+                  'web_fw_run check; echo "rc=$?"; echo 192.0.2.0/24 >> "$WEB_NETS_FILE"; web_fw_run check; echo "rc=$?"; '
+                  'unset -f command; web_access_set all >/dev/null')
+chk("без ipset проверка сверяет только список панели — не дёргает apply каждые 5 минут", out.split() == ["rc=0", "rc=1"], out)
+rc, out, _ = bash(WACC + 'web_fw_run down; iptables -S INPUT | grep -c awg2-webacl; ls "$WEB_NETS_FILE" 2>&1 | grep -c "No such"')
+chk("down — всё снято", out.split() == ["0", "1"], out)
+bash(WACC + 'web_conf_set WEB_ACCESS all')
+
 print("\n── WG + обфускатор: клиенты с трафиком ──")
 os.makedirs(os.path.join(ROOT, "etc/awg-wgobf"), exist_ok=True)
 os.makedirs(os.path.join(ROOT, "etc/wireguard"), exist_ok=True)

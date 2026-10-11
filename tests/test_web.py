@@ -173,6 +173,103 @@ try:
     st, d = c.api("api/download", {"what": "conf", "name": "../../etc/passwd"})
     chk("имя клиента с путём — отказ", st == 400, [st, d])
 
+    print("Доступ: по адресам и только через VPN")
+    nets_file = os.path.join(ROOT, "..", "web", "access.nets")
+    wconf = os.path.join(ROOT, "..", "web", "awg-web.conf")
+    st, d = c.api("api/web/account")
+    a = d.get("access") or {}
+    chk("аккаунт: доступ «для всех», мой адрес, адрес панели изнутри VPN (адрес awg0)",
+        st == 200 and a.get("mode") == "all" and a.get("me") == "127.0.0.1" and not a.get("me_vpn") and a.get("me_self")
+        and re.match(r"https://10\.\d+\.\d+\.\d+:" + PORT + "/s3cr3tPath/$", a.get("vpn_url", "")), a)
+    st, d = c.api("api/web/access", {"mode": "ip", "allow": ["300.1.1.1", "198.51.100.7"]})
+    chk("неверный адрес — 400 с понятной ошибкой, режим не сменился",
+        st == 400 and "300.1.1.1" in d.get("error", "") and "WEB_ACCESS=" not in open(wconf).read(), d)
+    st, d = c.api("api/web/access", {"mode": "ip", "allow": []})
+    chk("«по адресам» с пустым списком — отказ", st == 400 and d.get("error"), d)
+    st, d = c.api("api/web/access", {"mode": "root", "allow": []})
+    st2, d2 = c.api("api/web/access", {"mode": "ip", "allow": "198.51.100.7"})
+    chk("неизвестный режим, список не списком — 400", st == 400 and st2 == 400, [d, d2])
+    st, d = c.api("api/web/access", {"mode": "ip", "allow": ["198.51.100.7", "203.0.113.0/24", "2001:db8::/32"]})
+    nets = open(nets_file).read().split() if os.path.exists(nets_file) else []
+    st2, acc = c.api("api/web/account")
+    a = acc.get("access") or {}
+    chk("«по адресам»: принят; в списке панели — адреса и подсеть VPN; с самого сервера панель открывается",
+        st == 200 and {"198.51.100.7/32", "203.0.113.0/24", "2001:db8::/32"} <= set(nets)
+        and any(n.startswith("10.") for n in nets) and a.get("mode") == "ip"
+        and a.get("allow") == ["198.51.100.7/32", "203.0.113.0/24", "2001:db8::/32"] and c.api("api/me")[0] == 200,
+        [st, d, nets, a])
+    st, d = c.api("api/web/access", {"mode": "vpn"})
+    nets = open(nets_file).read().split() if os.path.exists(nets_file) else []
+    conf_now = open(wconf).read()
+    chk("«только через VPN»: в списке только подсеть VPN; список адресов сохранён для возврата",
+        st == 200 and nets and all(n.startswith("10.") for n in nets) and "WEB_ACCESS=vpn" in conf_now
+        and "WEB_ALLOW=198.51.100.7/32,203.0.113.0/24,2001:db8::/32" in conf_now and c.api("api/me")[0] == 200,
+        [st, d, nets, conf_now])
+    st, d = c.api("api/web/access", {"mode": "all"})
+    chk("«для всех»: список панели убран", st == 200 and not os.path.exists(nets_file)
+        and "WEB_ACCESS=all" in open(wconf).read(), [st, d])
+    wlog = open(os.path.join(ROOT, "..", "web", "awg-web.log")).read()
+    chk("смены доступа — в журнале", wlog.count(" ACCESS 127.0.0.1 ") == 3 and " ACCESS 127.0.0.1 ip 198.51.100.7" in wlog,
+        wlog[-500:])
+
+    # Проверка адреса самой панелью: чужой адрес — 404 до входа и до API
+    code = r"""
+import asyncio, ipaddress, json, os, sys
+from unittest import mock
+sys.path.insert(0, sys.argv[1])
+from aiohttp import web as aw
+from aiohttp.test_utils import make_mocked_request
+from awgbot import web
+d = sys.argv[2]
+open(web.CONF, "w").write("WEB_PORT=1\nWEB_PATH=p\nWEB_ACCESS=ip\n")
+out = {}
+acc = web.Access()
+out["no_file"] = [acc.allowed("198.51.100.7"), acc.allowed("127.0.0.1"), acc.allowed("::1")]
+open(web.NETS_FILE, "w").write("198.51.100.0/24\n10.8.0.0/24\n2001:db8::/32\nмусор\n")
+out["ip"] = [acc.allowed(x) for x in ("198.51.100.7", "::ffff:198.51.100.9", "10.8.0.5", "2001:db8::5",
+                                      "203.0.113.1", "2001:db9::1", "", None, "fe80::1%eth0", "127.0.0.1")]
+open(web.CONF, "w").write("WEB_PORT=1\nWEB_PATH=p\nWEB_ACCESS=all\n")
+out["all"] = acc.allowed("203.0.113.1")
+open(web.CONF, "w").write("WEB_PORT=1\nWEB_PATH=p\nWEB_ACCESS=vpn\n")
+out["vpn"] = [acc.allowed("10.8.0.5"), acc.allowed("203.0.113.1")]
+
+async def go(remote, local="203.0.113.50"):
+    srv = web.WebPanel()
+    tr = mock.Mock()
+    tr.get_extra_info.side_effect = lambda k, default=None: ((remote, 1234) if k == "peername"
+                                                             else (local, 443) if k == "sockname" else default)
+    req = make_mocked_request("GET", "/p/", transport=tr)
+    async def handler(r):
+        return aw.Response(text="panel")
+    try:
+        r = await srv.guard_mw(req, handler)
+        return r.status
+    except aw.HTTPException as e:
+        return e.status
+out["mw"] = [asyncio.run(go("203.0.113.1")), asyncio.run(go("10.8.0.5")), asyncio.run(go("203.0.113.50")),
+             asyncio.run(go("::ffff:203.0.113.50")), asyncio.run(go("2001:db8::7", "2001:db8::7"))]
+print(json.dumps(out))
+"""
+    ud = os.path.join(ROOT, "..", "acc-unit")
+    os.makedirs(ud, exist_ok=True)
+    uenv = dict(os.environ, AWG_WEB_CONF=os.path.join(ud, "w.conf"), AWG_WEB_NETS=os.path.join(ud, "nets"),
+                AWG_WEB_LOG=os.path.join(ud, "w.log"), AWG_WEB_DIR=os.path.join(ud, "self"),
+                AWG_BOT_CONF=os.path.join(ud, "none.conf"))
+    r = subprocess.run([sys.executable, "-c", code, os.path.join(HERE, "..", "awg_bot"), ud],
+                       env=uenv, capture_output=True, text=True, timeout=120)
+    try:
+        u = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        u = {}
+    chk("панель сама: режим ограничен, а списка нет — никого, кроме самого сервера",
+        u.get("no_file") == [False, True, True], [u, r.stderr[-800:]])
+    chk("панель сама: адреса и подсети из списка (и IPv4 в виде ::ffff:), чужие — нет; мусор в файле не мешает",
+        u.get("ip") == [True, True, True, True, False, False, False, False, False, True], u)
+    chk("панель сама: «для всех» — все; «через VPN» — только свой VPN", u.get("all") is True
+        and u.get("vpn") == [True, False], u)
+    chk("панель сама: чужой адрес — 404 до входа и API, свой — дальше", u.get("mw", [])[:2] == [404, 200], u)
+    chk("панель сама: с адреса сервера на него же (через прокси на этом же сервере) — пускает",
+        u.get("mw", [])[2:] == [200, 200, 200], u)
     print("Смена пароля и сессии")
     c2 = Client()
     c2.login()

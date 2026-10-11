@@ -335,6 +335,33 @@ const say = (ok, label) => console.log(`${ok ? "OK" : "FAIL"} ${label}`);
       await page.waitForSelector("text=Последние события");
       await page.screenshot({ path: `${out}/${name}-аккаунт.png`, fullPage: true });
     });
+    await step("аккаунт: доступ по адресам — сохранить, неверный адрес, обратно «для всех»", async () => {
+      await page.waitForSelector(".acc-access .seg button.on:has-text('Для всех')");
+      await page.click(".acc-access .seg button:has-text('По адресам')");
+      await page.waitForSelector(".acc-access textarea");
+      // Стенд — тот же компьютер: «с самого сервера», свой адрес добавлять незачем
+      await page.waitForSelector(".acc-access >> text=с самого сервера");
+      if (await page.$(".acc-access button:has-text('Мой адрес')")) throw new Error("кнопка «Мой адрес» для 127.0.0.1");
+      await page.fill(".acc-access textarea", "198.51.100.7, 203.0.113.0/24");
+      await page.click(".acc-access button:has-text('Сохранить доступ')");
+      // Экран перерисован с сервера: список — в виде, в каком его сохранил awg2
+      await page.waitForFunction(() => {
+        const t = document.querySelector(".acc-access textarea");
+        return t && t.value === "198.51.100.7/32, 203.0.113.0/24";
+      }).catch(async () => { throw new Error("после сохранения: " + await page.inputValue(".acc-access textarea")); });
+      await page.waitForSelector(".acc-access .seg button.on:has-text('По адресам')");
+      await page.waitForSelector(".acc-access >> text=Изнутри VPN");
+      await page.screenshot({ path: `${out}/${name}-аккаунт-доступ.png`, fullPage: true });
+      await page.fill(".acc-access textarea", "300.1.1.1");
+      await page.click(".acc-access button:has-text('Сохранить доступ')");
+      await page.waitForSelector(".sheet >> text=300.1.1.1");
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(() => !document.querySelector(".sheet-bg"));
+      await page.click(".acc-access .seg button:has-text('Для всех')");
+      await page.click(".acc-access button:has-text('Сохранить доступ')");
+      await page.waitForFunction(() => !document.querySelector(".acc-access textarea"));
+      await page.waitForSelector("text=доступ изменён");
+    });
     await step("выход — снова экран входа, API закрыт", async () => {
       await page.click("#app button:has-text('Выйти')");
       await page.waitForSelector("form.login");

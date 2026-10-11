@@ -16,7 +16,11 @@
 - запросы с чужих сайтов (CSRF) отклоняются по Origin; заголовки CSP,
   X-Frame-Options, Referrer-Policy;
 - входы и блокировки — в журнал /var/log/awg-web.log, а если настроен
-  Telegram-бот — сообщением владельцам.
+  Telegram-бот — сообщением владельцам;
+- доступ можно сузить (awg2 → Веб-панель → Доступ): только с указанных
+  адресов или только через свой VPN. Порт закрывает правило файрвола awg2, а
+  панель ещё и сама проверяет адрес по тому же списку — чужим 404, даже если
+  правило кто-то снял; раз в 5 минут она возвращает правило на место.
 
 Всё остальное — то же API панели (panel.py), что у Mini App: awg2 api.
 """
@@ -53,6 +57,9 @@ SELF_DIR = Path(os.environ.get("AWG_WEB_DIR", "/etc/awg-web"))
 CERT_FULL = Path(os.environ.get("AWG_CERT_FULL", "/etc/awg2/cert/fullchain.pem"))
 CERT_KEY = Path(os.environ.get("AWG_CERT_KEY", "/etc/awg2/cert/key.pem"))
 STATIC = Path(__file__).with_name("webapp")
+NETS_FILE = Path(os.environ.get("AWG_WEB_NETS", "/etc/awg-web/access.nets"))
+FW_SCRIPT = os.environ.get("AWG_WEB_FW", "")
+FW_EVERY = 300                  # проверка правила доступа в файрволе
 COOKIE = "awg_web"
 IDLE = 12 * 3600                # без действий — вход заново
 LIFETIME = 7 * 24 * 3600        # и не дольше недели
@@ -220,6 +227,80 @@ class Sessions:
         return len(gone)
 
 
+# ── Доступ по адресам ─────────────────────────────────────
+def client_ip(raw: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        a = ipaddress.ip_address((raw or "").split("%")[0])
+    except ValueError:
+        return None
+    return a.ipv4_mapped if a.version == 6 and a.ipv4_mapped else a
+
+
+def local_ip(request: web.Request) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Адрес сервера, на который пришло подключение."""
+    sock = request.transport.get_extra_info("sockname") if request.transport else None
+    return client_ip(sock[0]) if isinstance(sock, (tuple, list)) and sock else None
+
+
+def from_self(request: web.Request) -> bool:
+    """Подключение с самого сервера: 127.0.0.1 или с его адреса на него же — так
+    приходят через прокси на этом же сервере (VLESS и т.п.: панель открывает
+    сам прокси). Снаружи такой источник не подделать: ядро отбрасывает пакеты
+    с адресом сервера в источнике, пришедшие не через lo."""
+    a = client_ip(request.remote)
+    return a is not None and (a.is_loopback or a == local_ip(request))
+
+
+class Access:
+    """Кому можно открыть панель. Режим (WEB_ACCESS: all | ip | vpn) — из
+    конфига, подсети — из файла, который пишет правило файрвола awg2 (тот же
+    список: адреса из WEB_ALLOW и свой VPN). Режим ограничен, а файла нет —
+    не пускаем никого, кроме самого сервера: вернуть «для всех» — из SSH
+    (awg2 → Веб-панель → Доступ) или Telegram-бота."""
+
+    def __init__(self) -> None:
+        self.key: tuple = ()
+        self.mode = "all"
+        self.nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+
+    def refresh(self) -> None:
+        # Время, размер и inode: два изменения в один тик часов не сливаются
+        try:
+            st = CONF.stat()
+            ck: tuple = (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            ck = ()
+        try:
+            st = NETS_FILE.stat()
+            nk: tuple = (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            nk = ()
+        if (ck, nk) == self.key:
+            return
+        mode = read_conf().get("WEB_ACCESS", "all")
+        nets = []
+        if mode in ("ip", "vpn") and nk:
+            try:
+                for line in NETS_FILE.read_text(encoding="utf-8").splitlines():
+                    try:
+                        nets.append(ipaddress.ip_network(line.strip(), strict=False))
+                    except ValueError:
+                        continue
+            except OSError:
+                pass
+        self.key, self.mode, self.nets = (ck, nk), mode if mode in ("ip", "vpn") else "all", nets
+
+    def allowed(self, raw: str | None, local: bool = False) -> bool:
+        """local — подключение с самого сервера (from_self): пускаем всегда."""
+        self.refresh()
+        if self.mode == "all" or local:
+            return True
+        a = client_ip(raw)
+        if a is None:
+            return False
+        return a.is_loopback or any(a.version == n.version and a in n for n in self.nets)
+
+
 # ── Журнал и уведомления ──────────────────────────────────
 def journal(event: str, ip: str, extra: str = "") -> None:
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {event} {ip} {extra}".rstrip()
@@ -313,6 +394,8 @@ class WebPanel:
         # разом, иначе поток неверных паролей съедает память и пул потоков
         self.scrypt_slots = asyncio.Semaphore(SCRYPT_PARALLEL)
         self.csrf_logged = 0.0
+        self.deny_logged = 0.0
+        self.access = Access()
         self.notify = Notifier()
         self.ctx: ssl.SSLContext | None = None
         self.cert_kind = ""
@@ -329,6 +412,13 @@ class WebPanel:
     # ── безопасность каждого ответа и запроса ──
     @web.middleware
     async def guard_mw(self, request: web.Request, handler):  # type: ignore[no-untyped-def]
+        # Адрес не из разрешённых — как незнакомый путь: 404, страница входа не видна
+        if not self.access.allowed(request.remote, from_self(request)):
+            now = time.monotonic()
+            if now - self.deny_logged >= 10:
+                self.deny_logged = now
+                journal("DENY", request.remote or "?", "не из разрешённых адресов")
+            raise web.HTTPNotFound()
         if request.method == "POST" and not same_origin(request):
             # Без входа и с любым Origin — поэтому не чаще раза в 10 с и коротко:
             # иначе поток таких запросов забивает журнал и диск
@@ -436,9 +526,49 @@ class WebPanel:
         sessions = [{"ip": s["ip"], "ua": s["ua"], "created": int(s["created"]), "seen": int(s["seen"]),
                      "me": k == Sessions._key(request.cookies.get(COOKIE, ""))}
                     for k, s in sorted(self.sessions.items.items(), key=lambda kv: -kv[1]["seen"])]
+        st = await api.data("web", "status", default={}) or {}
+        me = client_ip(request.remote)
+        vpn = []
+        for n in st.get("vpn_nets") or []:
+            try:
+                vpn.append(ipaddress.ip_network(n, strict=False))
+            except ValueError:
+                continue
         return web.json_response({"ok": True, "user": u["first_name"], "base": self.base,
                                   "port": self.conf.get("WEB_PORT", ""), "cert": self.cert_kind,
-                                  "sessions": sessions, "log": tail[::-1]})
+                                  "sessions": sessions, "log": tail[::-1],
+                                  "access": {"mode": st.get("access") or "all", "allow": st.get("allow") or [],
+                                             "vpn_url": st.get("vpn_url") or "", "me": str(me) if me else "",
+                                             "me_vpn": bool(me and any(me.version == n.version and me in n
+                                                                       for n in vpn)),
+                                             "me_self": from_self(request)}})
+
+    async def set_access(self, request: web.Request) -> web.Response:
+        """Доступ: all | ip (список) | vpn. Тот же awg2 api web access, но с
+        адресом этого запроса: режим, который отрезал бы его, awg2 не поставит."""
+        self.user_of(request)
+        try:
+            body = await request.json()
+            mode = str(body.get("mode") or "")
+            raw = body.get("allow") or []
+            if not isinstance(raw, list):
+                raise TypeError
+            allow = [str(a)[:64] for a in raw][:64]
+        except (ValueError, AttributeError, TypeError):
+            raise web.HTTPBadRequest(text='{"error": "нужен JSON"}', content_type="application/json") from None
+        if mode not in ("all", "ip", "vpn"):
+            return web.json_response({"error": "Доступ: all | ip | vpn"}, status=400)
+        # С самого сервера панель открывается при любом режиме — проверять нечего
+        me = None if from_self(request) else client_ip(request.remote)
+        r = await api.call("web", "access", mode, *(allow if mode == "ip" else []),
+                           env={"AWG_CLIENT_IP": str(me) if me else ""})
+        if not r.ok:
+            return web.json_response({"error": r.message, "log": r.log}, status=400)
+        journal("ACCESS", request.remote or "?", mode + (" " + ",".join(allow) if mode == "ip" else ""))
+        self.notify.send(f"🛡 Веб-панель: доступ — {html.escape({'all': 'для всех', 'ip': 'по адресам и через VPN', 'vpn': 'только через VPN'}[mode])}"
+                         f" (адрес <code>{html.escape(request.remote or '?')}</code>)")
+        self.access.key = ()
+        return web.json_response({"ok": True, "log": r.log})
 
     async def password(self, request: web.Request) -> web.Response:
         u = self.user_of(request)
@@ -489,6 +619,7 @@ class WebPanel:
         sub.router.add_post("/api/web/account", self.account)
         sub.router.add_post("/api/web/password", self.password)
         sub.router.add_post("/api/web/sessions/drop", self.drop_sessions)
+        sub.router.add_post("/api/web/access", self.set_access)
         panel.setup(sub, self.user_of)
 
         # Адрес без «/» в конце — на панель (знающему путь; остальным — 404).
@@ -506,6 +637,23 @@ class WebPanel:
         ctx.load_cert_chain(crt, key)
         self.ctx, self.cert_kind, self._mtime = ctx, kind, crt.stat().st_mtime
         return ctx
+
+    async def watch_fw(self) -> None:
+        """Правило доступа в файрволе на месте и список свежий (сменилась подсеть
+        VPN) — иначе awg2 ставит заново. Сама проверка адреса в панели — всегда."""
+        if not FW_SCRIPT or not os.path.isfile(FW_SCRIPT):
+            return
+        while True:
+            await asyncio.sleep(FW_EVERY)
+            try:
+                ok = await asyncio.to_thread(subprocess.run, [FW_SCRIPT, "check"], capture_output=True, timeout=60)
+                if ok.returncode:
+                    r = await asyncio.to_thread(subprocess.run, [FW_SCRIPT, "apply"], capture_output=True,
+                                                text=True, timeout=120)
+                    log.info("Правило доступа обновлено (rc=%s) %s", r.returncode, (r.stderr or "").strip()[:200])
+                    self.access.key = ()
+            except (OSError, subprocess.SubprocessError) as e:
+                log.warning("Правило доступа не проверено: %s", e)
 
     async def watch_cert(self) -> None:
         """Продлили сертификат или появился настоящий вместо самоподписанного —
@@ -545,10 +693,12 @@ async def main() -> None:
     await web.TCPSite(runner, conf.get("WEB_LISTEN") or "0.0.0.0", port, ssl_context=srv.tls()).start()
     log.info("Веб-панель: порт %s, путь %s, сертификат %s", port, srv.base, srv.cert_kind)
     watch = asyncio.create_task(srv.watch_cert())
+    fw = asyncio.create_task(srv.watch_fw())
     try:
         await asyncio.Event().wait()
     finally:
         watch.cancel()
+        fw.cancel()
         await runner.cleanup()
 
 

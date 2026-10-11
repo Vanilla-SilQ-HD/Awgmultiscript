@@ -4269,7 +4269,45 @@ async function webStart() {
 }
 
 const WEB_EVENTS = { LOGIN: ["вход", "ok"], FAIL: ["неверный пароль", "bad"], LOCK: ["блокировка", "bad"],
-  PASSWD: ["пароль сменён", "warn"], SESSIONS: ["сессии завершены", "warn"], CSRF: ["чужой сайт", "bad"] };
+  PASSWD: ["пароль сменён", "warn"], SESSIONS: ["сессии завершены", "warn"], CSRF: ["чужой сайт", "bad"],
+  ACCESS: ["доступ изменён", "warn"], DENY: ["чужой адрес", "bad"] };
+// Доступ к панели: для всех, по адресам (и через свой VPN) или только через VPN.
+// Режим, который закрыл бы панель от этого же адреса, awg2 не поставит
+function accessSection(a) {
+  a = a || {};
+  const st = { mode: a.mode || "all" };
+  const list = h("textarea", { class: "mono", placeholder: "1.2.3.4, 5.6.7.0/24, 2001:db8::/32", autocapitalize: "off",
+    spellcheck: "false", style: "min-height:72px" }, (a.allow || []).join(", "));
+  const items = () => list.value.split(/[\s,;]+/).filter(Boolean);
+  const body = h("div", { class: "acc-access" });
+  const draw = () => {
+    const parts = [segText([["all", "Для всех"], ["ip", "По адресам"], ["vpn", "Только через VPN"]], st.mode,
+      (k) => { st.mode = k; draw(); })];
+    if (st.mode === "ip") {
+      parts.push(list);
+      if (a.me && !a.me_vpn && !a.me_self && items().indexOf(a.me) < 0) {
+        parts.push(btn(`＋ Мой адрес ${a.me}`, () => { list.value = items().concat(a.me).join(", "); draw(); }, "btn-block"));
+      }
+    }
+    if (st.mode !== "all") {
+      parts.push(h("div", { class: "muted small", style: "margin:8px 2px" }, a.me_vpn ? "Ты сейчас зашёл через VPN."
+        : a.me_self ? "Ты зашёл с самого сервера или через прокси на нём: так панель открывается всегда."
+        : `Ты зашёл не через VPN (${a.me || "?"})` + (st.mode === "vpn"
+          ? " — так не сохранить: панель закрылась бы для тебя. Подключись к VPN и открой адрес ниже." : ".")));
+      if (a.vpn_url) parts.push(kv("Изнутри VPN", h("span", { class: "mono" }, a.vpn_url)));
+    }
+    parts.push(btn("💾 Сохранить доступ", (b) => busy(b, async () => {
+      await post("/api/web/access", { mode: st.mode, allow: st.mode === "ip" ? items() : [] });
+      haptic(); toast("✅ Доступ сохранён", 3000); render();
+    }), "btn-primary btn-block"));
+    body.replaceChildren(...parts);
+  };
+  draw();
+  return [h("h2", {}, "Доступ к панели"), h("div", { class: "card" }, body),
+    hint("«По адресам» — только с них и через свой VPN (AWG, WG + обфускатор): сменился адрес дома — зайди через VPN. "
+      + "«Только через VPN» — снаружи порт закрыт для всех; изнутри VPN браузер предупредит о сертификате (он на внешний адрес). "
+      + "Закрылась от тебя — SSH: sudo awg2 → Веб-панель → Доступ, или Telegram-бот → Веб-панель → Доступ.")];
+}
 route(/^\/account$/, async (ctx) => {
   if (!WEB) return ctx.put(title("Аккаунт"), h("div", { class: "card empty" }, "Есть только в веб-панели"));
   const d = await post("/api/web/account");
@@ -4282,6 +4320,7 @@ route(/^\/account$/, async (ctx) => {
       kv("Сертификат", d.cert === "self" ? h("span", { class: "warn" }, "самоподписанный") : "Тулзы (Let's Encrypt или готовый)")),
     d.cert === "self" ? hint("Браузер предупреждает о самоподписанном сертификате — соединение всё равно шифруется. "
       + "Настоящий: sudo awg2 → Веб-панель → Сертификат (на IP — Let's Encrypt, нужен свободный порт 80).") : null,
+    accessSection(d.access),
     h("h2", {}, "Сменить пароль"),
     h("div", { class: "card" }, old, nw, nw2,
       enterTo(btn("🔑 Сменить пароль", (b) => busy(b, async () => {

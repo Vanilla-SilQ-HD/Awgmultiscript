@@ -29,8 +29,15 @@ if os.environ.get("WEB_BOT"):
     open(unit, "w").close()
 os.environ.update(AWG_WEB_CONF=os.path.join(WEB, "awg-web.conf"), AWG_WEB_LOG=os.path.join(WEB, "awg-web.log"),
                   AWG_WEB_DIR=os.path.join(WEB, "self"), AWG_BOT_UNIT=unit,
+                  AWG_WEB_NETS=os.path.join(WEB, "access.nets"),     # список «кому можно» — пишет awg2, читает панель
                   AWG_BOT_CONF=os.path.join(WEB, "no-bot.conf"),       # без бота — без уведомлений в Telegram
                   AWG_CERT_FULL=os.path.join(WEB, "none.pem"), AWG_CERT_KEY=os.path.join(WEB, "none.key"))
+
+# awg2 песочницы видит панель установленной (доступ по адресам — web access)
+with open(API) as f:
+    wrapper = f.read()
+with open(API, "w") as f:
+    f.write(wrapper.replace('[[ "${1:-}" == api ]]', 'web_installed() { true; }; web_restart() { :; }\n[[ "${1:-}" == api ]]', 1))
 
 from awgbot import store, web  # noqa: E402
 
