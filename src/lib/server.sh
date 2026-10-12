@@ -125,7 +125,8 @@ do_install() {
   why=$(reboot_reason)
   if [[ -n "$why" && "$why" != *modprobe* ]]; then
     echo ""
-    warn "Нужна перезагрузка: $why"
+    # «новое ядро … — нужна перезагрузка» уже говорит само за себя
+    if [[ "$why" == *"нужна перезагрузка"* ]]; then warn "$why"; else warn "Нужна перезагрузка: $why"; fi
     if [[ "$why" == *"перезагрузка модуля"* ]]; then
       mod_reload || true
     elif (( ! AUTO_MODE )) && ask_yes "  Перезагрузить сервер сейчас? [Y/n]: " y; then
@@ -336,6 +337,7 @@ server_start_new() {
   fi
   setup_autostart
   expire_install
+  web_vpn_changed
   log_info "сервер создан: AWG $S_PROTO, профиль $S_PROFILE, порт $S_PORT"
 }
 
@@ -1043,6 +1045,7 @@ server_reset() {
   # Снимок счётчиков — метка жизни таймера: старый после сброса заставил бы
   # сторож «чинить» таймер посреди создания нового сервера
   rm -f "$EXPIRE_STATE_DIR/transfer"
+  web_vpn_changed
   ok "Сервер сброшен. Создать новый: Сервер → Создать сервер"
   log_info "сервер сброшен"
 }

@@ -527,6 +527,7 @@ class WebPanel:
                      "me": k == Sessions._key(request.cookies.get(COOKIE, ""))}
                     for k, s in sorted(self.sessions.items.items(), key=lambda kv: -kv[1]["seen"])]
         st = await api.data("web", "status", default={}) or {}
+        self.access.refresh()   # awg2 не ответил — режим из конфига, а не «для всех»
         me = client_ip(request.remote)
         vpn = []
         for n in st.get("vpn_nets") or []:
@@ -537,7 +538,7 @@ class WebPanel:
         return web.json_response({"ok": True, "user": u["first_name"], "base": self.base,
                                   "port": self.conf.get("WEB_PORT", ""), "cert": self.cert_kind,
                                   "sessions": sessions, "log": tail[::-1],
-                                  "access": {"mode": st.get("access") or "all", "allow": st.get("allow") or [],
+                                  "access": {"mode": st.get("access") or self.access.mode, "allow": st.get("allow") or [],
                                              "vpn_url": st.get("vpn_url") or "", "me": str(me) if me else "",
                                              "me_vpn": bool(me and any(me.version == n.version and me in n
                                                                        for n in vpn)),
@@ -649,10 +650,10 @@ class WebPanel:
                 ok = await asyncio.to_thread(subprocess.run, [FW_SCRIPT, "check"], capture_output=True, timeout=60)
                 if ok.returncode:
                     r = await asyncio.to_thread(subprocess.run, [FW_SCRIPT, "apply"], capture_output=True,
-                                                text=True, timeout=120)
+                                                text=True, errors="replace", timeout=120)
                     log.info("Правило доступа обновлено (rc=%s) %s", r.returncode, (r.stderr or "").strip()[:200])
                     self.access.key = ()
-            except (OSError, subprocess.SubprocessError) as e:
+            except Exception as e:      # noqa: BLE001 — любой сбой не должен молча останавливать возврат правила
                 log.warning("Правило доступа не проверено: %s", e)
 
     async def watch_cert(self) -> None:

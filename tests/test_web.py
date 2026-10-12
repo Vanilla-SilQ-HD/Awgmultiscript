@@ -270,6 +270,28 @@ print(json.dumps(out))
     chk("панель сама: чужой адрес — 404 до входа и API, свой — дальше", u.get("mw", [])[:2] == [404, 200], u)
     chk("панель сама: с адреса сервера на него же (через прокси на этом же сервере) — пускает",
         u.get("mw", [])[2:] == [200, 200, 200], u)
+    # Возврат правила: любой сбой одного круга (здесь — не-UTF-8 в stderr apply) не останавливает задачу
+    fw = os.path.join(ud, "fw.sh")
+    open(fw, "w").write("#!/bin/bash\necho \"$1\" >> \"$(dirname \"$0\")/fw.calls\"\n"
+                        "[[ $1 == check ]] && exit 1\nprintf 'bad \\xff\\xfe\\n' >&2\nexit 1\n")
+    os.chmod(fw, 0o755)
+    try:
+        os.remove(os.path.join(ud, "fw.calls"))
+    except OSError:
+        pass
+    code2 = ("import asyncio, sys\nsys.path.insert(0, sys.argv[1])\nfrom awgbot import web\n"
+             "web.FW_SCRIPT, web.FW_EVERY = sys.argv[2], 0.2\n"
+             "async def go():\n    srv = web.WebPanel()\n    t = asyncio.create_task(srv.watch_fw())\n"
+             "    await asyncio.sleep(2)\n    t.cancel()\n    print('alive' if not t.done() or t.cancelled() else 'dead')\n"
+             "asyncio.run(go())\n")
+    r = subprocess.run([sys.executable, "-c", code2, os.path.join(HERE, "..", "awg_bot"), fw],
+                       env=uenv, capture_output=True, text=True, timeout=60)
+    try:
+        calls = open(os.path.join(ud, "fw.calls")).read().split()
+    except OSError:
+        calls = []
+    chk("правило доступа: фоновая задача переживает сбой круга и проверяет дальше",
+        r.stdout.strip().endswith("alive") and calls.count("apply") >= 2, [r.stdout[-200:], r.stderr[-300:], calls])
     print("Смена пароля и сессии")
     c2 = Client()
     c2.login()

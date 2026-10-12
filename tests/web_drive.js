@@ -362,9 +362,30 @@ const say = (ok, label) => console.log(`${ok ? "OK" : "FAIL"} ${label}`);
       await page.waitForFunction(() => !document.querySelector(".acc-access textarea"));
       await page.waitForSelector("text=доступ изменён");
     });
-    await step("выход — снова экран входа, API закрыт", async () => {
+    await step("аккаунт: длинный адрес IPv6 на 320 px — без горизонтальной прокрутки", async () => {
+      const vp = page.viewportSize();
+      await page.setViewportSize({ width: 320, height: vp.height });
+      await page.route(/\/api\/web\/account$/, async (r) => {
+        const rr = await r.fetch(), j = await rr.json();
+        j.access = Object.assign({}, j.access, { mode: "ip", me: "2001:0db8:85a3:0000:0000:8a2e:0370:7334", me_vpn: false, me_self: false });
+        r.fulfill({ response: rr, body: JSON.stringify(j) });
+      });
+      try {
+        await page.goto(u + "#/account");
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.waitForSelector(".acc-access button:has-text('Мой адрес')");
+        const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+        if (over > 0) throw new Error("страница шире экрана на " + over + " px");
+      } finally { await page.unroute(/\/api\/web\/account$/); await page.setViewportSize(vp); }
+    });
+    await step("выход — снова экран входа, API закрыт; во вкладке снова знак Тулзы, не флаг сервера", async () => {
+      const flagNow = () => page.evaluate(() => /viewBox="0 0 30 20"/.test(decodeURIComponent(document.getElementById("favicon").getAttribute("href") || "")));
+      await page.evaluate(() => { LOOK.tab = "flag"; applyLook(true); });
+      await page.waitForFunction(() => S.status && S.status.country);
+      if (!await flagNow()) throw new Error("перед выходом флаг не показан");
       await page.click("#app button:has-text('Выйти')");
       await page.waitForSelector("form.login");
+      if (await flagNow()) throw new Error("на экране входа во вкладке флаг страны сервера");
       await page.goto(u + "#/clients");
       await page.waitForSelector("form.login");
     });

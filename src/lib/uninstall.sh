@@ -151,10 +151,11 @@ uninstall_all() {
   rm -rf "$AWG_DIR"
   rm -f "$CLIENT_DIR"/*_awg[23].conf "$MOD_TAG_FILE" "$TOOLS_TAG_FILE" "$UPSTREAM_CACHE" "$MOD_LOG"
   ufw_delete_matching AmneziaWG
+  # Панель — раньше обфускатора: удаление VPN поправило бы её доступ зря
+  if [[ "$del_web" == y ]] && web_installed; then web_remove quiet; fi
   if [[ "$del_wgobf" == y ]]; then wgobf_remove quiet
   elif wgobf_installed; then info "WG + обфускатор оставлен и продолжит работать сам"; fi
-  if [[ "$del_web" == y ]] && web_installed; then web_remove quiet
-  elif web_installed; then info "Веб-панель оставлена — сервера AWG в ней больше нет"; fi
+  if web_installed; then info "Веб-панель оставлена — сервера AWG в ней больше нет"; web_vpn_changed; fi
   # Антисканер работает через свой скрипт и без awg2, но управлять им без
   # awg2 нечем — уходит вместе со скриптом, иначе остаётся защищать сервер
   if [[ "$del_self" == y ]]; then antiscan_remove

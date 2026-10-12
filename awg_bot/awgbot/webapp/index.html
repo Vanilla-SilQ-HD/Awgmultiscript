@@ -56,6 +56,7 @@
   .small { font-size: 12.5px; }
   a { color: var(--acc); }
   .ok { color: var(--ok); } .bad { color: var(--red); } .warn { color: var(--amber); }
+  .card > .bad { overflow-wrap: anywhere; }       /* текст ошибки awg2 без пробелов не раздвигает экран */
   .grow { flex: 1; }
 
   /* ── Каркас: лента слева (ПК), шапка, рабочее поле, нижняя панель (телефон, Mini App) ── */
@@ -301,6 +302,8 @@
   .btn-danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, var(--line2)); }
   .btn-danger:hover { background: var(--red-soft); }
   .btn-block { width: 100%; margin-top: 8px; }
+  /* Адрес IPv6 — одно «слово» на 39 знаков: в кнопке и подсказке «Доступа к панели» переносится где придётся */
+  .acc-access button, .acc-access .small { overflow-wrap: anywhere; }
   .confbtns { margin-top: 8px; }
   .pair { display: grid; grid-template-columns: 1fr 1.25fr; gap: 8px; margin-bottom: 12px; }
   .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }

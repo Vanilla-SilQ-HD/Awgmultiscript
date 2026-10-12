@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-ffffff?style=flat-square&labelColor=000000)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Ubuntu%2024%20%2F%20Debian%2012%2B-E95420?style=flat-square&logo=ubuntu&logoColor=white)](https://ubuntu.com/)
 [![Protocol](https://img.shields.io/badge/AWG-2.0%20%2F%203.1-00d4ff?style=flat-square)](#)
-[![Version](https://img.shields.io/badge/version-v1.2.34-ff6b00?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v1.2.35-ff6b00?style=flat-square)](#)
 
 <br>
 
@@ -450,7 +450,8 @@ Telegram. Бот для неё не нужен.
 - **Доступ** — `w) Веб-панель` → `a) Доступ`, в боте 🛡 **Доступ**, в самой
   панели «Аккаунт» → «Доступ к панели»:
   - *для всех* — как раньше;
-  - *по адресам* — только с указанных адресов и подсетей (IPv4 и IPv6) и
+  - *по адресам* — только с указанных адресов и подсетей (IPv4; IPv6 — если
+    панель слушает IPv6, `WEB_LISTEN`) и
     через свой VPN (AWG, WG + обфускатор): сменился адрес дома — зайди через VPN;
   - *только через VPN* — снаружи порт закрыт для всех, панель открывается по
     адресу сервера внутри VPN (`https://10.x.x.1:порт/путь/`; браузер
@@ -539,6 +540,6 @@ python3 tests/test_admins.py && python3 tests/test_net.py
 
 *Сообщество [AWG-Toolza](https://t.me/awgToolza)*
 
-**AWG Toolza v1.2.34** · MIT License
+**AWG Toolza v1.2.35** · MIT License
 
 </div>

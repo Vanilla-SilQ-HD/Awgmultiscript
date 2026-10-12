@@ -312,6 +312,7 @@ backup_restore() {
   port=$(server_port)
   [[ -n "$port" ]] && ufw_allow "$port/udp" AmneziaWG
   expire_install
+  web_vpn_changed
   if awg_up_diag; then ok "awg0 поднят"; else err "awg0 не поднялся — конфиг: $SERVER_CONF"; return 1; fi
   success_box "Восстановлено из $label"
   log_info "восстановление из $label"

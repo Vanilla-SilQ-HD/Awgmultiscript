@@ -168,7 +168,7 @@ async def _acc_old(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
 @act("acc_ip")
 async def _acc_ip(cb: CallbackQuery, state: FSMContext, arg: str) -> None:
     await ask.ask(cb, state, "web_allow", "Адреса и подсети, с которых открывать панель, — через запятую или "
-                                          "пробел: <code>1.2.3.4, 5.6.7.0/24</code> (IPv6 тоже можно). Список "
+                                          "пробел: <code>1.2.3.4, 5.6.7.0/24</code> (по умолчанию панель слушает только IPv4). Список "
                                           "заменит прежний; свой VPN пускается всегда.", act.data("acc"))
 
 

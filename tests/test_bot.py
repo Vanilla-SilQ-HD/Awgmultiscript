@@ -1291,6 +1291,10 @@ async def run():
         and webapp.check_init_data(init_data(111), "1:other") is None
         and webapp.check_init_data(init_data(111, auth=time.time() - 3 * 86400), token) is None
         and webapp.check_init_data("", token) is None)
+    chk("подпись initData: hash не из ASCII — отказ, а не исключение (500 в журнале бота)",
+        webapp.check_init_data(init_data(111).split("&hash=")[0] + "&hash=%D0%BF%D1%80", token) is None
+        and webapp.check_init_data(init_data(111).split("&hash=")[0] + "&hash=\udcff", token) is None
+        and webapp.check_init_data("user=\udcff&auth_date=1&hash=ab", token) is None)
 
     base = f"https://127.0.0.1:{ports[0]}"
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as http:
@@ -1337,6 +1341,12 @@ async def run():
             chk("кроме страницы, скрипта и иконок — ничего", r.status == 404, r.status)
         st, body = await api_("/api/call", {"args": ["status"]})
         chk("панель: общий вызов awg2 api", st == 200 and body["ok"] and body["data"].get("version"), [st, str(body)[:200]])
+        # Неверные типы в теле — отказ или игнор, а не 500 с трейсом
+        st1, _ = await api_("/api/alerts", {"backup_mode": ["x"]})
+        st2, _ = await api_("/api/alerts", {"kind": ["x"], "on": True})
+        st3, _ = await api_("/api/settings", {"sort": ["x"]})
+        st4, _ = await api_("/api/job/status", {"id": "20250101-000000-abcd", "offset": "²"})
+        chk("панель: списки и «²» вместо строк/чисел — не 500", (st1, st2, st3, st4) == (400, 200, 200, 200), [st1, st2, st3, st4])
         st, body = await api_("/api/call", {"args": ["job", "list"]})
         chk("панель: команды вне белого списка — 403", st == 403, [st, body])
         st, body = await api_("/api/call", {"args": "status"})
@@ -1478,6 +1488,20 @@ async def run():
     text, _ = screen(await press(f"app:pset:{ports[1]}"))
     chk("смена порта перезапускает сервер", webapp.SERVER.running and webapp.SERVER.url.endswith(f":{ports[1]}/")
         and f"Порт Mini App: {ports[1]}" in text, [text[:200], webapp.SERVER.url])
+
+    # Два перезапуска сервера разом (двойной тап «Перезапустить», порт + сертификат): оба
+    # сносили сервер и поднимали свой — второй не мог занять порт, а первый слушал
+    # без хозяина, и stop() его уже не закрывал
+    res = await asyncio.gather(webapp.SERVER.start(BOT), webapp.SERVER.start(BOT), return_exceptions=True)
+    chk("два перезапуска Mini App разом: оба прошли, сервер работает",
+        all(r is None for r in res) and webapp.SERVER.running and not webapp.SERVER.error, [res, webapp.SERVER.error])
+    port = int(webapp.SERVER.url.rsplit(":", 1)[1].strip("/"))
+    await webapp.SERVER.stop()
+    with socket.socket() as s:
+        s.settimeout(2)
+        listening = s.connect_ex(("127.0.0.1", port)) == 0
+    chk("после stop() порт Mini App закрыт (нет бесхозного слушателя)", not listening)
+    await webapp.SERVER.start(BOT)
 
     WEBAPP_REJECT[0] = True
     text, buttons = screen(await press("app"))
@@ -1643,7 +1667,8 @@ async def run():
         "Сейчас: <b>для всех</b>" in text and "https://10.8.0.1:41234/AbCdEfGh123456/" in text
         and ("✅ 🌍 Для всех", "web:acc_all") in buttons and ("📍 По адресам", "web:acc_ip") in buttons
         and ("🔒 Только через VPN", "web:acc_vpn") in buttons, [text, buttons])
-    await press("web:acc_ip")
+    text, buttons = screen(await press("web:acc_ip"))
+    chk("вопрос про адреса: не обещает IPv6 — панель слушает IPv4", "IPv6 тоже" not in text and "IPv4" in text, text)
     text, buttons = screen(await say("300.1.1.1, 198.51.100.7"))
     chk("неверный адрес — ошибка awg2 и тот же вопрос снова", "300.1.1.1" in text and "⚠️" in text
         and ("✖️ Отмена", "web:acc") in buttons and WEBST["access"] == "all", [text, buttons])

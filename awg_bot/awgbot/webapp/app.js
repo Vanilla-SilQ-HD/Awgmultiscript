@@ -419,7 +419,8 @@ function tzRefresh() {
 function favRefresh() {
   const fav = document.getElementById("favicon");
   if (!fav) return;
-  const st = S.status || {}, cc = String(st.country || "").replace(/[^A-Z]/g, "").slice(0, 2);
+  // Без входа (экран входа, сессия кончилась) сведений о сервере нет — и флага страны тоже
+  const st = (S.me && S.status) || {}, cc = String(st.country || "").replace(/[^A-Z]/g, "").slice(0, 2);
   const set = (href) => { if (fav.getAttribute("href") !== href) fav.href = href; };
   if (!WEB || LOOK.tab !== "flag" || !cc) { set(tzIcon()); return; }
   const dot = { "": "#22c55e", bad: "#ef4444", off: "#9ca3af" }[srvPulse(st)];
@@ -429,7 +430,7 @@ function favRefresh() {
   set("data:image/svg+xml;charset=utf-8," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
     <defs><clipPath id="c"><rect y="5" width="32" height="22" rx="4"/></clipPath></defs><g clip-path="url(#c)">${body}</g>
     <rect x=".5" y="5.5" width="31" height="21" rx="3.5" fill="none" stroke="rgba(0,0,0,.25)"/>
-    <circle cx="26" cy="25" r="5.5" fill="${dot}" stroke="#fff" stroke-width="2"/></svg>`));
+    <circle cx="25.5" cy="25" r="5.5" fill="${dot}" stroke="#fff" stroke-width="2"/></svg>`));
 }
 
 function applyLook(save = false) {
@@ -1791,9 +1792,14 @@ h("div", { class: "t" }, e.t, e.x ? h("span", { class: "x" }, e.x) : null));
 // «Нужна перезагрузка» можно убрать крестиком — на этом устройстве и до нового
 // повода: текст другой (новое ядро — другой номер), и замечание вернётся.
 // Серьёзное (awg0 лежит, ядро без модуля) не убирается
-const hiddenAlerts = () => { try { return JSON.parse(pref("hidden-alerts", "[]")) || []; } catch (_) { return []; } };
+const hiddenAlerts = () => { try { const a = JSON.parse(pref("hidden-alerts", "[]")); return Array.isArray(a) ? a : []; } catch (_) { return []; } };
 const alertHidden = (t) => hiddenAlerts().indexOf(t) >= 0;
 const hideAlert = (t) => setPref("hidden-alerts", JSON.stringify(hiddenAlerts().filter((x) => x !== t).concat([t]).slice(-10)));
+// Повод сменился или пропал (перезагрузились) — «убрано» по нему забывается: тексты
+// «обновлены пакеты» и «в памяти прежняя сборка модуля» не меняются, и без этого
+// следующий такой повод остался бы скрытым навсегда. known — сводка получена
+const forgetAlerts = (known, reason) => { const was = hiddenAlerts(), keep = was.filter((x) => x === reason);
+  if (known && keep.length !== was.length) setPref("hidden-alerts", JSON.stringify(keep)); };
 // Карточка замечаний: [текст, куда ведёт, можно убрать]
 const alertCard = (alerts) => (alerts.length ? h("div", { class: "card warn", "data-name": "alerts" }, alerts.map(([a, path, can]) =>
   h("div", { class: "row", style: "cursor:pointer;padding:3px 0", onclick: () => go(path) }, icon("triangle-alert"), h("span", { class: "grow" }, a),
@@ -1803,6 +1809,7 @@ const alertCard = (alerts) => (alerts.length ? h("div", { class: "card warn", "d
 // Предупреждения сервера — те же, что были на главной
 function homeAlerts(d) {
   const s = d.server || {}, c = d.components || {};
+  forgetAlerts(d.components, c.reboot);
   return [
     s.exists && !s.up ? ["awg0 не поднят — Сервер → Починить", "/server"] : null,
     c.installed && c.reboot && !alertHidden(c.reboot) ? [c.reboot, "/server/module", !/не (собран|загружен)/.test(c.reboot)] : null,
@@ -2553,7 +2560,7 @@ route(/^\/add$/, async (ctx) => {
   const pro = d.profile === "pro";
   ctx.put(title("➕ Новый клиент"),
     h("label", {}, "Имя — латиница, цифры, _ и -, до 32"),
-    h("div", { class: "row" }, name, h("button", { onclick: () => { name.value = free(); } }, "🎲")),
+    h("div", { class: "row" }, name, h("button", { "aria-label": "Случайное имя", title: "Случайное имя", onclick: () => { name.value = free(); } }, "🎲")),
     exp.nodes,
     pro ? h("div", { style: "margin-top:12px" }, mimLabel, h("button", { class: "btn-block", onclick: async () => {
       const box = h("div", { class: "sheet" }, h("h3", {}, "🎭 Мимикрия"));
@@ -2627,6 +2634,7 @@ route(/^\/server$/, async (ctx) => {
   // а переход — в «Протоколе»; в карточке — только то, что правда требует внимания
   const d = r.data || {};
   const state = !d.exists ? "" : d.up ? "on" : "bad";
+  forgetAlerts(r.data, d.reboot);
   ctx.put(title("Сервер"),
     d.reboot && !alertHidden(d.reboot) ? alertCard([[d.reboot, "/server/module", !/не (собран|загружен)/.test(d.reboot)]]) : null,
     d.exists ? ecard({ state, name: "awg0", attrs: { "data-name": "awg0" },
@@ -3827,7 +3835,7 @@ route(/^\/wgobf\/add$/, async (ctx) => {
   const name = h("input", { placeholder: "keenetic_home", maxlength: 32, autocapitalize: "off", autocomplete: "off" });
   ctx.put(title("Новый клиент"), hint("Клиент WG + обфускатор — комплект со ссылкой для Keenetic и конфигами."),
     h("label", {}, "Имя — латиница, цифры, _ и -, до 32"),
-    h("div", { class: "row" }, name, h("button", { onclick: () => { name.value = free(); } }, icon("dices"))),
+    h("div", { class: "row" }, name, h("button", { "aria-label": "Случайное имя", title: "Случайное имя", onclick: () => { name.value = free(); } }, icon("dices"))),
     btn("Создать", (b) => {
       const v = name.value.trim() || free();
       if (!/^[A-Za-z0-9_-]{1,32}$/.test(v)) return fail(new Error("Имя: латиница, цифры, _ и -, до 32"));
@@ -4211,6 +4219,7 @@ route(/^\/log\/([a-z0-9-]+)$/, async (ctx, name) => {
 function showLogin(err = "") {
   token++;                       // недорисованный экран не затрёт форму входа своей ошибкой
   S.me = null;
+  favRefresh();                  // вкладка — снова знак Тулзы, флаг сервера только за входом
   // Экран, прерванный на перезагрузке, сам «reloading» уже не снимет (он не live) —
   // иначе форма входа приглушена и не нажимается. Снимки прежней сессии — тоже долой
   root.classList.remove("reloading");

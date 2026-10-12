@@ -431,6 +431,11 @@ _wgobf_route_label() {  # маршрут → «через …»
 _wgobf_route_why() {  # маршрут
   local sub="${1#*:}"
   [[ "$1" == *:* ]] || sub=""
+  # Туннели включаются только при сервере AWG (их маршруты — от awg0): без него
+  # выход приняли бы, а включить туннель было бы нельзя
+  if [[ "${1%%:*}" =~ ^(warp|xray|exits)$ ]] && ! server_exists; then
+    echo "Туннели работают только вместе с сервером AWG — сначала создай его (Сервер → Создать сервер)"; return 1
+  fi
   case "${1%%:*}" in
     direct) ;;
     warp) warp_configured || { echo "WARP не настроен — Туннели → WARP"; return 1; } ;;
@@ -461,6 +466,9 @@ _wgobf_route_idle() {  # маршрут
 _wgobf_route_put() {  # адрес маршрут
   local f sub="${2#*:}"
   [[ "$2" == *:* ]] || sub=""
+  # Тот же туннель и выход — списки и правила не трогаем: снятое правило exit-нод
+  # вернулось бы не сразу (и без единого пакета мимо туннеля)
+  [[ "$2" != direct && "$(wgobf_route_of "$1")" == "$2" ]] && return 0
   while IFS= read -r f; do peers_del "$f" "$1"; done < <(wgobf_route_files)
   f=$(_wgobf_route_file "${2%%:*}") && peers_add "$f" "$1" "$1${sub:+|$sub}"
   while ip rule del from "$1" 2>/dev/null; do :; done
@@ -468,8 +476,11 @@ _wgobf_route_put() {  # адрес маршрут
 
 # Правила поднятого туннеля заново по спискам. Свои выходы Xray изменились —
 # конфиг Xray пересобирается и туннель перезапускается; список exit-нод
-# обфускатора изменился — перезапускается их маршрутизация.
+# обфускатора изменился — перезапускается их маршрутизация; не изменился —
+# недостающие правила его клиентов ставятся без перезапуска нод (правило могли
+# снять: выход клиента сменили туда и обратно, ip rule flush и т. п.).
 _wgobf_route_refresh() {  # прежние _xray_outs и список exit-нод обфускатора
+  local rules line up ip
   _tunnel_rules_refresh "$WARP_PEERS" "$WARP_IF" "$WARP_TABLE"
   if xray_is_up; then
     # Обфускатор поставлен после Xray — RETURN до его NAT ещё нет
@@ -477,7 +488,19 @@ _wgobf_route_refresh() {  # прежние _xray_outs и список exit-но�
     _tunnel_rules_refresh "$XRAY_PEERS" "$XRAY_IF" "$XRAY_TABLE"
     _xray_outs_apply "${1-}" || true
   fi
-  [[ "$(sort "$EXITS_PEERS.wgobf" 2>/dev/null)" == "${2-}" ]] || exits_reapply
+  if [[ "$(sort "$EXITS_PEERS.wgobf" 2>/dev/null)" != "${2-}" ]]; then
+    exits_reapply
+  elif [[ -s "$EXITS_PEERS.wgobf" ]] && exits_is_up; then
+    rules=$(ip rule show 2>/dev/null)
+    up=$(exits_up_nodes | tr '\n' ' ')
+    while IFS= read -r line; do
+      line="${line//[[:space:]]/}"
+      ip="${line%%|*}"
+      valid_ip "$ip" || continue
+      grep -qE "^$EXITS_TABLE:[[:space:]]+from ${ip//./\\.}[[:space:]]" <<< "$rules" \
+        || exits_peer_rule "$line" "$up" 2>/dev/null
+    done < "$EXITS_PEERS.wgobf"
+  fi
   return 0
 }
 
@@ -530,15 +553,16 @@ wgobf_route_set() {
 # Выбор маршрута из настроенных туннелей → CHOSEN
 _wgobf_route_pick() {
   local opts=(direct) labels=(Напрямую) tags=() nodes=() t i c
-  if warp_configured; then opts+=(warp); labels+=("Через WARP"); fi
-  if xray_installed; then
+  server_exists || info "Туннели — только вместе с сервером AWG: пока он не создан, выход один — напрямую"
+  if server_exists && warp_configured; then opts+=(warp); labels+=("Через WARP"); fi
+  if server_exists && xray_installed; then
     opts+=(xray); labels+=("Через Xray — выход по умолчанию")
     if xray_tun_supported; then
       mapfile -t tags < <(xray_tags)
       for t in "${tags[@]}"; do opts+=("xray:$t"); labels+=("Через Xray — $t"); done
     fi
   fi
-  mapfile -t nodes < <(exits_nodes)
+  mapfile -t nodes < <(server_exists && exits_nodes)
   if (( ${#nodes[@]} )); then
     opts+=(exits); labels+=("Через exit-ноды — общий выход")
     if (( ${#nodes[@]} > 1 )); then
@@ -580,6 +604,8 @@ wgobf_route_menu() {
 wgobf_add_client() {
   local name="$1" base i ip="" priv pub psk bak r xo ex
   [[ "$name" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || { err "Имя: латиница, цифры, _ и -, до 32 символов"; return 1; }
+  # «all» в wgobf route — все клиенты и выход по умолчанию: клиенту с таким именем выход не задать
+  [[ "$name" != all ]] || { err "Имя all занято: так в команде выхода зовутся все клиенты"; return 1; }
   wgobf_clients | grep -qxF "$name" && { err "Клиент $name уже есть"; return 1; }
   base=$(wgobf_get NET); base="${base%.*}"
   for i in $(seq 2 254); do
@@ -785,6 +811,7 @@ EOF
     return 1
   fi
   ufw_allow "$port/udp" "$WGOBF_TAG"
+  web_vpn_changed
   ok "WG + обфускатор запущен: вход $ep:$port/udp, подсеть $net"
   log_info "wgobf: установлен (порт $port, wg $wg_port, сеть $net, маскировка $mask)"
   [[ -z "$first" ]] || wgobf_add_client "$first"
@@ -821,6 +848,7 @@ wgobf_remove() {
   tar -czf "$arch" "${items[@]}" 2>/dev/null && chmod 600 "$arch" && info "Архив на всякий случай: $arch"
   _wgobf_teardown drop
   _wgobf_routes_clear
+  web_vpn_changed
   ok "WG + обфускатор удалён"
   log_info "wgobf: удалён"
 }

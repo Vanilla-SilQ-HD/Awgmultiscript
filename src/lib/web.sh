@@ -135,7 +135,21 @@ _web_fw_del() {  # iptables|ip6tables — наши правила, с каким
 # check — всё на месте (0) или надо apply (1): сама панель раз в 5 минут
 # возвращает правило, если его сбросили, и обновляет список, если сменилась
 # подсеть VPN (новый сервер, обфускатор поставили или удалили).
+# apply и down — по одному (замок): apply из awg2 и из сторожа панели разом
+# снимали бы правило друг у друга и ставили по своему — вышло бы два DROP.
 web_fw_run() {  # apply|down|check
+  local fd="" rc=0
+  [[ "${1:-}" == check ]] && { _web_fw_run check; return; }
+  if command -v flock &>/dev/null && mkdir -p "${WEB_NETS_FILE%/*}" 2>/dev/null \
+     && chmod 700 "${WEB_NETS_FILE%/*}" && { exec {fd}>>"$WEB_NETS_FILE.lock"; } 2>/dev/null; then
+    flock -w 60 "$fd" || echo "замок правила занят дольше 60 с — без него" >&2
+  fi
+  _web_fw_run "$@" || rc=$?
+  [[ -z "$fd" ]] || exec {fd}>&-
+  return "$rc"
+}
+
+_web_fw_run() {  # apply|down|check
   local mode port nets rule
   mode=$(sed -n 's/^WEB_ACCESS=//p' "$WEB_CONF" 2>/dev/null | tail -1)
   port=$(sed -n 's/^WEB_PORT=//p' "$WEB_CONF" 2>/dev/null | tail -1)
@@ -180,7 +194,7 @@ web_fw_run() {  # apply|down|check
 
 _web_fw_emit() {
   emit_script "$WEB_FW_SCRIPT" 'web_fw_run "$@"' WEB_CONF WEB_NETS_FILE WEB_SET WEB_SET6 WEB_FW_TAG WGOBF_STATE \
-    write_file "${RT_FUNCS[@]}" _web_fw_nets _web_fw_set _web_fw_del web_fw_run || return 1
+    write_file "${RT_FUNCS[@]}" _web_fw_nets _web_fw_set _web_fw_del _web_fw_run web_fw_run || return 1
   # Как антисканер — раньше UFW и netfilter-persistent: если правило сохранили
   # в iptables-persistent, при загрузке его набор уже есть и восстановление не
   # падает целиком. После них правило возвращает сама служба панели (ExecStartPre)
@@ -201,6 +215,33 @@ ExecStart=-$WEB_FW_SCRIPT apply
 WantedBy=multi-user.target
 EOF
   systemctl enable "$WEB_FW_UNIT" &>/dev/null || true
+}
+
+# Подсети VPN сменились (сервер AWG или обфускатор поставлены, удалены,
+# восстановлены): список и правило панели — сразу, а не через ≤5 минут
+# проверки самой панели. Удалён последний VPN при доступе «только через VPN» —
+# панель закрылась бы всем, кроме самого сервера (web_access_set такого не
+# ставит): режим — «по адресам», если список адресов сохранён (им владелец
+# уже доверял), иначе «для всех» (вход — по паролю и секретному пути).
+# Сбой здесь установку и удаление не останавливает.
+web_vpn_changed() {
+  local mode
+  web_installed || return 0
+  mode=$(web_access_mode)
+  [[ "$mode" != all ]] || return 0
+  if [[ "$mode" == vpn && -z "$(server_net 2>/dev/null)" ]] && ! wgobf_installed; then
+    _web_access_parse "$(web_conf_get WEB_ALLOW)"
+    if [[ -n "$WEB_ACCESS_LIST" ]]; then mode=ip; web_conf_set WEB_ALLOW "$WEB_ACCESS_LIST" || true
+    else mode=all; fi
+    web_conf_set WEB_ACCESS "$mode" || return 0
+    warn "Веб-панель: VPN на сервере не осталось — «только через VPN» закрыло бы её всем"
+    if [[ "$mode" == ip ]]; then warn "Доступ к панели теперь — только с адресов: $WEB_ACCESS_LIST"
+    else warn "Доступ к панели теперь — для всех (вход по паролю). Ограничить: Веб-панель → Доступ"; fi
+    log_warn "веб-панель: VPN не осталось — доступ $mode${WEB_ACCESS_LIST:+ ($WEB_ACCESS_LIST)}"
+  fi
+  # Не встало (нет ipset и т. п.) — список для самой панели уже записан, правило вернёт её сторож
+  web_fw_run apply &>/dev/null || log_warn "веб-панель: правило доступа после смены VPN не встало"
+  return 0
 }
 
 web_access_mode() {
@@ -243,8 +284,11 @@ web_access_label() {
 # запятую в WEB_ACCESS_LIST; неверные — в WEB_ACCESS_BAD
 _web_access_parse() {
   local e n
+  local -a items
   WEB_ACCESS_LIST="" WEB_ACCESS_BAD=""
-  for e in $(printf '%s ' "$@" | tr ',;' '  '); do
+  # read -a, а не $(...) без кавычек: «*» не должна раскрыться в имена файлов текущего каталога
+  IFS=' ' read -ra items <<< "$(printf '%s ' "$@" | tr ',;\n\t' '    ')"
+  for e in "${items[@]}"; do
     n=$(printf '%s\n' "${e,,}" | _antiscan_parse 4 1; printf '%s\n' "${e,,}" | _antiscan_parse 6 1)
     if [[ -z "$n" ]]; then WEB_ACCESS_BAD+="${WEB_ACCESS_BAD:+, }$e"
     elif [[ ",$WEB_ACCESS_LIST," != *",$n,"* ]]; then WEB_ACCESS_LIST+="${WEB_ACCESS_LIST:+,}$n"; fi
